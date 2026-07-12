@@ -32,13 +32,16 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
-          # go.mod deliberately floors at a minor version ("go 1.26"), not an
-          # exact patch, to avoid forcing local dev toolchain fetches (see
-          # PR history on issue #2). check-latest ensures CI still resolves
-          # the newest available 1.26.x patch release rather than a stale
-          # cached one, so govulncheck is scanning against a patched
-          # toolchain (e.g. GO-2026-5856, fixed in crypto/tls@go1.26.5).
+          # Pin the Go MINOR explicitly (not go-version-file) so check-latest
+          # resolves the newest 1.26.x patch. go.mod's `go` directive is
+          # `go 1.26.0` (an exact patch that the k8s.io v0.36 dependency graph
+          # forces — bumping it to `go 1.26` is rejected by the module graph),
+          # and go-version-file would make setup-go install exactly 1.26.0,
+          # which is UNPATCHED — govulncheck would then flag stdlib vulns fixed
+          # in later 1.26.x (GO-2026-5856 etc.). Reading the minor here keeps
+          # govulncheck scanning against a patched toolchain. Bump this when the
+          # project moves to a new Go minor.
+          go-version: "1.26"
           check-latest: true
 
       - name: Set up Task
@@ -128,7 +131,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
+          go-version: "1.26"
           check-latest: true
 
       # The kind + KWOK harness (internal/testcluster, issue #5) needs only
@@ -152,7 +155,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
+          go-version: "1.26"
           check-latest: true
 
       - name: Set up Node
@@ -238,7 +241,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
+          go-version: "1.26"
           check-latest: true
 
       - name: Set up ko
