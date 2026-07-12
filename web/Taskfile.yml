@@ -42,3 +42,16 @@ tasks:
     deps: [install]
     cmds:
       - npm test
+
+  e2e:
+    desc: >
+      Run the Playwright end-to-end smoke suite. Playwright's webServer builds
+      and launches the real single binary (root `task build`), so run this from
+      a clean tree. Screenshots/video land in web/e2e-results.
+    deps: [install]
+    cmds:
+      # Chromium is the only browser the suite drives; install is idempotent
+      # and fast once the build is cached. CI (issue #8) needs --with-deps for
+      # the system libraries on a fresh runner.
+      - npx playwright install chromium
+      - npm run e2e
