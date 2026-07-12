@@ -46,6 +46,14 @@ jobs:
         with:
           version: 3.x
 
+      # The frontend TypeScript wire types are generated from the Go SceneState
+      # contract (issue #10). Regenerate on a pristine tree and fail on any diff
+      # so a Go struct change without a matching regenerate-and-commit can't
+      # silently ship mismatched types. Runs here (not the Frontend job) because
+      # tygo needs Go. Placed before Build, which itself regenerates.
+      - name: Codegen drift check
+        run: task codegen:verify
+
       - name: Build
         run: task build
 
