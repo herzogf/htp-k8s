@@ -48,13 +48,24 @@ async function litPixelCount(page: Page, canvas: Locator): Promise<number> {
 test('smoke: page loads, the canvas renders, and a well-formed /ws frame arrives', async ({
   page,
 }, testInfo) => {
-  // Start listening for /ws frames before navigating, so the message the
-  // backend sends immediately on connect can't be missed. The received frame
-  // is how we assert the message actually reached the browser.
-  const wsMessage = new Promise<string>((resolve) => {
+  // Start listening for /ws frames before navigating, so the frame the backend
+  // sends immediately on connect can't be missed. Resolve on the first frame
+  // that is a well-formed view-mode message rather than on the first frame of
+  // any kind: that keeps the assertion resilient to issue #10's SceneState
+  // frames arriving alongside or before the view-mode frame, without freezing
+  // an ordering assumption. The received frame is how we assert the message
+  // actually reached the browser.
+  const viewModeFrame = new Promise<{ type: unknown; viewMode: unknown }>((resolve) => {
     page.on('websocket', (ws) => {
       ws.on('framereceived', ({ payload }) => {
-        if (typeof payload === 'string') resolve(payload)
+        if (typeof payload !== 'string') return
+        let frame: { type?: unknown; viewMode?: unknown }
+        try {
+          frame = JSON.parse(payload)
+        } catch {
+          return
+        }
+        if (frame.type === 'viewMode') resolve({ type: frame.type, viewMode: frame.viewMode })
       })
     })
   })
@@ -65,13 +76,12 @@ test('smoke: page loads, the canvas renders, and a well-formed /ws frame arrives
   const canvas = page.locator('canvas')
   await expect(canvas).toBeVisible()
 
-  // A well-formed view-mode frame reached the browser over /ws. We parse the
-  // frame and assert its shape rather than a frozen string, so this stays green
-  // as the wire format grows (issue #10's SceneState). The app connects to a
-  // real kind cluster in CI (ADR-0004), so a valid frame arriving is also proof
-  // the binary started against the cluster.
-  const payload = await wsMessage
-  const frame = JSON.parse(payload) as { type?: unknown; viewMode?: unknown }
+  // A well-formed view-mode frame reached the browser over /ws. We assert its
+  // shape rather than a frozen string, so this stays green as the wire format
+  // grows (issue #10's SceneState). The app connects to a real kind cluster in
+  // CI (ADR-0004), so a valid frame arriving is also proof the binary started
+  // against the cluster.
+  const frame = await viewModeFrame
   expect(frame.type).toBe('viewMode')
   expect(VIEW_MODES).toContain(frame.viewMode)
 
