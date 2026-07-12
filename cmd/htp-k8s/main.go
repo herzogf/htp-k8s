@@ -49,9 +49,14 @@ func run(args []string, envAddr string) error {
 		return err
 	}
 
+	mode, err := resolveViewMode()
+	if err != nil {
+		return err
+	}
+
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: server.NewHandler(server.Config{ViewMode: detectViewMode()}),
+		Handler: server.NewHandler(server.Config{ViewMode: mode}),
 	}
 
 	log.Printf("htp-k8s backend listening on %s", addr)
@@ -61,25 +66,33 @@ func run(args []string, envAddr string) error {
 	return nil
 }
 
-// detectViewMode connects to the cluster via the current kubeconfig context
-// and runs the startup permission probe to pick the default View Mode. Per
-// ADR-0002 it never fails startup: if no cluster is reachable (no kubeconfig,
-// API server down) or the probe errors, it logs the reason and falls back to
-// Namespace-mode, keeping the server serving the frontend and /ws regardless.
-func detectViewMode() kube.ViewMode {
+// resolveViewMode connects to the cluster via the current kubeconfig context
+// and determines the startup View Mode.
+//
+// It returns an error (so the process exits non-zero) only when the API server
+// cannot be reached at all — see kube.EnsureReachable for why an unreachable
+// cluster is a hard failure while a reachable-but-forbidden one is not. A
+// reachable cluster where the user merely cannot list Nodes degrades to
+// Namespace-mode and keeps serving, per ADR-0002.
+func resolveViewMode() (kube.ViewMode, error) {
 	clientset, err := kube.NewClientset()
 	if err != nil {
-		log.Printf("no cluster client (%v); defaulting to %s view mode", err, kube.ViewModeNamespace)
-		return kube.ViewModeNamespace
+		return "", fmt.Errorf("connect to kubernetes cluster: %w", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 
+	if err := kube.EnsureReachable(ctx, clientset); err != nil {
+		return "", err
+	}
+
 	mode, err := kube.DetectViewMode(ctx, clientset)
 	if err != nil {
+		// Reachable but the probe itself errored (e.g. a 403 on the SSAR):
+		// ADR-0002 degradation — log why and carry on in Namespace-mode.
 		log.Printf("permission probe: %v", err)
 	}
 	log.Printf("detected view mode: %s", mode)
-	return mode
+	return mode, nil
 }

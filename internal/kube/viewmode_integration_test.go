@@ -5,6 +5,7 @@ package kube_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -32,6 +33,34 @@ import (
 func TestDetectViewMode_RealCluster(t *testing.T) {
 	c := testcluster.New(t, testcluster.Options{})
 	ctx := context.Background()
+
+	t.Run("real cluster is reachable", func(t *testing.T) {
+		if err := kube.EnsureReachable(ctx, c.Clientset); err != nil {
+			t.Fatalf("EnsureReachable against real cluster: %v", err)
+		}
+	})
+
+	t.Run("bogus endpoint is unreachable", func(t *testing.T) {
+		// A syntactically-valid config pointing at an address nothing listens
+		// on: the client builds fine, but the transport probe must fail — the
+		// real path exercised at startup when the cluster is down or the
+		// context is wrong. Uses TEST-NET-1 (RFC 5737), reserved for docs and
+		// guaranteed non-routable. A short context deadline makes it fail fast
+		// even if the address black-holes rather than refusing.
+		badCfg := rest.CopyConfig(c.RESTConfig)
+		badCfg.Host = "https://192.0.2.1:6443"
+		badClient, err := kubernetes.NewForConfig(badCfg)
+		if err != nil {
+			t.Fatalf("build client for bogus endpoint: %v", err)
+		}
+
+		badCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
+		if err := kube.EnsureReachable(badCtx, badClient); err == nil {
+			t.Fatal("EnsureReachable = nil for an unreachable endpoint, want an error")
+		}
+	})
 
 	t.Run("cluster-admin can list nodes selects node mode", func(t *testing.T) {
 		mode, err := kube.DetectViewMode(ctx, c.Clientset)
