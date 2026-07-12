@@ -14,6 +14,16 @@ A shared, version-controlled knowledge base for AI agents working on htp-k8s. Wh
 - **`go.mod` floors at `go 1.26` (minor version), deliberately not an exact patch.** This avoids forcing local dev machines to fetch a specific toolchain. Do **not** "tighten" it to an exact patch — that decision was made and reversed once already (see PR history on issue #2). CI compensates with `check-latest: true` on `actions/setup-go` so it still scans against the newest patched toolchain.
 - **`task test` runs `go test ./cmd/... ./internal/...`, not `./...`** — scoped on purpose. After `npm ci`, `web/node_modules` can contain stray vendored `.go` files (e.g. the `flatted` package) that `./...` would wrongly pull into the module's test graph.
 
+## Wire contract codegen (SceneState → TypeScript, issue #10)
+
+- **The frontend/backend wire contract is Go-first.** `SceneState` (and the `ViewMode` type/values) are defined once in **`internal/scene`** — the single source of truth. The frontend's TypeScript types are **generated** from it into **`web/src/generated/scenestate.ts`** (checked in); never hand-edit that file.
+- **Regenerate with `task codegen`** (runs `go tool tygo generate`, config in root `tygo.yaml`). Root `task build` runs `codegen` before `web:build` so the frontend always typechecks against fresh types.
+- **Drift gate: `task codegen:verify`** regenerates then `git diff --exit-code -- web/src/generated`, so a Go struct change without a matching regenerate-and-commit fails. It runs in the **Backend (Go)** CI job (a step before `Build`), **not** the Frontend job — tygo needs the Go toolchain, which the Node job lacks.
+- **tygo (`github.com/gzuidhof/tygo`) is a pinned Go *tool* dependency** (`go get -tool`, invoked via `go tool tygo`). It correctly stays `// indirect` in `go.mod` after `go mod tidy` (nothing imports it in code) — that's tidy-stable, don't "fix" it.
+- **tygo emits `any` for a field whose type lives in another Go package** (e.g. it can't resolve `kube.ViewMode` from a `scene` struct). Keep every type reachable from `SceneState` **co-located in `internal/scene`** so the generated TS is fully typed. This is why `ViewMode` was moved out of `internal/kube` into `internal/scene`.
+- **`web/src/generated` is ESLint- and Prettier-ignored** (generated, not hand-styled) — `web/eslint.config.js` `globalIgnores` + `web/.prettierignore`. It is still typechecked by `tsc -b` (tsconfig `include: ["src"]`), so malformed generated TS still fails the frontend build.
+- **`/ws` sends a `scene.SceneState` JSON snapshot on connect** (replaced the ad-hoc `{"type":"viewMode",...}` message from #9). Per ADR-0007, incremental Scene Deltas follow the snapshot — a later ticket.
+
 ## CI & security scanning
 
 - **`govulncheck ./...` is a blocking PR check** (Backend job). It fails the build on any *reachable* vulnerability. This has bitten PRs twice; treat it as a first-class gate, and run `govulncheck ./...` locally before pushing.
