@@ -19,6 +19,26 @@ here, or `task --taskfile web/Taskfile.yml <name>` from the repo root):
 - `npm run lint` — ESLint + Prettier formatting check
 - `npm run format` — apply Prettier formatting
 - `npm test` — run the Vitest suite
+- `npm run e2e` — run the Playwright end-to-end suite (see below)
+
+## End-to-end tests (Playwright)
+
+`e2e/` holds the Playwright suite (`*.spec.ts`), configured in
+`playwright.config.ts`. Unlike the Vitest unit tests, these drive the **real
+built app**: Playwright's `webServer` runs the root `task build` to produce the
+single embedded binary (ADR-0001), launches it, and loads the served page in a
+real headless Chromium. This is the genuine full-system check (ADR-0004), and
+its screenshots and video are the project's visual proof of behavior.
+
+Run it with `task e2e` (from here) or `npm run e2e`. The browser binary must be
+present first — `npx playwright install chromium` (the `task e2e` target does
+this for you). The suite builds and launches on port 8080 by default; set
+`HTP_K8S_E2E_PORT` to use another port (the frontend's `/ws` target is rebuilt
+to match).
+
+Artifacts land in `e2e-results/` (per-test screenshot, video, trace) and an
+HTML report in `playwright-report/` — both git-ignored, and the predictable
+location a future CI job (issue #8) uploads.
 
 ## Configuration
 

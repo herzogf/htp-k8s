@@ -6,17 +6,33 @@ import reactRefresh from 'eslint-plugin-react-refresh'
 import globals from 'globals'
 import tseslint from 'typescript-eslint'
 
-export default tseslint.config(globalIgnores(['dist', 'coverage']), {
-  files: ['**/*.{ts,tsx}'],
-  extends: [
-    js.configs.recommended,
-    ...tseslint.configs.recommended,
-    reactHooks.configs.flat['recommended-latest'],
-    reactRefresh.configs.vite,
-    eslintConfigPrettier,
-  ],
-  languageOptions: {
-    ecmaVersion: 2023,
-    globals: globals.browser,
+export default tseslint.config(
+  globalIgnores(['dist', 'coverage', 'e2e-results', 'playwright-report']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      js.configs.recommended,
+      ...tseslint.configs.recommended,
+      reactHooks.configs.flat['recommended-latest'],
+      reactRefresh.configs.vite,
+      eslintConfigPrettier,
+    ],
+    languageOptions: {
+      ecmaVersion: 2023,
+      globals: globals.browser,
+    },
   },
-})
+  {
+    // Playwright config + e2e tests run in Node (the test runner), not the app
+    // bundle: they need Node globals, and the react-refresh/component-export
+    // conventions that guard the frontend don't apply. Their in-browser
+    // page.evaluate callbacks still reference browser globals, so allow both.
+    files: ['playwright.config.ts', 'e2e/**/*.ts'],
+    languageOptions: {
+      globals: { ...globals.browser, ...globals.node },
+    },
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+)

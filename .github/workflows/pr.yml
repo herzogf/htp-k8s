@@ -1,8 +1,14 @@
 name: PR
 
-# Foundation of the PR-blocking CI posture (issue #1 / ADR-0005): the fast,
-# source-level checks run and are required on every PR. Integration/e2e
-# (kind + KWOK, Playwright) is added on top of this in a later ticket (#8).
+# PR-blocking CI posture (issue #1 / ADR-0005). Two tiers (ADR-0004):
+#   * Fast, source-level checks — Backend (Go), Frontend (Node) — give quick
+#     feedback and are the required status checks on `main`.
+#   * Slower, heavier checks added by issue #8 — the kind + KWOK backend
+#     integration suite, the Playwright e2e suite, and a report-only Trivy
+#     scan of the ko-built container image — run as their own separate jobs
+#     so the fast tier stays fast.
+# NOTE (governance): making the three #8 jobs *required* status checks is a
+# change to the `main` branch-protection ruleset and is left to the repo owner.
 
 on:
   pull_request:
@@ -94,3 +100,175 @@ jobs:
       # exit code already fails on any reported vulnerability.
       - name: npm audit
         run: npm audit
+
+  # ---------------------------------------------------------------------------
+  # Heavier, second-tier checks (issue #8). Separate jobs so the fast tier
+  # above keeps giving quick feedback (ADR-0004).
+  # ---------------------------------------------------------------------------
+
+  integration:
+    name: Backend integration (kind + KWOK)
+    runs-on: ubuntu-latest
+    # kind pulls a node image and boots a real single-node cluster; give it
+    # more headroom than the fast jobs. Ran ~45s live in dev (issue #5), but
+    # the first-run image pull on a cold runner adds to that.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # The kind + KWOK harness (internal/testcluster, issue #5) needs only
+      # Docker — already present on GitHub-hosted ubuntu-latest runners. These
+      # tests are gated behind `//go:build integration`, so the fast Backend
+      # job's `task test` deliberately does NOT run them; this job does.
+      - name: Integration tests (kind + KWOK)
+        run: go test -tags=integration ./cmd/... ./internal/...
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Playwright's webServer builds and launches the real single binary via
+      # the root `task build` (npm ci + vite build + Go embed + compile), so
+      # this job needs Go, Node, and go-task all on PATH (ADR-0001/0004).
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      # The `web:e2e` task only runs `playwright install chromium` (browser
+      # download). A fresh runner also needs the browser's system libraries,
+      # which only `--with-deps` (an apt step) installs — so do it here.
+      - name: Install Playwright browser + system deps
+        run: npx playwright install --with-deps chromium
+        working-directory: web
+
+      # ADR-0004: e2e is the genuine full-system check and was always meant to
+      # run against a real cluster. Since issue #9 the binary FAILS startup when
+      # it cannot reach a Kubernetes cluster, so the app Playwright's webServer
+      # launches needs one. Provision a single-node kind cluster (Docker is
+      # already present on ubuntu-latest, as the integration job relies on). A
+      # fresh kind cluster makes the CI user cluster-admin, so the app detects
+      # Node view mode. kubeconfig is written to the default ~/.kube/config.
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: htp-k8s-e2e
+
+      # Point client-go (via KUBECONFIG) at the kind cluster explicitly and
+      # confirm it is reachable before launching the app, so a cluster-provision
+      # failure surfaces here rather than as an opaque webServer start failure.
+      # Playwright's webServer inherits this process env (see playwright.config).
+      - name: Verify cluster is reachable and export KUBECONFIG
+        run: |
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Run Playwright e2e suite
+        run: task web:e2e
+
+      # Screenshots, video, and traces are the visual proof of behavior
+      # (ADR-0004) — always upload them, pass or fail, so they are retrievable
+      # from the PR.
+      - name: Upload e2e results (screenshots, video, traces)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-e2e-results
+          path: web/e2e-results/
+          if-no-files-found: warn
+
+      - name: Upload Playwright HTML report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-report
+          path: web/playwright-report/
+          if-no-files-found: ignore
+
+  container-scan:
+    name: Container scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Required to upload the SARIF results to the GitHub Security tab so
+      # findings annotate the PR (ADR-0005).
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+
+      # Build a throwaway image into the local Docker daemon (no registry
+      # push). The committed placeholder internal/server/dist/index.html lets
+      # the go:embed succeed without a frontend build — enough to produce an
+      # image for CVE scanning. The proper ko/GoReleaser release build is a
+      # separate ticket (#30).
+      - name: Build local container image (ko)
+        id: build
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: |
+          # --local loads the image into the runner's Docker daemon and prints
+          # its reference (e.g. ko.local/htp-k8s-<hash>@sha256:...) to stdout.
+          image="$(ko build --local ./cmd/htp-k8s)"
+          echo "Built image: ${image}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      # Report-only, never blocking (ADR-0005): the scan surfaces findings but
+      # must not fail the PR, so pin exit-code to 0 and don't let a scanner
+      # hiccup break the job.
+      - name: Trivy scan (report-only)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+          ignore-unfixed: false
+
+      - name: Upload Trivy SARIF to Security tab
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container
