@@ -1,9 +1,12 @@
 import { type Locator, type Page, expect, test } from '@playwright/test'
 
-// The backend's hardcoded placeholder (internal/server/server.go). Until a
-// later ticket wires real cluster state, /ws sends exactly this once on
-// connect, and the frontend renders it inside the R3F canvas.
-const PLACEHOLDER_MESSAGE = 'htp-k8s backend placeholder - no cluster connectivity yet'
+// The e2e job runs the app against a real single-node kind cluster (ADR-0004),
+// so /ws now carries the detected View Mode (issue #9), not the old clusterless
+// placeholder string. We assert a *well-formed* view-mode frame arrives rather
+// than a frozen payload, so this survives the wire format growing (e.g. the
+// SceneState message in issue #10): the frame must be valid JSON tagged
+// `type: "viewMode"` with a `viewMode` of "node" or "namespace".
+const VIEW_MODES = ['node', 'namespace'] as const
 
 /**
  * Counts the "lit" pixels in the canvas — pixels brighter than the near-black
@@ -42,16 +45,27 @@ async function litPixelCount(page: Page, canvas: Locator): Promise<number> {
   )
 }
 
-test('smoke: page loads, the canvas renders, and the backend WS message arrives', async ({
+test('smoke: page loads, the canvas renders, and a well-formed /ws frame arrives', async ({
   page,
 }, testInfo) => {
-  // Start listening for /ws frames before navigating, so the message the
-  // backend sends immediately on connect can't be missed. The received frame
-  // is how we assert the message actually reached the browser.
-  const wsMessage = new Promise<string>((resolve) => {
+  // Start listening for /ws frames before navigating, so the frame the backend
+  // sends immediately on connect can't be missed. Resolve on the first frame
+  // that is a well-formed view-mode message rather than on the first frame of
+  // any kind: that keeps the assertion resilient to issue #10's SceneState
+  // frames arriving alongside or before the view-mode frame, without freezing
+  // an ordering assumption. The received frame is how we assert the message
+  // actually reached the browser.
+  const viewModeFrame = new Promise<{ type: unknown; viewMode: unknown }>((resolve) => {
     page.on('websocket', (ws) => {
       ws.on('framereceived', ({ payload }) => {
-        if (typeof payload === 'string') resolve(payload)
+        if (typeof payload !== 'string') return
+        let frame: { type?: unknown; viewMode?: unknown }
+        try {
+          frame = JSON.parse(payload)
+        } catch {
+          return
+        }
+        if (frame.type === 'viewMode') resolve({ type: frame.type, viewMode: frame.viewMode })
       })
     })
   })
@@ -62,11 +76,14 @@ test('smoke: page loads, the canvas renders, and the backend WS message arrives'
   const canvas = page.locator('canvas')
   await expect(canvas).toBeVisible()
 
-  // The backend's placeholder message — this exact string, not just any frame —
-  // reached the browser over /ws. This is the machine-checkable half of "the
-  // placeholder message is displayed": the frontend renders whatever /ws last
-  // delivered (src/App.tsx -> Scene), so once this arrives it is the scene text.
-  await expect(wsMessage).resolves.toBe(PLACEHOLDER_MESSAGE)
+  // A well-formed view-mode frame reached the browser over /ws. We assert its
+  // shape rather than a frozen string, so this stays green as the wire format
+  // grows (issue #10's SceneState). The app connects to a real kind cluster in
+  // CI (ADR-0004), so a valid frame arriving is also proof the binary started
+  // against the cluster.
+  const frame = await viewModeFrame
+  expect(frame.type).toBe('viewMode')
+  expect(VIEW_MODES).toContain(frame.viewMode)
 
   // "The canvas renders": wait until it has lit pixels above the near-black
   // background. drei's SDF text loads its font and draws a frame or two after
@@ -78,11 +95,11 @@ test('smoke: page loads, the canvas renders, and the backend WS message arrives'
   // the /ws assertion above and the screenshot below cover that.
   await expect.poll(() => litPixelCount(page, canvas), { timeout: 20_000 }).toBeGreaterThan(0)
 
-  // The visual proof the placeholder message is displayed (ADR-0004: this
-  // project's e2e exists to give that proof without a local run). Taken after
-  // the /ws frame has arrived and the scene has drawn, so it captures the
-  // message rather than the waiting fallback. A composed, predictably-named
-  // file for a future CI job (issue #8) to upload, alongside Playwright's own
+  // The visual proof the scene rendered against the real cluster (ADR-0004:
+  // this project's e2e exists to give that proof without a local run). Taken
+  // after the /ws frame has arrived and the scene has drawn, so it captures the
+  // rendered scene rather than the waiting fallback. A composed, predictably-
+  // named file for the CI job (issue #8) to upload, alongside Playwright's own
   // per-test video in outputDir.
   await page.screenshot({ path: testInfo.outputPath('smoke.png') })
 })
