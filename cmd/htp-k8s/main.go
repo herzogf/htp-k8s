@@ -1,0 +1,55 @@
+// Command htp-k8s is the entrypoint for the htp-k8s backend server.
+package main
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+
+	"github.com/herzogf/htp-k8s/internal/server"
+)
+
+const defaultAddr = ":8080"
+
+func main() {
+	if err := run(os.Args[1:], os.Getenv("HTP_K8S_ADDR")); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// resolveAddr determines the listen address from CLI flags (highest
+// precedence), falling back to envAddr, then defaultAddr.
+func resolveAddr(args []string, envAddr string) (string, error) {
+	addrDefault := defaultAddr
+	if envAddr != "" {
+		addrDefault = envAddr
+	}
+
+	fs := flag.NewFlagSet("htp-k8s", flag.ContinueOnError)
+	addr := fs.String("addr", addrDefault, "address (host:port) the server listens on; overrides HTP_K8S_ADDR")
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	return *addr, nil
+}
+
+func run(args []string, envAddr string) error {
+	addr, err := resolveAddr(args, envAddr)
+	if err != nil {
+		return err
+	}
+
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: server.NewHandler(),
+	}
+
+	log.Printf("htp-k8s backend listening on %s", addr)
+	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("server error: %w", err)
+	}
+	return nil
+}
