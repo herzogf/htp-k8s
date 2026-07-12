@@ -1,0 +1,9 @@
+# AI-team development model: role-specialized subagents instead of one generic implementer
+
+This project is developed entirely by AI (Claude Code), directed by the user rather than hand-written — including future features, not just v1. Rather than routing every ticket through one generic implementer, we defined role-specialized subagents in `.claude/agents/`: **backend-developer**, **frontend-developer**, **backend-tester**, **frontend-tester**, **release-manager** — each scoped to its area of this repo (Go backend / React frontend / kind+KWOK integration tests / Playwright e2e / release pipeline) with instructions specific to the architecture already recorded in this project's ADRs and `CONTEXT.md`.
+
+The benefit this is meant to unlock: independent tickets (e.g. a frontend-only ticket and a backend-only ticket with no blocking dependency between them) can be dispatched to different subagents in parallel, each working in an isolated git worktree, rather than serializing all work through a single context window.
+
+**Architect/orchestrator is not a subagent.** That role — reading the spec/tickets, deciding sequential vs. parallel dispatch, choosing which subagent handles which ticket, and running the final cross-cutting `/code-review` once component work lands — is played by whichever session is driving `/implement`, since it needs full context of the tickets and can't usefully delegate the delegation decision itself.
+
+**Release-manager has no standing authorization to cut a release.** It prepares everything (changelog draft, dry-run verification via `goreleaser --snapshot`, version-bump PR) autonomously, but the actual `git tag` + push that triggers the real, externally-visible GoReleaser publish always requires the user's explicit go-ahead in that turn. A published release is effectively irreversible and visible to others, unlike the rest of this workflow.

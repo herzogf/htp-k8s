@@ -1,0 +1,9 @@
+# Scene updates are snapshot + incremental deltas, not full-state resends
+
+At the target scale (50+ nodes, thousands of pods), a full `SceneState` snapshot can run to the order of a megabyte of JSON. Re-serializing and sending that on every single Pod/Node/Event change — which, in a busy production cluster, can happen many times per second — would waste backend CPU on redundant recomputation, waste bandwidth (irrelevant on localhost today, but relevant the moment this runs against a remote/hosted cluster), and load the frontend's event loop with large, frequent deserialize+diff work competing against the 3D rendering itself.
+
+We decided the backend sends one full `SceneState` snapshot on initial connection (and on reconnect), then a stream of small incremental **Scene Delta** messages afterward — a Tower or Panel added, updated, or removed, or a blink triggered — rather than re-sending the whole state each time. This mirrors Kubernetes' own **LIST + WATCH** pattern, which the backend is already consuming upstream from the k8s API, so the shape isn't a new invention: k8s watch events in, scene-domain deltas out.
+
+This adds a distinct, independently-testable seam on the frontend: a small reconciliation reducer that applies incoming Scene Deltas to the frontend's local `SceneState` copy, separate from (and feeding into) the existing `SceneState` → render tree seam. Delta-application bugs (an update landing on the wrong Panel, a removed Panel never cleaned up) are a different failure mode from rendering bugs and are worth catching in isolation.
+
+Rejected alternative: throttled full-state resends (e.g. at most once every N milliseconds). This reduces frequency but each send is still O(cluster size) — at thousands of pods, still real, avoidable waste for an always-on visualization, with no advantage over deltas beyond superficially simpler code.
