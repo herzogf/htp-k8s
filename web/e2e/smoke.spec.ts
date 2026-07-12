@@ -1,11 +1,12 @@
 import { type Locator, type Page, expect, test } from '@playwright/test'
 
 // The e2e job runs the app against a real single-node kind cluster (ADR-0004),
-// so /ws now carries the detected View Mode (issue #9), not the old clusterless
-// placeholder string. We assert a *well-formed* view-mode frame arrives rather
-// than a frozen payload, so this survives the wire format growing (e.g. the
-// SceneState message in issue #10): the frame must be valid JSON tagged
-// `type: "viewMode"` with a `viewMode` of "node" or "namespace".
+// so on connect /ws sends a SceneState snapshot (issue #10) — the generated
+// wire contract, currently carrying the detected View Mode (issue #9) — not the
+// old clusterless placeholder string. We assert a *well-formed* snapshot arrives
+// rather than a frozen payload, so this survives SceneState growing (Towers and
+// Panels in later tickets): the frame must be valid JSON with a `viewMode` of
+// "node" or "namespace", and we don't over-constrain the rest of the object.
 const VIEW_MODES = ['node', 'namespace'] as const
 
 /**
@@ -45,27 +46,29 @@ async function litPixelCount(page: Page, canvas: Locator): Promise<number> {
   )
 }
 
-test('smoke: page loads, the canvas renders, and a well-formed /ws frame arrives', async ({
+test('smoke: page loads, the canvas renders, and a well-formed /ws SceneState arrives', async ({
   page,
 }, testInfo) => {
-  // Start listening for /ws frames before navigating, so the frame the backend
-  // sends immediately on connect can't be missed. Resolve on the first frame
-  // that is a well-formed view-mode message rather than on the first frame of
-  // any kind: that keeps the assertion resilient to issue #10's SceneState
-  // frames arriving alongside or before the view-mode frame, without freezing
-  // an ordering assumption. The received frame is how we assert the message
-  // actually reached the browser.
-  const viewModeFrame = new Promise<{ type: unknown; viewMode: unknown }>((resolve) => {
+  // Start listening for /ws frames before navigating, so the SceneState snapshot
+  // the backend sends immediately on connect can't be missed. Resolve on the
+  // first frame that parses as JSON and carries a valid `viewMode`, rather than
+  // on the first frame of any kind: that keeps the assertion resilient to future
+  // Scene Delta frames (ADR-0007) arriving alongside or after the snapshot,
+  // without freezing an ordering assumption. The received frame is how we assert
+  // the message actually reached the browser.
+  const sceneStateFrame = new Promise<{ viewMode: unknown }>((resolve) => {
     page.on('websocket', (ws) => {
       ws.on('framereceived', ({ payload }) => {
         if (typeof payload !== 'string') return
-        let frame: { type?: unknown; viewMode?: unknown }
+        let frame: { viewMode?: unknown }
         try {
           frame = JSON.parse(payload)
         } catch {
           return
         }
-        if (frame.type === 'viewMode') resolve({ type: frame.type, viewMode: frame.viewMode })
+        if (VIEW_MODES.includes(frame.viewMode as (typeof VIEW_MODES)[number])) {
+          resolve({ viewMode: frame.viewMode })
+        }
       })
     })
   })
@@ -76,13 +79,13 @@ test('smoke: page loads, the canvas renders, and a well-formed /ws frame arrives
   const canvas = page.locator('canvas')
   await expect(canvas).toBeVisible()
 
-  // A well-formed view-mode frame reached the browser over /ws. We assert its
-  // shape rather than a frozen string, so this stays green as the wire format
-  // grows (issue #10's SceneState). The app connects to a real kind cluster in
-  // CI (ADR-0004), so a valid frame arriving is also proof the binary started
-  // against the cluster.
-  const frame = await viewModeFrame
-  expect(frame.type).toBe('viewMode')
+  // A well-formed SceneState snapshot reached the browser over /ws. We assert
+  // its `viewMode` is one of the valid values rather than a frozen payload, and
+  // don't over-constrain the rest of the object, so this stays green as
+  // SceneState grows (Towers/Panels in later tickets). The app connects to a
+  // real kind cluster in CI (ADR-0004), so a valid frame arriving is also proof
+  // the binary started against the cluster.
+  const frame = await sceneStateFrame
   expect(VIEW_MODES).toContain(frame.viewMode)
 
   // "The canvas renders": wait until it has lit pixels above the near-black
