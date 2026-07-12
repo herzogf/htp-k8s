@@ -3,6 +3,7 @@ module github.com/herzogf/htp-k8s
 go 1.26
 
 require (
+	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	k8s.io/api v0.34.9
 	k8s.io/apimachinery v0.34.9
 	k8s.io/client-go v0.34.9

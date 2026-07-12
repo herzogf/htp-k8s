@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>htp-k8s (unbuilt placeholder)</title>
+  </head>
+  <body>
+    <p>
+      This is a placeholder checked into version control so that
+      <code>go build</code>/<code>go vet</code>/<code>go test</code> succeed
+      even without a frontend build having run first (Go's
+      <code>go:embed</code> requires the embedded directory to exist and be
+      non-empty at compile time).
+    </p>
+    <p>
+      Run <code>task build</code> from the repo root to overwrite this
+      directory with the real frontend build output (<code>web/dist</code>)
+      before it's embedded into the binary.
+    </p>
+  </body>
+</html>
