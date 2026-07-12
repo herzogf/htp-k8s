@@ -1,9 +1,9 @@
 # Frontend build orchestration (web/ only).
 #
-# Root-level task unification (a single `task build` driving both the Go
-# backend and this frontend) happens in a later ticket, once both scaffolds
-# have merged. Until then, run these targets from within web/, or point
-# `task` at this file directly: `task --taskfile web/Taskfile.yml build`.
+# Included by the root Taskfile (as the `web:` namespace), which drives a
+# single `task build`/`task test` across both this frontend and the Go
+# backend (issue #4). These targets can still be run directly from within
+# web/, or via `task --taskfile web/Taskfile.yml build`.
 version: '3'
 
 silent: true
