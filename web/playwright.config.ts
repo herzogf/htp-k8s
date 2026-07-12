@@ -47,6 +47,14 @@ export default defineConfig({
     // embed + compile (root Taskfile).
     command: `VITE_WS_URL=ws://localhost:${port}/ws task build && ./bin/htp-k8s -addr :${port}`,
     cwd: repoRoot,
+    // Since issue #9 the binary fails startup unless it can reach a Kubernetes
+    // cluster (client-go's default loading rules honor KUBECONFIG / ~/.kube/
+    // config). In CI the e2e job provisions a kind cluster and exports
+    // KUBECONFIG; pass it through so the launched binary connects to it. Locally
+    // it forwards whatever cluster the developer has configured. `env` merges
+    // with process.env, so an undefined KUBECONFIG here is a harmless no-op and
+    // client-go still falls back to ~/.kube/config.
+    env: { KUBECONFIG: process.env.KUBECONFIG ?? '' },
     url: `${baseURL}/healthz`,
     // The cold build (frontend + Go) can take a while; allow generous headroom.
     timeout: 300_000,

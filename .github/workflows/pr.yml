@@ -170,6 +170,28 @@ jobs:
         run: npx playwright install --with-deps chromium
         working-directory: web
 
+      # ADR-0004: e2e is the genuine full-system check and was always meant to
+      # run against a real cluster. Since issue #9 the binary FAILS startup when
+      # it cannot reach a Kubernetes cluster, so the app Playwright's webServer
+      # launches needs one. Provision a single-node kind cluster (Docker is
+      # already present on ubuntu-latest, as the integration job relies on). A
+      # fresh kind cluster makes the CI user cluster-admin, so the app detects
+      # Node view mode. kubeconfig is written to the default ~/.kube/config.
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: htp-k8s-e2e
+
+      # Point client-go (via KUBECONFIG) at the kind cluster explicitly and
+      # confirm it is reachable before launching the app, so a cluster-provision
+      # failure surfaces here rather than as an opaque webServer start failure.
+      # Playwright's webServer inherits this process env (see playwright.config).
+      - name: Verify cluster is reachable and export KUBECONFIG
+        run: |
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl cluster-info
+          kubectl get nodes
+
       - name: Run Playwright e2e suite
         run: task web:e2e
 
