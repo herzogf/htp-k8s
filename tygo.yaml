@@ -1,0 +1,12 @@
+# tygo config: generate the frontend's TypeScript wire types from the Go
+# structs that define them, so the Go definitions in internal/scene stay the
+# single source of truth (issue #10). Run via `task codegen`; the drift gate
+# `task codegen:verify` fails CI if the checked-in output is stale.
+#
+# Only the scene package is processed: it is the pure wire-contract vocabulary
+# (SceneState, ViewMode) with no Kubernetes imports, so the generated file
+# stays a clean, intentional mirror of the contract rather than leaking
+# unrelated backend types.
+packages:
+  - path: github.com/herzogf/htp-k8s/internal/scene
+    output_path: web/src/generated/scenestate.ts

@@ -1,11 +1,12 @@
 // Package server provides the HTTP server for the htp-k8s backend: it
 // serves the embedded frontend build (see assets.go) and a WebSocket
-// endpoint that reports the detected View Mode, plus a health check.
+// endpoint that streams the scene, plus a health check.
 //
-// This builds on the walking skeleton (ADR-0001). The WebSocket endpoint now
-// sends a minimal view-mode message derived from the startup permission probe
-// (issue #9); the full SceneState/SceneDelta wire contract is a later ticket
-// (#10) built on this same shape.
+// This builds on the walking skeleton (ADR-0001). The WebSocket endpoint sends
+// a SceneState snapshot on connect (issue #10) — the generated frontend wire
+// contract defined in the scene package, currently carrying the View Mode from
+// the startup permission probe (issue #9). Per ADR-0007 incremental Scene
+// Deltas follow the snapshot; those are a later ticket.
 package server
 
 import (
@@ -15,27 +16,15 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/herzogf/htp-k8s/internal/kube"
+	"github.com/herzogf/htp-k8s/internal/scene"
 )
 
 // Config holds the runtime state the HTTP handler needs. It is built once at
 // startup (after the permission probe) and is read-only thereafter.
 type Config struct {
 	// ViewMode is the View Mode detected at startup by the permission probe
-	// (see kube.DetectViewMode), reported to clients over /ws.
-	ViewMode kube.ViewMode
-}
-
-// messageTypeViewMode tags the /ws message that carries the current View
-// Mode. Naming a message type now keeps room for the SceneState/SceneDelta
-// message types added in issue #10 on the same connection.
-const messageTypeViewMode = "viewMode"
-
-// viewModeMessage is the minimal /ws payload conveying the detected View
-// Mode. It is deliberately small: the full SceneState contract lands in #10.
-type viewModeMessage struct {
-	Type     string        `json:"type"`
-	ViewMode kube.ViewMode `json:"viewMode"`
+	// (see kube.DetectViewMode), carried in the SceneState sent over /ws.
+	ViewMode scene.ViewMode
 }
 
 // upgrader upgrades HTTP connections to WebSocket connections for /ws.
@@ -49,12 +38,12 @@ var upgrader = websocket.Upgrader{
 }
 
 // NewHandler builds the HTTP handler for the htp-k8s backend: a health
-// check at "/healthz", a WebSocket endpoint at "/ws" that reports the
-// detected View Mode, and the embedded frontend build served at "/".
+// check at "/healthz", a WebSocket endpoint at "/ws" that sends the current
+// SceneState, and the embedded frontend build served at "/".
 func NewHandler(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /ws", newWSHandler(cfg.ViewMode))
+	mux.HandleFunc("GET /ws", newWSHandler(scene.SceneState{ViewMode: cfg.ViewMode}))
 	mux.Handle("GET /", http.FileServerFS(frontendFS()))
 	return mux
 }
@@ -66,13 +55,14 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // newWSHandler returns the /ws handler. On connect it upgrades the
-// connection, sends the current View Mode once as a JSON text message, then
+// connection, sends the SceneState snapshot once as a JSON text message, then
 // drains (and discards) any client frames so the connection stays open until
-// the client disconnects.
-func newWSHandler(mode kube.ViewMode) http.HandlerFunc {
-	payload, err := json.Marshal(viewModeMessage{Type: messageTypeViewMode, ViewMode: mode})
+// the client disconnects. Per ADR-0007 incremental Scene Deltas would follow
+// this snapshot; that streaming is a later ticket.
+func newWSHandler(state scene.SceneState) http.HandlerFunc {
+	payload, err := json.Marshal(state)
 	if err != nil {
-		// Unreachable: the message is a fixed-shape struct of strings.
+		// Unreachable: SceneState is a fixed-shape struct of strings.
 		panic(err)
 	}
 

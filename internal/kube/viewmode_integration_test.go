@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/herzogf/htp-k8s/internal/kube"
+	"github.com/herzogf/htp-k8s/internal/scene"
 	"github.com/herzogf/htp-k8s/internal/testcluster"
 )
 
@@ -67,8 +68,8 @@ func TestDetectViewMode_RealCluster(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DetectViewMode: %v", err)
 		}
-		if mode != kube.ViewModeNode {
-			t.Fatalf("view mode = %q, want %q (kind's default context is cluster-admin)", mode, kube.ViewModeNode)
+		if mode != scene.ViewModeNode {
+			t.Fatalf("view mode = %q, want %q (kind's default context is cluster-admin)", mode, scene.ViewModeNode)
 		}
 	})
 
@@ -88,8 +89,8 @@ func TestDetectViewMode_RealCluster(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DetectViewMode: %v", err)
 		}
-		if mode != kube.ViewModeNamespace {
-			t.Fatalf("view mode = %q, want %q (impersonated user has no node-list permission)", mode, kube.ViewModeNamespace)
+		if mode != scene.ViewModeNamespace {
+			t.Fatalf("view mode = %q, want %q (impersonated user has no node-list permission)", mode, scene.ViewModeNamespace)
 		}
 	})
 }

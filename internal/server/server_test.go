@@ -10,13 +10,13 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/herzogf/htp-k8s/internal/kube"
+	"github.com/herzogf/htp-k8s/internal/scene"
 	"github.com/herzogf/htp-k8s/internal/server"
 )
 
 // testConfig is a server.Config with an explicit View Mode, used by tests
 // that don't care about the mode itself.
-var testConfig = server.Config{ViewMode: kube.ViewModeNamespace}
+var testConfig = server.Config{ViewMode: scene.ViewModeNamespace}
 
 func TestHealthz_OK(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -102,14 +102,15 @@ func TestHealthz_OverRealListener(t *testing.T) {
 	}
 }
 
-// TestWS_ReportsDetectedViewMode is the end-to-end proof that a client
+// TestWS_SendsSceneStateSnapshot is the end-to-end proof that a client
 // connecting to /ws over a real socket (not an in-memory recorder, since
-// WebSocket upgrades need an actual hijackable connection) can read the View
-// Mode the backend detected at startup (issue #9). It asserts the exact mode
-// the handler was configured with, so a client could switch rendering
-// accordingly.
-func TestWS_ReportsDetectedViewMode(t *testing.T) {
-	wantMode := kube.ViewModeNode
+// WebSocket upgrades need an actual hijackable connection) receives the
+// SceneState snapshot the backend sends on connect (ADR-0007), carrying the
+// View Mode detected at startup (issue #9). It decodes into scene.SceneState —
+// the exact wire type the generated TypeScript mirrors — so the frontend can
+// build the scene from it.
+func TestWS_SendsSceneStateSnapshot(t *testing.T) {
+	wantMode := scene.ViewModeNode
 	ts := httptest.NewServer(server.NewHandler(server.Config{ViewMode: wantMode}))
 	defer ts.Close()
 
@@ -129,18 +130,12 @@ func TestWS_ReportsDetectedViewMode(t *testing.T) {
 		t.Fatalf("message type = %d, want %d (TextMessage)", msgType, websocket.TextMessage)
 	}
 
-	var msg struct {
-		Type     string        `json:"type"`
-		ViewMode kube.ViewMode `json:"viewMode"`
+	var got scene.SceneState
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal %q into scene.SceneState: %v", body, err)
 	}
-	if err := json.Unmarshal(body, &msg); err != nil {
-		t.Fatalf("unmarshal %q: %v", body, err)
-	}
-	if msg.Type != "viewMode" {
-		t.Errorf("message type field = %q, want %q", msg.Type, "viewMode")
-	}
-	if msg.ViewMode != wantMode {
-		t.Errorf("view mode = %q, want %q", msg.ViewMode, wantMode)
+	if got.ViewMode != wantMode {
+		t.Errorf("view mode = %q, want %q", got.ViewMode, wantMode)
 	}
 }
 
