@@ -12,11 +12,11 @@ a Go/TS schema mismatch surfaces in the build instead of at runtime.
 
 The package holds no Kubernetes logic and imports no client-go packages: it
 is the pure vocabulary of the scene (see CONTEXT.md), produced by the kube
-package and consumed by the frontend. It is deliberately minimal today —
-SceneState carries only the View Mode — and grows Towers and Panels in later
-tickets (#12, #14). Per ADR-0007 the wire protocol is a full SceneState
-snapshot on connect followed by incremental Scene Deltas; the deltas are a
-later ticket and are not defined here.
+package and consumed by the frontend. It carries the View Mode and the set
+of Towers today, and grows Panels in a later ticket (#14). Per ADR-0007 the
+wire protocol is a full SceneState snapshot on connect followed by
+incremental Scene Deltas; the deltas are a later ticket and are not defined
+here.
 */
 
 /**
@@ -36,6 +36,43 @@ export const ViewModeNode: ViewMode = "node";
  */
 export const ViewModeNamespace: ViewMode = "namespace";
 /**
+ * GridPosition is a Tower's slot on the scene floor: zero-based integer
+ * column and row indices in the deterministic grid-by-name layout (see Tower).
+ * The frontend multiplies these by a fixed spacing to place the Tower in 3D;
+ * keeping them as abstract grid indices (not world coordinates) leaves the
+ * visual spacing a frontend concern.
+ */
+export interface GridPosition {
+  /**
+   * Col is the zero-based column index (X axis) of the Tower in the grid.
+   */
+  col: number /* int */;
+  /**
+   * Row is the zero-based row index (Z axis) of the Tower in the grid.
+   */
+  row: number /* int */;
+}
+/**
+ * Tower is one 3D structure on the scene floor (see CONTEXT.md). Depending on
+ * the active View Mode it represents either one Node (Node-mode) or one
+ * Namespace/Project (Namespace-mode). Towers are arranged in a simple grid,
+ * ordered by Name, so the same cluster state always yields the same layout —
+ * a Tower's position is a pure function of the sorted set of names, not of the
+ * order the backend happened to observe the resources in.
+ */
+export interface Tower {
+  /**
+   * Name is the Tower's stable identity and label: the Node name in
+   * Node-mode, or the Namespace/Project name in Namespace-mode. Unique
+   * within a SceneState, and the key the grid layout is ordered by.
+   */
+  name: string;
+  /**
+   * Grid is the Tower's position in the deterministic grid-by-name layout.
+   */
+  grid: GridPosition;
+}
+/**
  * SceneState is the full snapshot of the scene the backend sends to a client
  * on connect (and on reconnect), per ADR-0007. It is the root of the wire
  * contract; every field is consumed by the frontend to build the 3D scene.
@@ -46,4 +83,11 @@ export interface SceneState {
    * as Namespaces/Projects — detected at startup by the permission probe.
    */
   viewMode: ViewMode;
+  /**
+   * Towers is the set of Towers in the scene — one per Node in Node-mode or
+   * one per Namespace/Project in Namespace-mode — in the deterministic
+   * grid-by-name layout (ordered by Tower.Name). Sent non-nil over the wire:
+   * an empty scene is an empty array, not null.
+   */
+  towers: Tower[];
 }

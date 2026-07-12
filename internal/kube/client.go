@@ -6,6 +6,7 @@ package kube
 import (
 	"fmt"
 
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -31,17 +32,26 @@ func restConfig() (*rest.Config, error) {
 	return cfg, nil
 }
 
-// NewClientset connects to the cluster referenced by the current kubeconfig
-// context (see restConfig) and returns a typed client for it.
-func NewClientset() (kubernetes.Interface, error) {
+// NewClients connects to the cluster referenced by the current kubeconfig
+// context (see restConfig) and returns both a typed client and a dynamic
+// client built from the same config. The dynamic client is used to read
+// resources that have no typed dependency in htp-k8s — notably OpenShift
+// Projects (see BuildTowers) — so the app needs no OpenShift API library and
+// degrades gracefully where those resources are absent (ADR-0002).
+func NewClients() (kubernetes.Interface, dynamic.Interface, error) {
 	cfg, err := restConfig()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("build kubernetes clientset: %w", err)
+		return nil, nil, fmt.Errorf("build kubernetes clientset: %w", err)
 	}
-	return clientset, nil
+
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build dynamic client: %w", err)
+	}
+	return clientset, dyn, nil
 }

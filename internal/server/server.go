@@ -4,12 +4,15 @@
 //
 // This builds on the walking skeleton (ADR-0001). The WebSocket endpoint sends
 // a SceneState snapshot on connect (issue #10) — the generated frontend wire
-// contract defined in the scene package, currently carrying the View Mode from
-// the startup permission probe (issue #9). Per ADR-0007 incremental Scene
-// Deltas follow the snapshot; those are a later ticket.
+// contract defined in the scene package, carrying the View Mode from the
+// startup permission probe (issue #9) and the current set of Towers (issue
+// #12). The snapshot is produced fresh per connection by Config.Snapshot, so a
+// client (or a reconnect) always sees current cluster state. Per ADR-0007
+// incremental Scene Deltas follow the snapshot; those are a later ticket.
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -19,12 +22,21 @@ import (
 	"github.com/herzogf/htp-k8s/internal/scene"
 )
 
-// Config holds the runtime state the HTTP handler needs. It is built once at
-// startup (after the permission probe) and is read-only thereafter.
+// Config holds the runtime state the HTTP handler needs.
 type Config struct {
-	// ViewMode is the View Mode detected at startup by the permission probe
-	// (see kube.DetectViewMode), carried in the SceneState sent over /ws.
-	ViewMode scene.ViewMode
+	// Snapshot returns the SceneState to send to a client on connect. It is
+	// called once per /ws connection (with the request's context) so each
+	// client — and each reconnect — gets a fresh snapshot reflecting current
+	// cluster state, rather than a value frozen at startup. It must not block
+	// indefinitely; the request context bounds it. A nil Snapshot is treated
+	// as an empty scene.
+	Snapshot func(ctx context.Context) scene.SceneState
+}
+
+// StaticSnapshot adapts a fixed SceneState into a Config.Snapshot function,
+// for callers (and tests) that don't need per-connection refresh.
+func StaticSnapshot(state scene.SceneState) func(context.Context) scene.SceneState {
+	return func(context.Context) scene.SceneState { return state }
 }
 
 // upgrader upgrades HTTP connections to WebSocket connections for /ws.
@@ -41,9 +53,14 @@ var upgrader = websocket.Upgrader{
 // check at "/healthz", a WebSocket endpoint at "/ws" that sends the current
 // SceneState, and the embedded frontend build served at "/".
 func NewHandler(cfg Config) http.Handler {
+	snapshot := cfg.Snapshot
+	if snapshot == nil {
+		snapshot = StaticSnapshot(scene.SceneState{})
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /ws", newWSHandler(scene.SceneState{ViewMode: cfg.ViewMode}))
+	mux.HandleFunc("GET /ws", newWSHandler(snapshot))
 	mux.Handle("GET /", http.FileServerFS(frontendFS()))
 	return mux
 }
@@ -54,18 +71,12 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// newWSHandler returns the /ws handler. On connect it upgrades the
-// connection, sends the SceneState snapshot once as a JSON text message, then
-// drains (and discards) any client frames so the connection stays open until
-// the client disconnects. Per ADR-0007 incremental Scene Deltas would follow
-// this snapshot; that streaming is a later ticket.
-func newWSHandler(state scene.SceneState) http.HandlerFunc {
-	payload, err := json.Marshal(state)
-	if err != nil {
-		// Unreachable: SceneState is a fixed-shape struct of strings.
-		panic(err)
-	}
-
+// newWSHandler returns the /ws handler. On connect it upgrades the connection,
+// builds a fresh SceneState snapshot (via snapshot), sends it once as a JSON
+// text message, then drains (and discards) any client frames so the connection
+// stays open until the client disconnects. Per ADR-0007 incremental Scene
+// Deltas would follow this snapshot; that streaming is a later ticket.
+func newWSHandler(snapshot func(ctx context.Context) scene.SceneState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -73,6 +84,14 @@ func newWSHandler(state scene.SceneState) http.HandlerFunc {
 			return
 		}
 		defer conn.Close()
+
+		payload, err := json.Marshal(snapshot(r.Context()))
+		if err != nil {
+			// Unreachable: SceneState is a fixed-shape struct of
+			// JSON-safe values. Log rather than crash the process.
+			log.Printf("ws marshal SceneState: %v", err)
+			return
+		}
 
 		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 			return
