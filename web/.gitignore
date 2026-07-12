@@ -13,6 +13,10 @@ dist-ssr
 coverage
 *.local
 
+# Playwright e2e output (screenshots, video, traces) and HTML report
+e2e-results
+playwright-report
+
 # go-task local cache (from running `task` against Taskfile.yml)
 .task
 
