@@ -2,6 +2,7 @@ package scene_test
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/herzogf/htp-k8s/internal/scene"
@@ -9,16 +10,26 @@ import (
 
 // TestSceneState_JSONWireShape pins the on-the-wire JSON of a SceneState. This
 // is the contract the generated TypeScript mirrors (see the root Taskfile's
-// `codegen` target): the field name and the View Mode string values are what
-// the frontend parses, so a change here is a deliberate wire-contract change
-// that must be regenerated.
+// `codegen` target): the field names, the View Mode string values, and the
+// Tower/GridPosition shape are what the frontend parses, so a change here is a
+// deliberate wire-contract change that must be regenerated.
 func TestSceneState_JSONWireShape(t *testing.T) {
-	got, err := json.Marshal(scene.SceneState{ViewMode: scene.ViewModeNode})
+	state := scene.SceneState{
+		ViewMode: scene.ViewModeNode,
+		Towers: []scene.Tower{
+			{Name: "alpha", Grid: scene.GridPosition{Col: 0, Row: 0}},
+			{Name: "bravo", Grid: scene.GridPosition{Col: 1, Row: 0}},
+		},
+	}
+
+	got, err := json.Marshal(state)
 	if err != nil {
 		t.Fatalf("marshal SceneState: %v", err)
 	}
 
-	const want = `{"viewMode":"node"}`
+	const want = `{"viewMode":"node","towers":[` +
+		`{"name":"alpha","grid":{"col":0,"row":0}},` +
+		`{"name":"bravo","grid":{"col":1,"row":0}}]}`
 	if string(got) != want {
 		t.Fatalf("SceneState JSON = %s, want %s", got, want)
 	}
@@ -26,10 +37,17 @@ func TestSceneState_JSONWireShape(t *testing.T) {
 
 // TestSceneState_RoundTrip proves a serialized SceneState deserializes back to
 // an equal value — the snapshot the backend sends on connect (ADR-0007) is
-// exactly what a client reading the wire recovers.
+// exactly what a client reading the wire recovers. SceneState now carries a
+// Tower slice, so it is compared with reflect.DeepEqual rather than ==.
 func TestSceneState_RoundTrip(t *testing.T) {
 	for _, mode := range []scene.ViewMode{scene.ViewModeNode, scene.ViewModeNamespace} {
-		want := scene.SceneState{ViewMode: mode}
+		want := scene.SceneState{
+			ViewMode: mode,
+			Towers: []scene.Tower{
+				{Name: "one", Grid: scene.GridPosition{Col: 0, Row: 0}},
+				{Name: "two", Grid: scene.GridPosition{Col: 1, Row: 0}},
+			},
+		}
 
 		data, err := json.Marshal(want)
 		if err != nil {
@@ -40,7 +58,7 @@ func TestSceneState_RoundTrip(t *testing.T) {
 		if err := json.Unmarshal(data, &got); err != nil {
 			t.Fatalf("unmarshal %s: %v", data, err)
 		}
-		if got != want {
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("round-trip = %+v, want %+v", got, want)
 		}
 	}

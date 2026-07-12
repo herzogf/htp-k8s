@@ -1,10 +1,13 @@
 package server_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,9 +17,11 @@ import (
 	"github.com/herzogf/htp-k8s/internal/server"
 )
 
-// testConfig is a server.Config with an explicit View Mode, used by tests
-// that don't care about the mode itself.
-var testConfig = server.Config{ViewMode: scene.ViewModeNamespace}
+// testConfig is a server.Config serving a fixed Namespace-mode snapshot, used
+// by tests that don't care about the scene's contents.
+var testConfig = server.Config{
+	Snapshot: server.StaticSnapshot(scene.SceneState{ViewMode: scene.ViewModeNamespace}),
+}
 
 func TestHealthz_OK(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -106,12 +111,18 @@ func TestHealthz_OverRealListener(t *testing.T) {
 // connecting to /ws over a real socket (not an in-memory recorder, since
 // WebSocket upgrades need an actual hijackable connection) receives the
 // SceneState snapshot the backend sends on connect (ADR-0007), carrying the
-// View Mode detected at startup (issue #9). It decodes into scene.SceneState —
-// the exact wire type the generated TypeScript mirrors — so the frontend can
-// build the scene from it.
+// View Mode detected at startup (issue #9) and the current Towers (issue #12).
+// It decodes into scene.SceneState — the exact wire type the generated
+// TypeScript mirrors — so the frontend can build the scene from it.
 func TestWS_SendsSceneStateSnapshot(t *testing.T) {
-	wantMode := scene.ViewModeNode
-	ts := httptest.NewServer(server.NewHandler(server.Config{ViewMode: wantMode}))
+	want := scene.SceneState{
+		ViewMode: scene.ViewModeNode,
+		Towers: []scene.Tower{
+			{Name: "node-a", Grid: scene.GridPosition{Col: 0, Row: 0}},
+			{Name: "node-b", Grid: scene.GridPosition{Col: 1, Row: 0}},
+		},
+	}
+	ts := httptest.NewServer(server.NewHandler(server.Config{Snapshot: server.StaticSnapshot(want)}))
 	defer ts.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
@@ -134,8 +145,56 @@ func TestWS_SendsSceneStateSnapshot(t *testing.T) {
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("unmarshal %q into scene.SceneState: %v", body, err)
 	}
-	if got.ViewMode != wantMode {
-		t.Errorf("view mode = %q, want %q", got.ViewMode, wantMode)
+	if got.ViewMode != want.ViewMode {
+		t.Errorf("view mode = %q, want %q", got.ViewMode, want.ViewMode)
+	}
+	if !reflect.DeepEqual(got.Towers, want.Towers) {
+		t.Errorf("towers = %+v, want %+v", got.Towers, want.Towers)
+	}
+}
+
+// TestWS_SnapshotBuiltPerConnection proves the snapshot is produced per
+// connection (not frozen at handler-build time): two sequential connections
+// see two different SceneStates from the same handler.
+func TestWS_SnapshotBuiltPerConnection(t *testing.T) {
+	var connects int
+	cfg := server.Config{
+		Snapshot: func(context.Context) scene.SceneState {
+			connects++
+			return scene.SceneState{
+				ViewMode: scene.ViewModeNode,
+				Towers:   []scene.Tower{{Name: fmt.Sprintf("node-%d", connects)}},
+			}
+		},
+	}
+	ts := httptest.NewServer(server.NewHandler(cfg))
+	defer ts.Close()
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+
+	readTowerName := func() string {
+		conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			t.Fatalf("dial %s: %v", wsURL, err)
+		}
+		defer resp.Body.Close()
+		defer conn.Close()
+
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read message: %v", err)
+		}
+		var got scene.SceneState
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("unmarshal %q: %v", body, err)
+		}
+		if len(got.Towers) != 1 {
+			t.Fatalf("got %d towers, want 1", len(got.Towers))
+		}
+		return got.Towers[0].Name
+	}
+
+	if first, second := readTowerName(), readTowerName(); first == second {
+		t.Errorf("both connections saw tower %q; snapshot was not rebuilt per connection", first)
 	}
 }
 
