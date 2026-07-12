@@ -1,0 +1,17 @@
+version: "3"
+
+tasks:
+  build:
+    desc: Build all Go packages.
+    cmds:
+      - go build ./...
+
+  test:
+    desc: Run all Go tests.
+    cmds:
+      - go test ./...
+
+  vet:
+    desc: Vet all Go packages.
+    cmds:
+      - go vet ./...
