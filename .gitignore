@@ -2,3 +2,9 @@
 *.test
 *.out
 /.task/
+
+# Claude Code: commit shared subagent definitions (.claude/agents/), but not
+# transient worktrees, personal settings, or environment-provided skills.
+/.claude/worktrees/
+/.claude/settings.local.json
+/.claude/skills/

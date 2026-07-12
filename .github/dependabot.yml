@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 5
+      semver-patch-days: 5
+      semver-minor-days: 7
+      semver-major-days: 14

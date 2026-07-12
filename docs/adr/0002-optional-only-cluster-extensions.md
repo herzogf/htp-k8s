@@ -1,0 +1,3 @@
+# Core functionality never requires non-default cluster features
+
+The app must work against vanilla Kubernetes and Red Hat OpenShift out of the box. Some desirable features — real exec-triggered blinking (needs an audit log webhook), real inter-node traffic on floor lanes (needs a service mesh or eBPF tool like Cilium/Hubble) — depend on cluster software or configuration that isn't present by default and that many users won't have or want to install. We decided any such feature must be strictly optional: detectable at runtime and gracefully absent (not an error, not a degraded core experience) when its dependency isn't there. This rules out designs that assume audit logging or a service mesh is always available.

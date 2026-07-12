@@ -1,0 +1,3 @@
+# v1 is a read-only cinematic viewer, not an admin tool
+
+It would be natural to grow this into a full cluster admin UI — log tailing, exec, deleting/editing resources — since the backend already has API access. We decided against that for v1: the point of the app is to look and feel like the *Hackers* data-center scene, not to replace `kubectl`/existing dashboards for cluster operations. Concretely, this means: no mutating actions from the UI, no full log viewer (only a small height-limited tail in the pod Detail Popup), no exec-from-UI. This keeps scope bounded and protects the "cinema, not productivity tool" feel from feature creep; revisit deliberately if the goals change, rather than adding admin features incrementally.
