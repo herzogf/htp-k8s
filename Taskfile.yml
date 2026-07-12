@@ -30,8 +30,3 @@ tasks:
     desc: Vet all Go packages.
     cmds:
       - go vet ./cmd/... ./internal/...
-
-  lint:
-    desc: Lint the frontend (ESLint + Prettier).
-    cmds:
-      - task: web:lint
