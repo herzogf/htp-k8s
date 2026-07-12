@@ -1,11 +1,11 @@
 import { getWebSocketUrl } from './config'
-import { useWebSocketMessage } from './hooks/useWebSocketMessage'
+import { useSceneState } from './hooks/useSceneState'
 import { Scene } from './Scene'
 
 function App() {
-  const message = useWebSocketMessage(getWebSocketUrl())
+  const sceneState = useSceneState(getWebSocketUrl())
 
-  return <Scene message={message} />
+  return <Scene sceneState={sceneState} />
 }
 
 export default App

@@ -19,3 +19,42 @@ body {
     Roboto,
     sans-serif;
 }
+
+/* The scene fills its container; the View Mode HUD is layered over the canvas. */
+.scene-root {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+/* On-screen View Mode indicator (issue #11): a HUD badge over the 3D scene. */
+.view-mode-indicator {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid rgba(120, 255, 200, 0.35);
+  border-radius: 0.4rem;
+  background: rgba(5, 10, 12, 0.65);
+  color: #7dffc8;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 8px rgba(120, 255, 200, 0.5);
+  pointer-events: none;
+  user-select: none;
+}
+
+.view-mode-indicator__caption {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  opacity: 0.7;
+}
+
+.view-mode-indicator__label {
+  font-size: 1rem;
+  font-weight: 600;
+}
