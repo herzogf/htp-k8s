@@ -34,3 +34,7 @@ This project is built entirely by AI, directed by the user rather than hand-writ
 - Tickets from `/to-tickets` should carry a component label (`frontend`, `backend`, `frontend-test`, `backend-test`, `release`) so the orchestrator knows which subagent to dispatch.
 - Independent tickets with no blocking edge between them (e.g. one `frontend` ticket and one `backend` ticket) can be dispatched to their respective subagents **in parallel**, each in an isolated git worktree (`Agent` tool's `isolation: "worktree"`) so simultaneous work doesn't collide.
 - A ticket that spans both frontend and backend (e.g. a new WebSocket message shape) should still be split into two component-labeled tickets with a blocking edge between them (backend defines the contract first) rather than handed to one subagent that would edit outside its scope.
+
+### Issue lifecycle
+
+Issues close **on PR merge, not on PR open.** Put `Closes #<n>` in the PR body and let GitHub auto-close the issue when it merges to `main`; leave the issue open until then, and don't `gh issue close` it manually. See `docs/agents/issue-tracker.md`. This keeps the native dependency graph honest — a downstream ticket only becomes unblocked once its blocker's code is actually on `main` (the orchestrator gates the frontier on "blocker PR merged," not "issue closed").

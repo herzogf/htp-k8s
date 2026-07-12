@@ -25,6 +25,17 @@ When set to `yes`, PRs run through the same labels and states as issues, using t
 
 GitHub shares one number space across issues and PRs, so a bare `#42` may be either — resolve with `gh pr view 42` and fall back to `gh issue view 42`.
 
+## Issue lifecycle: close on merge, not on PR open
+
+An issue represents work that is not yet on `main`. **Do not close an issue when you open its PR — close it only when the PR merges** (i.e. when the code actually reaches `main`). Closing early is wrong for two reasons: the work isn't really done until it's merged (a PR can be rejected or reworked), and this repo's native issue dependencies count *open* blockers, so an issue closed at PR-open time makes downstream tickets look unblocked before their dependency's code exists on `main`.
+
+The mechanism: put a **closing keyword** in the PR body — `Closes #<n>` (or `Fixes #<n>`) — and let GitHub auto-close the issue when the PR merges to the default branch. When a PR resolves several tickets, list each: `Closes #12`, `Closes #13`.
+
+So the per-ticket flow is:
+- Implement the ticket on a branch, open a PR whose body contains `Closes #<n>`.
+- Comment on the issue with the PR link if useful, but **leave the issue open**.
+- GitHub closes the issue automatically on merge. Do not `gh issue close` it manually as part of finishing a PR.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a GitHub issue.
