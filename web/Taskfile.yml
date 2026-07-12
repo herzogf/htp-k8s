@@ -1,0 +1,44 @@
+# Frontend build orchestration (web/ only).
+#
+# Root-level task unification (a single `task build` driving both the Go
+# backend and this frontend) happens in a later ticket, once both scaffolds
+# have merged. Until then, run these targets from within web/, or point
+# `task` at this file directly: `task --taskfile web/Taskfile.yml build`.
+version: '3'
+
+silent: true
+
+tasks:
+  install:
+    desc: Install frontend dependencies
+    sources:
+      - package.json
+      - package-lock.json
+    generates:
+      - node_modules/.package-lock.json
+    cmds:
+      - npm ci
+
+  dev:
+    desc: Run the Vite dev server
+    deps: [install]
+    cmds:
+      - npm run dev
+
+  build:
+    desc: Typecheck and build the production frontend bundle
+    deps: [install]
+    cmds:
+      - npm run build
+
+  lint:
+    desc: Lint and check formatting (ESLint + Prettier)
+    deps: [install]
+    cmds:
+      - npm run lint
+
+  test:
+    desc: Run the Vitest suite
+    deps: [install]
+    cmds:
+      - npm test
