@@ -29,9 +29,46 @@ func TestSceneState_JSONWireShape(t *testing.T) {
 
 	const want = `{"viewMode":"node","towers":[` +
 		`{"name":"alpha","grid":{"col":0,"row":0}},` +
-		`{"name":"bravo","grid":{"col":1,"row":0}}]}`
+		`{"name":"bravo","grid":{"col":1,"row":0}}],"panels":null}`
 	if string(got) != want {
 		t.Fatalf("SceneState JSON = %s, want %s", got, want)
+	}
+}
+
+// TestSceneState_PanelJSONWireShape pins the on-the-wire JSON of a Panel — the
+// field names and the phase/color values the frontend parses. Panels are an
+// additive part of the wire contract (#14); a change here is a deliberate
+// contract change that must be regenerated.
+func TestSceneState_PanelJSONWireShape(t *testing.T) {
+	state := scene.SceneState{
+		ViewMode: scene.ViewModeNode,
+		Towers:   []scene.Tower{{Name: "node-1", Grid: scene.GridPosition{Col: 0, Row: 0}}},
+		Panels: []scene.Panel{
+			{Namespace: "default", Pod: "web", Tower: "node-1", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+		},
+	}
+
+	got, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("marshal SceneState: %v", err)
+	}
+
+	const want = `{"viewMode":"node",` +
+		`"towers":[{"name":"node-1","grid":{"col":0,"row":0}}],` +
+		`"panels":[{"namespace":"default","pod":"web","tower":"node-1","phase":"Running","color":"#39ff14"}]}`
+	if string(got) != want {
+		t.Fatalf("SceneState JSON = %s, want %s", got, want)
+	}
+}
+
+// TestColorForPhase_UnknownFallback proves an unrecognized phase (including the
+// empty string) maps to the Unknown color, so an unexpected value never yields
+// an empty color on the wire.
+func TestColorForPhase_UnknownFallback(t *testing.T) {
+	for _, ph := range []scene.PodPhase{"", "NotARealPhase", "Terminating"} {
+		if got := scene.ColorForPhase(ph); got != scene.ColorUnknown {
+			t.Errorf("ColorForPhase(%q) = %q, want %q", ph, got, scene.ColorUnknown)
+		}
 	}
 }
 

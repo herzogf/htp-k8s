@@ -12,11 +12,10 @@ a Go/TS schema mismatch surfaces in the build instead of at runtime.
 
 The package holds no Kubernetes logic and imports no client-go packages: it
 is the pure vocabulary of the scene (see CONTEXT.md), produced by the kube
-package and consumed by the frontend. It carries the View Mode and the set
-of Towers today, and grows Panels in a later ticket (#14). Per ADR-0007 the
-wire protocol is a full SceneState snapshot on connect followed by
-incremental Scene Deltas; the deltas are a later ticket and are not defined
-here.
+package and consumed by the frontend. It carries the View Mode, the set of
+Towers, and the set of Panels (one per Pod, #14). Per ADR-0007 the wire
+protocol is a full SceneState snapshot on connect followed by incremental
+Scene Deltas; the deltas are a later ticket and are not defined here.
 */
 
 /**
@@ -73,6 +72,108 @@ export interface Tower {
   grid: GridPosition;
 }
 /**
+ * PodPhase is the phase-like status a Panel's color encodes (see CONTEXT.md's
+ * Panel definition). It is the Kubernetes pod phase enriched with the
+ * CrashLoopBackOff container-waiting state, which is not a real pod phase but
+ * is the single most important "something is wrong" signal to surface — so the
+ * backend derives it from the pod's container statuses and treats it as a
+ * first-class phase for coloring (see kube.BuildPanels). The zero value is not
+ * used on the wire; every Panel carries an explicit phase.
+ */
+export type PodPhase = string;
+/**
+ * PodPhaseRunning is a pod whose containers are all running (or a
+ * Completed-but-restarting init). Rendered in the "healthy" color.
+ */
+export const PodPhaseRunning: PodPhase = "Running";
+/**
+ * PodPhasePending is a pod accepted by the cluster but not yet running —
+ * unscheduled, pulling images, or waiting on init containers.
+ */
+export const PodPhasePending: PodPhase = "Pending";
+/**
+ * PodPhaseSucceeded is a pod whose containers all terminated with success
+ * and will not be restarted (e.g. a completed Job pod).
+ */
+export const PodPhaseSucceeded: PodPhase = "Succeeded";
+/**
+ * PodPhaseFailed is a pod whose containers all terminated and at least one
+ * failed (non-zero exit, not being restarted).
+ */
+export const PodPhaseFailed: PodPhase = "Failed";
+/**
+ * PodPhaseCrashLoopBackOff is a pod with a container stuck restarting in a
+ * crash loop. Derived from container statuses, not a Kubernetes pod phase,
+ * but surfaced as its own phase because it is the key failure signal.
+ */
+export const PodPhaseCrashLoopBackOff: PodPhase = "CrashLoopBackOff";
+/**
+ * PodPhaseUnknown is a pod whose state could not be determined (e.g. its
+ * node is unreachable), and the fallback for any unrecognized phase.
+ */
+export const PodPhaseUnknown: PodPhase = "Unknown";
+/**
+ * ColorRunning is the healthy neon green of a running pod.
+ */
+export const ColorRunning = "#39ff14";
+/**
+ * ColorPending is the amber of a pod still coming up.
+ */
+export const ColorPending = "#ffb000";
+/**
+ * ColorSucceeded is the cool blue of a pod that completed successfully.
+ */
+export const ColorSucceeded = "#00b3ff";
+/**
+ * ColorFailed is the red of a pod that terminated in failure.
+ */
+export const ColorFailed = "#ff2b2b";
+/**
+ * ColorCrashLoopBackOff is the alarming magenta of a crash-looping pod,
+ * kept distinct from the plain-Failed red so a crash loop reads at a glance.
+ */
+export const ColorCrashLoopBackOff = "#ff00d4";
+/**
+ * ColorUnknown is the muted grey of a pod in an unknown/indeterminate state.
+ */
+export const ColorUnknown = "#8a8a8a";
+/**
+ * Panel is one glowing rectangle on a Tower's face, representing a single Pod
+ * (see CONTEXT.md). Its color encodes the pod's phase; its Tower is the Tower
+ * the pod belongs to under the active View Mode — the pod's Node in Node-mode
+ * or its Namespace/Project in Namespace-mode. That scoping is derived from the
+ * View Mode, so the same pod re-homes to a different Tower when the View Mode
+ * changes rather than carrying a fixed Tower.
+ */
+export interface Panel {
+  /**
+   * Namespace is the pod's Namespace/Project. Together with Pod it forms the
+   * pod's cluster-unique identity (a pod name is only unique within its
+   * namespace), and it is the Tower name in Namespace-mode.
+   */
+  namespace: string;
+  /**
+   * Pod is the pod's name.
+   */
+  pod: string;
+  /**
+   * Tower is the Name of the Tower this Panel sits on under the active View
+   * Mode: the pod's Node in Node-mode, or its Namespace/Project in
+   * Namespace-mode. It matches exactly one Tower.Name in the same SceneState.
+   */
+  tower: string;
+  /**
+   * Phase is the pod's phase-like status (see PodPhase), the value Color is
+   * derived from.
+   */
+  phase: PodPhase;
+  /**
+   * Color is the hex color for Phase (see ColorForPhase), carried on the wire
+   * so the frontend renders the palette without re-deriving it.
+   */
+  color: string;
+}
+/**
  * SceneState is the full snapshot of the scene the backend sends to a client
  * on connect (and on reconnect), per ADR-0007. It is the root of the wire
  * contract; every field is consumed by the frontend to build the 3D scene.
@@ -90,4 +191,11 @@ export interface SceneState {
    * an empty scene is an empty array, not null.
    */
   towers: Tower[];
+  /**
+   * Panels is the set of Panels in the scene — one per Pod — each scoped to
+   * the Tower it belongs to under the active View Mode (Panel.Tower). In a
+   * deterministic order (by Tower, then Namespace, then Pod). Sent non-nil
+   * over the wire: a scene with no pods is an empty array, not null.
+   */
+  panels: Panel[];
 }
