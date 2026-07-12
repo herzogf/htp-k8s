@@ -1,0 +1,96 @@
+name: PR
+
+# Foundation of the PR-blocking CI posture (issue #1 / ADR-0005): the fast,
+# source-level checks run and are required on every PR. Integration/e2e
+# (kind + KWOK, Playwright) is added on top of this in a later ticket (#8).
+
+on:
+  pull_request:
+
+concurrency:
+  group: pr-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          # go.mod deliberately floors at a minor version ("go 1.26"), not an
+          # exact patch, to avoid forcing local dev toolchain fetches (see
+          # PR history on issue #2). check-latest ensures CI still resolves
+          # the newest available 1.26.x patch release rather than a stale
+          # cached one, so govulncheck is scanning against a patched
+          # toolchain (e.g. GO-2026-5856, fixed in crypto/tls@go1.26.5).
+          check-latest: true
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+
+      - name: Build
+        run: task build
+
+      - name: Vet
+        run: task vet
+
+      - name: Test
+        run: task test
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      # Source-level CVE scanning is blocking here (unlike the report-only
+      # Trivy container scan) per issue #1 and ADR-0005.
+      - name: govulncheck
+        run: govulncheck ./...
+
+  frontend:
+    name: Frontend (Node)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+
+      - name: Lint
+        run: task lint
+
+      - name: Build
+        run: task build
+
+      - name: Test
+        run: task test
+
+      # Source-level CVE scanning is blocking here (unlike the report-only
+      # Trivy container scan) per issue #1 and ADR-0005. npm audit's default
+      # exit code already fails on any reported vulnerability.
+      - name: npm audit
+        run: npm audit
