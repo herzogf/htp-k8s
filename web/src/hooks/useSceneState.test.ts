@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useWebSocketMessage } from './useWebSocketMessage'
+import { type ViewMode, ViewModeNamespace, ViewModeNode } from '../generated/scenestate'
+import { useSceneState } from './useSceneState'
 
 type Listener = (event: MessageEvent) => void
 
@@ -39,7 +40,9 @@ class FakeWebSocket {
   }
 }
 
-describe('useWebSocketMessage', () => {
+const snapshot = (viewMode: ViewMode) => JSON.stringify({ viewMode })
+
+describe('useSceneState', () => {
   beforeEach(() => {
     FakeWebSocket.instances = []
     vi.stubGlobal('WebSocket', FakeWebSocket)
@@ -49,46 +52,60 @@ describe('useWebSocketMessage', () => {
     vi.unstubAllGlobals()
   })
 
-  it('starts with no message before anything arrives', () => {
-    const { result } = renderHook(() => useWebSocketMessage('ws://example.test/ws'))
+  it('starts with no scene state before anything arrives', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
 
     expect(result.current).toBeNull()
   })
 
   it('opens a socket to the given url', () => {
-    renderHook(() => useWebSocketMessage('ws://example.test/ws'))
+    renderHook(() => useSceneState('ws://example.test/ws'))
 
     expect(FakeWebSocket.instances).toHaveLength(1)
     expect(FakeWebSocket.instances[0].url).toBe('ws://example.test/ws')
   })
 
-  it('updates with the raw text of a received message', () => {
-    const { result } = renderHook(() => useWebSocketMessage('ws://example.test/ws'))
+  it('parses a received SceneState snapshot into a typed value', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
     const socket = FakeWebSocket.instances[0]
 
     act(() => {
-      socket.emit('message', { data: 'hello scene' })
+      socket.emit('message', { data: snapshot(ViewModeNode) })
     })
 
-    expect(result.current).toBe('hello scene')
+    expect(result.current).toEqual({ viewMode: 'node' })
   })
 
-  it('replaces the message with each new one received', () => {
-    const { result } = renderHook(() => useWebSocketMessage('ws://example.test/ws'))
+  it('replaces the state with each new snapshot received', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
     const socket = FakeWebSocket.instances[0]
 
     act(() => {
-      socket.emit('message', { data: 'first' })
+      socket.emit('message', { data: snapshot(ViewModeNode) })
     })
     act(() => {
-      socket.emit('message', { data: 'second' })
+      socket.emit('message', { data: snapshot(ViewModeNamespace) })
     })
 
-    expect(result.current).toBe('second')
+    expect(result.current).toEqual({ viewMode: 'namespace' })
+  })
+
+  it('keeps the last good state when a malformed frame arrives', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit('message', { data: snapshot(ViewModeNode) })
+    })
+    act(() => {
+      socket.emit('message', { data: 'not json' })
+    })
+
+    expect(result.current).toEqual({ viewMode: 'node' })
   })
 
   it('ignores non-text payloads', () => {
-    const { result } = renderHook(() => useWebSocketMessage('ws://example.test/ws'))
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
     const socket = FakeWebSocket.instances[0]
 
     act(() => {
@@ -99,7 +116,7 @@ describe('useWebSocketMessage', () => {
   })
 
   it('closes the socket on unmount', () => {
-    const { unmount } = renderHook(() => useWebSocketMessage('ws://example.test/ws'))
+    const { unmount } = renderHook(() => useSceneState('ws://example.test/ws'))
     const socket = FakeWebSocket.instances[0]
 
     unmount()
@@ -108,7 +125,7 @@ describe('useWebSocketMessage', () => {
   })
 
   it('closes the old socket and opens a new one when the url changes', () => {
-    const { rerender } = renderHook(({ url }) => useWebSocketMessage(url), {
+    const { rerender } = renderHook(({ url }) => useSceneState(url), {
       initialProps: { url: 'ws://example.test/a' },
     })
     const first = FakeWebSocket.instances[0]
