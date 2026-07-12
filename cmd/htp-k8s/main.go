@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/herzogf/htp-k8s/internal/kube"
+	"github.com/herzogf/htp-k8s/internal/scene"
 	"github.com/herzogf/htp-k8s/internal/server"
 )
 
@@ -74,7 +75,7 @@ func run(args []string, envAddr string) error {
 // cluster is a hard failure while a reachable-but-forbidden one is not. A
 // reachable cluster where the user merely cannot list Nodes degrades to
 // Namespace-mode and keeps serving, per ADR-0002.
-func resolveViewMode() (kube.ViewMode, error) {
+func resolveViewMode() (scene.ViewMode, error) {
 	clientset, err := kube.NewClientset()
 	if err != nil {
 		return "", fmt.Errorf("connect to kubernetes cluster: %w", err)

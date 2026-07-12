@@ -7,33 +7,22 @@ import (
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-)
 
-// ViewMode determines what a Tower represents in the scene (see CONTEXT.md).
-type ViewMode string
-
-const (
-	// ViewModeNode renders one Tower per Node. Selected when the current
-	// user is allowed to list Nodes cluster-wide.
-	ViewModeNode ViewMode = "node"
-
-	// ViewModeNamespace renders one Tower per Namespace/Project. The
-	// graceful-degradation default (ADR-0002): selected whenever the user
-	// cannot list Nodes, including on OpenShift where a user may only see
-	// their own Projects.
-	ViewModeNamespace ViewMode = "namespace"
+	"github.com/herzogf/htp-k8s/internal/scene"
 )
 
 // DetectViewMode runs a SelfSubjectAccessReview to decide the default View
-// Mode for the current user: ViewModeNode if the user may list Nodes
-// cluster-wide, otherwise ViewModeNamespace.
+// Mode for the current user: scene.ViewModeNode if the user may list Nodes
+// cluster-wide, otherwise scene.ViewModeNamespace. The ViewMode type and its
+// values live in the scene package because they are part of the frontend wire
+// contract (see scene.SceneState); this package only decides which one applies.
 //
 // Per ADR-0002 the probe must never hard-fail: a denied review, an API error,
 // or an unreachable authorization endpoint all degrade to ViewModeNamespace
 // (the least-privilege default) rather than surfacing an error. The returned
 // error is informational only — the ViewMode is always usable — so callers can
 // log why the probe fell back without having to treat it as fatal.
-func DetectViewMode(ctx context.Context, client kubernetes.Interface) (ViewMode, error) {
+func DetectViewMode(ctx context.Context, client kubernetes.Interface) (scene.ViewMode, error) {
 	review := &authorizationv1.SelfSubjectAccessReview{
 		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authorizationv1.ResourceAttributes{
@@ -46,11 +35,11 @@ func DetectViewMode(ctx context.Context, client kubernetes.Interface) (ViewMode,
 
 	result, err := client.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
 	if err != nil {
-		return ViewModeNamespace, fmt.Errorf("node-list permission probe failed: %w", err)
+		return scene.ViewModeNamespace, fmt.Errorf("node-list permission probe failed: %w", err)
 	}
 
 	if result.Status.Allowed {
-		return ViewModeNode, nil
+		return scene.ViewModeNode, nil
 	}
-	return ViewModeNamespace, nil
+	return scene.ViewModeNamespace, nil
 }

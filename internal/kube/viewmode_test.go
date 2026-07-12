@@ -11,6 +11,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/herzogf/htp-k8s/internal/kube"
+	"github.com/herzogf/htp-k8s/internal/scene"
 )
 
 // ssarReactor makes the fake clientset answer every SelfSubjectAccessReview
@@ -28,25 +29,25 @@ func TestDetectViewMode(t *testing.T) {
 	tests := []struct {
 		name     string
 		reactor  k8stesting.ReactionFunc
-		wantMode kube.ViewMode
+		wantMode scene.ViewMode
 		wantErr  bool
 	}{
 		{
 			name:     "can list nodes selects node mode",
 			reactor:  ssarReactor(true),
-			wantMode: kube.ViewModeNode,
+			wantMode: scene.ViewModeNode,
 		},
 		{
 			name:     "cannot list nodes falls back to namespace mode",
 			reactor:  ssarReactor(false),
-			wantMode: kube.ViewModeNamespace,
+			wantMode: scene.ViewModeNamespace,
 		},
 		{
 			name: "probe error degrades gracefully to namespace mode",
 			reactor: func(k8stesting.Action) (bool, runtime.Object, error) {
 				return true, nil, errors.New("authorization endpoint unreachable")
 			},
-			wantMode: kube.ViewModeNamespace,
+			wantMode: scene.ViewModeNamespace,
 			wantErr:  true,
 		},
 	}
