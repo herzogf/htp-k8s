@@ -60,11 +60,11 @@ func buildScene(t *testing.T, objs []runtime.Object, mode scene.ViewMode) []scen
 	client := fake.NewSimpleClientset(objs...)
 	ctx := context.Background()
 
-	towers, err := kube.BuildTowers(ctx, client, nil, mode)
+	towers, err := kube.BuildTowers(ctx, client, nil, mode, kube.NamespaceFilter{})
 	if err != nil {
 		t.Fatalf("BuildTowers %s: %v", mode, err)
 	}
-	byTower, err := kube.BuildPanels(ctx, client, mode)
+	byTower, err := kube.BuildPanels(ctx, client, mode, nil)
 	if err != nil {
 		t.Fatalf("BuildPanels %s: %v", mode, err)
 	}
@@ -296,7 +296,7 @@ func TestAttachPanels_EveryTowerNonNil(t *testing.T) {
 func TestBuildPanels_Empty(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
-	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNode)
+	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNode, nil)
 	if err != nil {
 		t.Fatalf("BuildPanels: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestBuildPanels_ListForbiddenDegrades(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	client.PrependReactor("list", "pods", forbiddenPodList())
 
-	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNamespace)
+	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNamespace, nil)
 	if err == nil {
 		t.Fatal("expected an informational error when pods can't be listed, got nil")
 	}

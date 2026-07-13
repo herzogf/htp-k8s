@@ -25,7 +25,7 @@ const deltaTimeout = 3 * time.Second
 func startWatcher(t *testing.T, mode scene.ViewMode, objs ...runtime.Object) (*kube.SceneWatcher, *fake.Clientset) {
 	t.Helper()
 	client := fake.NewSimpleClientset(objs...)
-	w := kube.NewSceneWatcher(client, nil, mode)
+	w := kube.NewSceneWatcher(client, nil, mode, kube.NamespaceFilter{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)

@@ -57,11 +57,11 @@ func TestBuildPanels_RealCluster(t *testing.T) {
 	// Towers, then bucketed Panels, then nested together.
 	buildScene := func(mode scene.ViewMode) []scene.Tower {
 		t.Helper()
-		towers, err := kube.BuildTowers(ctx, c.Clientset, dyn, mode)
+		towers, err := kube.BuildTowers(ctx, c.Clientset, dyn, mode, kube.NamespaceFilter{})
 		if err != nil {
 			t.Fatalf("BuildTowers %s: %v", mode, err)
 		}
-		byTower, err := kube.BuildPanels(ctx, c.Clientset, mode)
+		byTower, err := kube.BuildPanels(ctx, c.Clientset, mode, nil)
 		if err != nil {
 			t.Fatalf("BuildPanels %s: %v", mode, err)
 		}

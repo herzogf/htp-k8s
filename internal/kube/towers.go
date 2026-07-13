@@ -45,16 +45,24 @@ var projectGVR = schema.GroupVersionResource{
 //     fallback path: a user who cannot list Nodes always gets Namespace-mode
 //     Towers when any namespace-or-project source is readable.
 //
+// The NamespaceFilter selects which Namespace/Project Towers are included: in
+// Namespace-mode a Tower is a Namespace/Project, so the filter is applied to the
+// listed Namespaces/Projects (by name or by label — the object's own labels are
+// available here) before layout, so the grid is laid out over exactly the
+// admitted set with no gaps. It is deliberately ignored in Node-mode, where a
+// Tower is a Node and is never namespace-scoped (the filter instead scopes
+// pods' Panels there — see BuildScene). The zero-value filter admits everything.
+//
 // The dynamic client may be nil, in which case the OpenShift Project fallback
 // is skipped (used by Node-mode unit tests that never reach it).
-func BuildTowers(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode) ([]scene.Tower, error) {
+func BuildTowers(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode, filter NamespaceFilter) ([]scene.Tower, error) {
 	switch mode {
 	case scene.ViewModeNode:
 		return nodeTowers(ctx, client)
 	default:
 		// ViewModeNamespace is the safe default for any unrecognized mode:
 		// it is the least-privilege View Mode (ADR-0002).
-		return namespaceTowers(ctx, client, dyn)
+		return namespaceTowers(ctx, client, dyn, filter)
 	}
 }
 
@@ -73,6 +81,26 @@ func namesOf[T any, PT interface {
 	return names
 }
 
+// admittedNames is namesOf restricted to the items the NamespaceFilter admits,
+// evaluating each item's name and labels through filter.admits. Both Namespaces
+// (typed) and Projects (unstructured) satisfy metav1.Object, which exposes both
+// GetName and GetLabels, so name-mode and label-mode filtering share this one
+// loop across both Tower sources. A zero-value filter admits everything, making
+// this equivalent to namesOf for the no-filter default.
+func admittedNames[T any, PT interface {
+	*T
+	metav1.Object
+}](items []T, filter NamespaceFilter) []string {
+	names := make([]string, 0, len(items))
+	for i := range items {
+		obj := PT(&items[i])
+		if filter.admits(obj.GetName(), obj.GetLabels()) {
+			names = append(names, obj.GetName())
+		}
+	}
+	return names
+}
+
 // nodeTowers lists Nodes and lays them out as Towers, one per Node.
 func nodeTowers(ctx context.Context, client kubernetes.Interface) ([]scene.Tower, error) {
 	list, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
@@ -82,15 +110,37 @@ func nodeTowers(ctx context.Context, client kubernetes.Interface) ([]scene.Tower
 	return layOutTowers(namesOf(list.Items)), nil
 }
 
-// namespaceTowers lists Namespaces and lays them out as Towers, one per
-// Namespace. On an OpenShift-shaped cluster where the user cannot list
-// cluster Namespaces but can list their own Projects, it falls back to the
-// Project list (same names, see projectGVR). Per ADR-0002 this fallback keeps
-// Namespace-mode usable for a restricted OpenShift user instead of hard-failing.
-func namespaceTowers(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface) ([]scene.Tower, error) {
+// namespaceTowers lays out one Tower per admitted Namespace/Project (see
+// admittedNamespaceNames for the source and OpenShift fallback). Per ADR-0002 a
+// listing failure degrades to an empty Tower set rather than hard-failing the
+// scene: the client still gets a valid Namespace-mode SceneState, just with no
+// Towers, and the caller can log why.
+func namespaceTowers(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, filter NamespaceFilter) ([]scene.Tower, error) {
+	names, err := admittedNamespaceNames(ctx, client, dyn, filter)
+	if err != nil {
+		return layOutTowers(nil), fmt.Errorf("build namespace towers: %w", err)
+	}
+	return layOutTowers(names), nil
+}
+
+// admittedNamespaceNames returns the names of the Namespaces — or, on an
+// OpenShift-shaped cluster where the user cannot list cluster Namespaces but can
+// list their own Projects, the Projects (same names, see projectGVR) — that the
+// filter admits. It is the single Namespace/Project name source shared by both
+// filtered consumers: Namespace-mode Tower building (namespaceTowers) and the
+// Node-mode label-filter pod predicate (NamespaceFilter.podNamespacePredicate).
+// Routing both through here means the filter is evaluated exactly one way —
+// client-side, against each object's own name and labels via admittedNames — so
+// the two consumers can never drift on what a selector admits, and the OpenShift
+// fallback lives in one place.
+//
+// Per ADR-0002 the Project fallback keeps a restricted OpenShift user usable
+// instead of hard-failing; an error is returned only when neither source is
+// readable, with the original Namespace error preserved for the report.
+func admittedNamespaceNames(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, filter NamespaceFilter) ([]string, error) {
 	list, err := client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err == nil {
-		return layOutTowers(namesOf(list.Items)), nil
+		return admittedNames(list.Items, filter), nil
 	}
 
 	// Namespaces weren't listable. On OpenShift a user often may not list
@@ -100,22 +150,21 @@ func namespaceTowers(ctx context.Context, client kubernetes.Interface, dyn dynam
 	// names — but the original namespace error is preserved for the report if
 	// the fallback is unavailable.
 	nsErr := err
-	projectNames, projErr := listProjectNames(ctx, dyn)
+	projectNames, projErr := listProjectNames(ctx, dyn, filter)
 	if projErr != nil {
-		// Neither source is readable. Degrade to an empty Tower set rather
-		// than hard-failing the scene (ADR-0002): the client still gets a
-		// valid Namespace-mode SceneState, just with no Towers, and the
-		// caller can log why.
-		return layOutTowers(nil), fmt.Errorf("list namespaces or projects for towers: namespaces: %v; projects: %w", nsErr, projErr)
+		return nil, fmt.Errorf("list namespaces or projects: namespaces: %v; projects: %w", nsErr, projErr)
 	}
-	return layOutTowers(projectNames), nil
+	return projectNames, nil
 }
 
-// listProjectNames lists OpenShift Project names via the dynamic client. It
-// returns an error when the dynamic client is absent (nil) or the Projects
-// resource can't be listed (including the vanilla-Kubernetes case where the
-// project.openshift.io API group simply doesn't exist).
-func listProjectNames(ctx context.Context, dyn dynamic.Interface) ([]string, error) {
+// listProjectNames lists the names of the OpenShift Projects admitted by the
+// filter via the dynamic client. It returns an error when the dynamic client is
+// absent (nil) or the Projects resource can't be listed (including the
+// vanilla-Kubernetes case where the project.openshift.io API group simply
+// doesn't exist). The filter is applied client-side over the unstructured
+// Projects' names and labels, the same admittedNames path the Namespace source
+// uses.
+func listProjectNames(ctx context.Context, dyn dynamic.Interface, filter NamespaceFilter) ([]string, error) {
 	if dyn == nil {
 		return nil, fmt.Errorf("no dynamic client for OpenShift Project fallback")
 	}
@@ -128,7 +177,7 @@ func listProjectNames(ctx context.Context, dyn dynamic.Interface) ([]string, err
 		return nil, fmt.Errorf("list openshift projects: %w", err)
 	}
 
-	return namesOf(list.Items), nil
+	return admittedNames(list.Items, filter), nil
 }
 
 // layOutTowers turns a set of Tower names into Towers positioned in the
