@@ -107,15 +107,16 @@ func resolveViewMode(client kubernetes.Interface) (scene.ViewMode, error) {
 
 // snapshotProvider returns a server.Config.Snapshot function that builds a
 // fresh SceneState for each /ws connection: the detected View Mode plus the
-// current Towers listed from the cluster (see kube.BuildTowers). Building per
+// current Towers listed from the cluster (see kube.BuildTowers), each with its
+// Panels nested in (see kube.BuildPanels / kube.AttachPanels). Building per
 // connection keeps the snapshot current without a watch cache — deltas that
 // push live changes are a later ticket (ADR-0007).
 //
-// A Tower-listing error never fails the connection (ADR-0002): it is logged and
-// the client still receives a valid SceneState carrying the View Mode, just
-// with whatever Towers were obtained (possibly none). This keeps the /ws
-// contract — a well-formed frame with a valid viewMode — intact regardless of
-// RBAC.
+// Neither a Tower- nor a Panel-listing error fails the connection (ADR-0002):
+// each is logged and the client still receives a valid SceneState carrying the
+// View Mode, just with whatever Towers/Panels were obtained (possibly none).
+// This keeps the /ws contract — a well-formed frame with a valid viewMode —
+// intact regardless of RBAC.
 func snapshotProvider(client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode) func(context.Context) scene.SceneState {
 	return func(ctx context.Context) scene.SceneState {
 		ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
@@ -130,6 +131,15 @@ func snapshotProvider(client kubernetes.Interface, dyn dynamic.Interface, mode s
 			// when the listing failed outright (see scene.SceneState.Towers).
 			towers = []scene.Tower{}
 		}
+
+		panelsByTower, err := kube.BuildPanels(ctx, client, mode)
+		if err != nil {
+			log.Printf("build panels: %v", err)
+		}
+		// Nest each Tower's Panels into it (empty array for a Tower with no
+		// pods); pods whose Tower wasn't built are dropped.
+		towers = kube.AttachPanels(towers, panelsByTower)
+
 		return scene.SceneState{ViewMode: mode, Towers: towers}
 	}
 }
