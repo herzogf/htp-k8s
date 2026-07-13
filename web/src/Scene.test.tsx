@@ -20,6 +20,14 @@ vi.mock('@react-three/drei', () => ({
   Text: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
 }))
 
+// FreeFlyControls (#20) drives the live camera via useThree/useFrame, which have
+// no WebGL context under jsdom. Its movement/look maths is unit-tested in
+// scene/freeFly.test.ts and its wiring by the Playwright interaction test, so
+// here it's a no-op stand-in — Scene only mounts it inside the Canvas.
+vi.mock('./scene/FreeFlyControls', () => ({
+  FreeFlyControls: () => null,
+}))
+
 // Stand in for the WebGL Tower so we can assert the Scene -> Tower wiring
 // (count and identity) without a renderer; the placement maths itself is
 // covered by scene/towerLayout.test.ts.
