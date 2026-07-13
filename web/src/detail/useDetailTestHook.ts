@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { type SceneState } from '../generated/scenestate'
+import { type FocusController, panelFocusPose, towerFocusPose } from '../scene/focus'
 import { panelInstances } from '../scene/panelLayout'
 import { towerPlacements } from '../scene/towerLayout'
 import { panelSelection, type Selection, towerSelection } from './selection'
@@ -11,19 +12,25 @@ import { panelSelection, type Selection, towerSelection } from './selection'
  * in headless Chromium (the same flakiness #20/#74 hit). So, exactly as
  * FreeFlyControls exposes the live camera through `__htpCameraTest`, this hook
  * exposes the scene's real Towers/Panels and a way to open a given one's popup
- * *through the same `select` a click calls* (via the pure {@link towerSelection}/
- * {@link panelSelection} mapping). The e2e then asserts on the popup's real drei
- * `Html` DOM — the deterministic, meaningful part — without depending on a
- * headless raycast landing on a specific instance.
+ * *through the same `focus` + `select` a click calls* (via the pure
+ * {@link towerSelection}/{@link panelSelection} mapping and the matching
+ * {@link towerFocusPose}/{@link panelFocusPose}). Mirroring the full click — the
+ * camera fly-to as well as the selection — matters because the popup is anchored
+ * in-world beside the element (see {@link DetailLayer}): a select without the
+ * focus leaves the popup pinned wherever its Panel happens to project, often off
+ * the camera frame, so opening it exactly as a click does is what puts it on
+ * screen. The e2e then asserts on the popup's real drei `Html` DOM — the
+ * deterministic, meaningful part — without depending on a headless raycast
+ * landing on a specific instance.
  */
 export interface DetailTestHook {
   /** The Towers currently in the scene, in scene order. */
   towers: () => { name: string }[]
   /** The Pods (Panels) currently in the scene, in scene order. */
   pods: () => { namespace: string; pod: string }[]
-  /** Open the Detail Popup for a Tower by name; false if no such Tower. */
+  /** Fly to and open the Detail Popup for a Tower by name; false if no such Tower. */
   selectTower: (name: string) => boolean
-  /** Open the Detail Popup for a Pod by identity; false if no such Pod. */
+  /** Fly to and open the Detail Popup for a Pod by identity; false if no such Pod. */
   selectPod: (namespace: string, pod: string) => boolean
   /** Close the open Detail Popup. */
   clear: () => void
@@ -45,12 +52,15 @@ declare global {
 /**
  * Publishes {@link DetailTestHook} on `window` for the current scene, re-derived
  * whenever the scene snapshot changes so the exposed Towers/Panels stay current.
- * Removes the handle on unmount. `select`/`clear` are the Scene's own selection
- * setters, so a hook-driven selection is indistinguishable from a click-driven
- * one downstream.
+ * Removes the handle on unmount. `focus`/`select`/`clear` are the Scene's own
+ * Focus controller and selection setters, and each open flies the camera then
+ * sets the selection in the same order a real click does (see {@link Panels}'
+ * `onClick`), so a hook-driven open is indistinguishable from a click-driven one
+ * downstream — camera framing included.
  */
 export function useDetailTestHook(
   sceneState: SceneState | null,
+  focus: FocusController | null,
   select: (selection: Selection) => void,
   clear: () => void,
 ): void {
@@ -68,6 +78,7 @@ export function useDetailTestHook(
         if (!placement) {
           return false
         }
+        focus?.requestFocus(towerFocusPose(placement.position))
         select(towerSelection(placement))
         return true
       },
@@ -78,6 +89,7 @@ export function useDetailTestHook(
         if (!instance) {
           return false
         }
+        focus?.requestFocus(panelFocusPose(instance.position))
         select(panelSelection(instance))
         return true
       },
@@ -87,5 +99,5 @@ export function useDetailTestHook(
     return () => {
       delete window.__htpDetailTest
     }
-  }, [sceneState, select, clear])
+  }, [sceneState, focus, select, clear])
 }

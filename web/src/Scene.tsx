@@ -51,8 +51,9 @@ export function Scene({ sceneState }: SceneProps) {
   )
   // Publish a stable test handle so the e2e can open a Tower/Panel popup
   // deterministically, instead of relying on a headless canvas raycast landing
-  // on a specific instance (the #20/#74 flakiness). It drives the same `select`.
-  useDetailTestHook(sceneState, select, clear)
+  // on a specific instance (the #20/#74 flakiness). It drives the same Focus
+  // fly-to + `select` a real click does, so the opened popup is framed on screen.
+  useDetailTestHook(sceneState, focusController, select, clear)
 
   return (
     <div className="scene-root">

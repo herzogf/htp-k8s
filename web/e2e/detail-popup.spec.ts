@@ -26,9 +26,26 @@ interface DetailTestHook {
   clear: () => void
 }
 
+// Mirror of CameraTestHook in src/scene/FreeFlyControls.tsx (its single source of
+// truth), kept identical to the declaration in focus.spec.ts / freefly.spec.ts so
+// the shared `window.__htpCameraTest` augmentation agrees across specs. The visual
+// tour only needs `isFocusing()` — to know the Focus fly-to has settled before it
+// captures the hero screenshot, so the frame isn't a mid-flight blur.
+interface Vec3Pose {
+  position: [number, number, number]
+  target: [number, number, number]
+}
+interface CameraTestHook {
+  getPosition: () => [number, number, number]
+  getQuaternion: () => [number, number, number, number]
+  isFocusing: () => boolean
+  getFocusGoal: () => Vec3Pose | null
+}
+
 declare global {
   interface Window {
     __htpDetailTest?: DetailTestHook
+    __htpCameraTest?: CameraTestHook
   }
 }
 
@@ -118,4 +135,60 @@ test('detail popup: a Tower opens a read-only Node/Namespace summary popup', asy
   // Escape closes it — the keyboard dismiss affordance.
   await page.keyboard.press('Escape')
   await expect(popup).toHaveCount(0)
+})
+
+/**
+ * Waits for the Focus fly-to opened by the detail hook to settle (so the shot
+ * isn't a mid-flight blur), then lets the framed popup linger a beat — both so
+ * the single recorded video shows each popup clearly, one after the other, and
+ * so the captured PNG is a clean hero frame of the popup on screen.
+ */
+async function settleAndLinger(page: Page): Promise<void> {
+  await page
+    .waitForFunction(() => window.__htpCameraTest?.isFocusing() === false, undefined, {
+      timeout: 10_000,
+    })
+    .catch(() => {
+      // A camera hook is always present in this build, but never let a missing
+      // fly-to signal fail the capture — fall through to the fixed linger.
+    })
+  await page.waitForTimeout(1_500)
+}
+
+// A visual walk-through that captures the two Detail Popups the way a viewer
+// sees them: it opens the Tower popup (camera framed on the Tower), captures it,
+// dismisses it, then opens the Pod popup (camera framed on the Panel) and
+// captures that — one popup on screen at a time, in sequence. Its two named
+// screenshots and its single recorded video (Playwright records one video per
+// test) are the deliverable artifacts for reviewing the popup visuals without a
+// local run; the two tests above are the rigorous DOM assertions. Because the
+// detail hook now mirrors the full click (Focus fly-to + selection), each popup
+// is framed on screen rather than pinned to an off-camera anchor.
+test('detail popup: a visual tour of the Tower then the Pod popup', async ({ page }, testInfo) => {
+  await page.goto('/')
+  await waitForPopulatedScene(page)
+  const popup = page.getByTestId('detail-popup')
+
+  // 1) The Tower (Node/Namespace summary) popup, framed and captured.
+  const tower = await page.evaluate(() => window.__htpDetailTest!.towers()[0])
+  await page.evaluate((name) => window.__htpDetailTest!.selectTower(name), tower.name)
+  await expect(popup).toHaveAttribute('data-detail-kind', 'tower')
+  await expect(popup.locator('.detail-card__kind')).toHaveText(/Node|Namespace/)
+  await settleAndLinger(page)
+  await page.screenshot({ path: testInfo.outputPath('tower-detail-popup.png') })
+
+  // Dismiss it so only one popup is ever on screen at a time.
+  await page.keyboard.press('Escape')
+  await expect(popup).toHaveCount(0)
+
+  // 2) The Pod (detail + live log tail) popup, framed and captured.
+  const pod = await page.evaluate(() => window.__htpDetailTest!.pods()[0])
+  await page.evaluate((p) => window.__htpDetailTest!.selectPod(p.namespace, p.pod), pod)
+  await expect(popup).toHaveAttribute('data-detail-kind', 'pod')
+  await expect(popup.locator('.detail-card__title')).toHaveText(pod.pod)
+  // Wait for the real pod detail (ADR-0009) to load so the shot isn't a spinner.
+  await expect(popup.locator('.detail-rows__value', { hasText: pod.namespace })).toBeVisible()
+  await expect(popup.getByTestId('log-tail')).toBeVisible()
+  await settleAndLinger(page)
+  await page.screenshot({ path: testInfo.outputPath('pod-detail-popup.png') })
 })
