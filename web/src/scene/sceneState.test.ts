@@ -1,49 +1,75 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { type SceneState, ViewModeNamespace, ViewModeNode } from '../generated/scenestate'
-import { makeSceneState } from '../test-support/sceneFixtures'
-import { parseSceneState, viewModeLabel } from './sceneState'
+import { makePanel, makeSceneState, makeTower } from '../test-support/sceneFixtures'
+import { parseSceneFrame, viewModeLabel } from './sceneState'
 
-describe('parseSceneState', () => {
-  it('parses a well-formed Node-mode snapshot', () => {
-    const state = parseSceneState(JSON.stringify({ viewMode: ViewModeNode }))
+describe('parseSceneFrame', () => {
+  it('routes a snapshot frame (has viewMode, no type) to kind "snapshot"', () => {
+    const snapshot = makeSceneState({
+      viewMode: ViewModeNode,
+      towers: [makeTower({ name: 'node-a', panels: [makePanel({ pod: 'p1' })] })],
+    })
 
-    expect(state).toEqual({ viewMode: 'node' })
+    expect(parseSceneFrame(JSON.stringify(snapshot))).toEqual({ kind: 'snapshot', snapshot })
   })
 
-  it('parses a well-formed Namespace-mode snapshot', () => {
-    const state = parseSceneState(JSON.stringify({ viewMode: ViewModeNamespace }))
+  it('routes a Namespace-mode snapshot', () => {
+    const frame = parseSceneFrame(JSON.stringify({ viewMode: ViewModeNamespace, towers: [] }))
 
-    expect(state).toEqual({ viewMode: 'namespace' })
+    expect(frame).toEqual({ kind: 'snapshot', snapshot: { viewMode: 'namespace', towers: [] } })
   })
 
-  it('preserves unknown fields so a grown snapshot still parses', () => {
-    // Issue #12 adds `towers` to SceneState; a frame carrying it must still
-    // parse, and the extra field is kept (this code just ignores it).
-    const raw = JSON.stringify({ viewMode: ViewModeNode, towers: [{ id: 'a' }] })
+  it('preserves unknown snapshot fields (a grown snapshot still parses)', () => {
+    const frame = parseSceneFrame(JSON.stringify({ viewMode: ViewModeNode, extra: 'kept' }))
 
-    const state = parseSceneState(raw)
+    expect(frame).toMatchObject({ kind: 'snapshot', snapshot: { viewMode: 'node', extra: 'kept' } })
+  })
 
-    expect(state).toMatchObject({ viewMode: 'node', towers: [{ id: 'a' }] })
+  it('returns null when a snapshot-shaped frame has a non-string viewMode', () => {
+    expect(parseSceneFrame(JSON.stringify({ viewMode: 42 }))).toBeNull()
+  })
+
+  it('returns null when a snapshot-shaped frame has an empty-string viewMode', () => {
+    expect(parseSceneFrame(JSON.stringify({ viewMode: '' }))).toBeNull()
+  })
+
+  it('routes a delta frame (has a type discriminant) to kind "delta"', () => {
+    const frame = parseSceneFrame(JSON.stringify({ type: 'towerRemoved', towerName: 'node-a' }))
+
+    expect(frame).toEqual({ kind: 'delta', delta: { type: 'towerRemoved', towerName: 'node-a' } })
+  })
+
+  it('narrows a towerAdded delta with its full Tower', () => {
+    const tower = makeTower({ name: 'node-a', grid: { col: 1, row: 2 }, panels: [makePanel()] })
+
+    const frame = parseSceneFrame(JSON.stringify({ type: 'towerAdded', tower }))
+
+    expect(frame).toEqual({ kind: 'delta', delta: { type: 'towerAdded', tower } })
   })
 
   it('returns null for a non-JSON frame', () => {
-    expect(parseSceneState('not json')).toBeNull()
-  })
-
-  it('returns null when viewMode is missing', () => {
-    expect(parseSceneState(JSON.stringify({ something: 'else' }))).toBeNull()
-  })
-
-  it('returns null when viewMode is not a string', () => {
-    expect(parseSceneState(JSON.stringify({ viewMode: 42 }))).toBeNull()
-  })
-
-  it('returns null when viewMode is an empty string', () => {
-    expect(parseSceneState(JSON.stringify({ viewMode: '' }))).toBeNull()
+    expect(parseSceneFrame('not json')).toBeNull()
   })
 
   it('returns null for a JSON payload that is not an object', () => {
-    expect(parseSceneState(JSON.stringify('node'))).toBeNull()
+    expect(parseSceneFrame(JSON.stringify('node'))).toBeNull()
+  })
+
+  it('returns null for a snapshot-shaped frame missing viewMode', () => {
+    expect(parseSceneFrame(JSON.stringify({ towers: [] }))).toBeNull()
+  })
+
+  it('returns null (not a snapshot) for an unknown delta type', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    expect(parseSceneFrame(JSON.stringify({ type: 'somethingNew', towerName: 'x' }))).toBeNull()
+  })
+
+  it('returns null for a malformed delta of a known type', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    // towerMoved requires a grid; without it the delta is unusable.
+    expect(parseSceneFrame(JSON.stringify({ type: 'towerMoved', towerName: 'node-a' }))).toBeNull()
   })
 })
 

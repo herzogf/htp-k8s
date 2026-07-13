@@ -4,9 +4,10 @@ name: PR
 #   * Fast, source-level checks — Backend (Go), Frontend (Node) — give quick
 #     feedback and are the required status checks on `main`.
 #   * Slower, heavier checks added by issue #8 — the kind + KWOK backend
-#     integration suite, the Playwright e2e suite, and a report-only Trivy
-#     scan of the ko-built container image — run as their own separate jobs
-#     so the fast tier stays fast.
+#     integration suite, the Playwright e2e suite, and a Trivy scan of the
+#     ko-built container image (CVE findings non-blocking, but a scan
+#     *operational* failure fails the check — see #69/#70) — run as their own
+#     separate jobs so the fast tier stays fast.
 # NOTE (governance): making the three #8 jobs *required* status checks is a
 # change to the `main` branch-protection ruleset and is left to the repo owner.
 
@@ -311,12 +312,24 @@ jobs:
           echo "Built image: ${image}"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
 
-      # Report-only, never blocking (ADR-0005): the scan surfaces findings but
-      # must not fail the PR, so pin exit-code to 0 and don't let a scanner
-      # hiccup break the job.
-      - name: Trivy scan (report-only)
+      # FINDINGS are non-blocking but a scan OPERATIONAL failure fails the check
+      # — matching release.yml since #69/#70. exit-code "0" makes Trivy exit 0
+      # when it *finds* vulnerabilities (Criticals included) so CVEs never fail
+      # the PR; and with NO continue-on-error, a genuine scan *error* — auth/401,
+      # image-pull, DB download, hang — exits non-zero and turns the
+      # Container scan (Trivy) check RED, rather than passing off a
+      # silently-empty security report. Rationale: catch a broken scan in the PR
+      # rather than being surprised by it at release.
+      #
+      # The step-level timeout-minutes (#70) bounds a setup hang — the trivy
+      # binary/DB download stall observed on #67 — so it fails fast instead of
+      # stalling to the job timeout; with continue-on-error gone, that timeout
+      # then correctly fails the check (same class as the Playwright-install
+      # timeout in #66/#68). trivy-action is a `uses:` step, so the timeout is
+      # the clean guard here (a shell retry loop can't wrap the action directly).
+      - name: Trivy scan (findings non-blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        continue-on-error: true
+        timeout-minutes: 5
         with:
           image-ref: ${{ steps.build.outputs.image }}
           format: sarif
@@ -324,9 +337,11 @@ jobs:
           exit-code: "0"
           ignore-unfixed: false
 
+      # No continue-on-error and no if: always() — this runs only after the scan
+      # above succeeds, and a failed upload fails the job. The invariant: a real
+      # SARIF lands in the Security tab, or the Container scan (Trivy) check goes
+      # red. (Mirrors the release.yml upload.)
       - name: Upload Trivy SARIF to Security tab
-        if: ${{ always() }}
-        continue-on-error: true
         uses: github/codeql-action/upload-sarif@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # v3
         with:
           sarif_file: trivy-results.sarif
