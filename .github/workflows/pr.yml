@@ -203,6 +203,23 @@ jobs:
           kubectl cluster-info
           kubectl get nodes
 
+      # ADR-0004's "modest" tier: layer a KWOK controller plus a handful of fake
+      # Nodes and ~30 fake Pods (varied phases) onto the single real kind node,
+      # so the screenshot/video below show a populated multi-tower scene rather
+      # than one lone tower (issue #57). Reuses the vendored KWOK manifests from
+      # the #5 harness. Full scale (50+ nodes) stays in the nightly job (#29).
+      # Runs before the Playwright step so the objects exist when the app lists
+      # them on /ws connect.
+      #
+      # continue-on-error: seeding is a screenshot-populating nicety, not a
+      # correctness gate. If KWOK flakes, the e2e still runs against the bare
+      # single-node cluster (one tower) and the smoke assertions hold — the
+      # modest tier degrades gracefully rather than destabilizing the PR
+      # (ADR-0004 acceptance).
+      - name: Seed modest KWOK nodes/pods
+        continue-on-error: true
+        run: ./test/e2e/kwok/seed.sh
+
       - name: Run Playwright e2e suite
         run: task web:e2e
 
