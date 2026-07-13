@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // noEnv is an env lookup that returns nothing, so a test exercises flag/default
 // behaviour without inheriting the real process environment.
@@ -109,5 +112,39 @@ func TestParseFlags_InvalidLabelSelectorRejected(t *testing.T) {
 func TestParseFlags_InvalidNamePatternRejected(t *testing.T) {
 	if _, err := parseFlags([]string{"-namespace-filter", "openshift-[a"}, noEnv); err == nil {
 		t.Fatal("expected an error for a malformed name pattern, got nil")
+	}
+}
+
+func TestVersionRequested(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"no args", nil, false},
+		{"version subcommand", []string{"version"}, true},
+		{"-version flag", []string{"-version"}, true},
+		{"--version flag", []string{"--version"}, true},
+		{"addr flag only", []string{"-addr", ":9090"}, false},
+		{"version not first arg is still a flag", []string{"-addr", ":9090", "--version"}, true},
+		{"version as flag value is not a subcommand", []string{"-addr", "version"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := versionRequested(tc.args); got != tc.want {
+				t.Fatalf("versionRequested(%q) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVersionString_IncludesBuildMetadata(t *testing.T) {
+	// versionString must surface all three injected build vars so the printed
+	// line is a complete build fingerprint.
+	s := versionString()
+	for _, want := range []string{version, commit, date} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("versionString() = %q, missing %q", s, want)
+		}
 	}
 }
