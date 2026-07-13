@@ -101,6 +101,246 @@ export interface SceneDelta {
 }
 
 //////////
+// source: detail.go
+
+/**
+ * TowerKind names what a Tower's detail describes, mirroring the View Mode the
+ * Tower was built under: a Node in Node-mode, or a Namespace/Project in
+ * Namespace-mode. It tells the frontend which of TowerDetail's summary payloads
+ * (Node or Namespace) is populated.
+ */
+export type TowerKind = string;
+/**
+ * TowerKindNode marks a TowerDetail describing a Node (Node-mode). Its Node
+ * summary is populated and Namespace is nil.
+ */
+export const TowerKindNode: TowerKind = "node";
+/**
+ * TowerKindNamespace marks a TowerDetail describing a Namespace/Project
+ * (Namespace-mode). Its Namespace summary is populated and Node is nil.
+ */
+export const TowerKindNamespace: TowerKind = "namespace";
+/**
+ * TowerDetail is the on-demand summary for a single Tower, shown in the Detail
+ * Popup when a Tower is clicked. Which summary it carries depends on the View
+ * Mode the scene is in (see TowerKind): a Node summary in Node-mode, a
+ * Namespace/Project summary in Namespace-mode. Per ADR-0002 the detail degrades
+ * gracefully: a Tower the caller cannot read in full (e.g. a Node a
+ * namespace-scoped user may not Get) still yields a TowerDetail with its Name
+ * and Kind, just with the summary payload absent, rather than a hard failure.
+ */
+export interface TowerDetail {
+  /**
+   * Name is the Tower's identity — the Node name or Namespace/Project name —
+   * matching the Tower.Name in the SceneState it was opened from.
+   */
+  name: string;
+  /**
+   * Kind names what this Tower represents and which summary below is populated.
+   */
+  kind: TowerKind;
+  /**
+   * Node is the Node summary, populated only for TowerKindNode (and nil when
+   * the Node could not be read — the ADR-0002 degraded case).
+   */
+  node?: NodeSummary;
+  /**
+   * Namespace is the Namespace/Project summary, populated only for
+   * TowerKindNamespace (and nil when it could not be read).
+   */
+  namespace?: NamespaceSummary;
+}
+/**
+ * NodeSummary is the read-only summary of a Node shown in a Node-mode Tower's
+ * Detail Popup: its readiness, key node-info, capacity, and labels.
+ */
+export interface NodeSummary {
+  /**
+   * Ready is true when the Node's Ready condition is True.
+   */
+  ready: boolean;
+  /**
+   * Status is a short human-readable readiness label: "Ready", "NotReady", or
+   * "Unknown" (the Ready condition absent or Unknown).
+   */
+  status: string;
+  /**
+   * KubeletVersion is the Node's reported kubelet version (may be empty on a
+   * simulated node).
+   */
+  kubeletVersion: string;
+  /**
+   * OS and Architecture are the Node's operating system and CPU architecture.
+   */
+  os: string;
+  architecture: string;
+  /**
+   * CPU, Memory, and Pods are the Node's capacity as Kubernetes quantity
+   * strings (e.g. "32", "256Gi", "110"), carried as-is for display.
+   */
+  cpu: string;
+  memory: string;
+  pods: string;
+  /**
+   * Labels are the Node's labels.
+   */
+  labels: { [key: string]: string};
+  /**
+   * PodCount is the number of pods scheduled on this Node (best-effort: 0 when
+   * the caller may not list pods).
+   */
+  podCount: number /* int */;
+}
+/**
+ * NamespaceSummary is the read-only summary of a Namespace/Project shown in a
+ * Namespace-mode Tower's Detail Popup.
+ */
+export interface NamespaceSummary {
+  /**
+   * Phase is the Namespace lifecycle phase — "Active" or "Terminating" — or
+   * empty when unknown (e.g. an OpenShift Project read via the fallback path
+   * that exposes no phase).
+   */
+  phase: string;
+  /**
+   * Labels are the Namespace/Project's labels.
+   */
+  labels: { [key: string]: string};
+  /**
+   * PodCount is the number of pods in this Namespace/Project (best-effort: 0
+   * when the caller may not list pods).
+   */
+  podCount: number /* int */;
+}
+/**
+ * PodDetail is the on-demand detail for a single Pod, shown in the Detail Popup
+ * when a Panel is clicked (see CONTEXT.md). It is the static half of the popup;
+ * the live log tail (LogTail) streams separately. All fields are read-only view
+ * data — there is deliberately no action, exec, or full-log field (ADR-0003).
+ */
+export interface PodDetail {
+  /**
+   * Namespace and Pod are the pod's cluster-unique identity, matching the
+   * Panel the popup was opened from.
+   */
+  namespace: string;
+  pod: string;
+  /**
+   * Node is the Node the pod is scheduled on (empty if unscheduled).
+   */
+  node: string;
+  /**
+   * Phase is the pod's phase-like status (see PodPhase), the same derivation a
+   * Panel's color uses (CrashLoopBackOff surfaced as its own phase).
+   */
+  phase: PodPhase;
+  /**
+   * Color is the hex color for Phase (see ColorForPhase), so the popup matches
+   * the Panel it opened from without re-deriving it.
+   */
+  color: string;
+  /**
+   * RestartCount is the total container restart count across the pod, the key
+   * "is this pod unhealthy" number to surface.
+   */
+  restartCount: number /* int */;
+  /**
+   * Containers is the pod's containers with their per-container status, in the
+   * pod spec's order. Always non-nil (empty array, not null).
+   */
+  containers: ContainerDetail[];
+  /**
+   * Events are the pod's recent Kubernetes Events, most-recent-first and capped
+   * (see kube.BuildPodDetail) — the "what just happened to this pod" context.
+   * Always non-nil (empty array, not null). Events are one of several inputs to
+   * the scene, surfaced here as plain read-only text, not acted upon.
+   */
+  events: PodEvent[];
+}
+/**
+ * ContainerDetail is one container's read-only status within a PodDetail.
+ */
+export interface ContainerDetail {
+  /**
+   * Name is the container name.
+   */
+  name: string;
+  /**
+   * Image is the container image reference.
+   */
+  image: string;
+  /**
+   * Ready reflects the container's readiness probe / running state.
+   */
+  ready: boolean;
+  /**
+   * RestartCount is this container's restart count.
+   */
+  restartCount: number /* int */;
+  /**
+   * State is the container's lifecycle state: "Running", "Waiting",
+   * "Terminated", or "Unknown" (no status reported yet).
+   */
+  state: string;
+  /**
+   * Reason is the Waiting/Terminated reason (e.g. "CrashLoopBackOff",
+   * "Completed"), empty for a Running or status-less container.
+   */
+  reason?: string;
+}
+/**
+ * PodEvent is one recent Kubernetes Event about a pod, flattened to the read-only
+ * fields the Detail Popup shows. It is deliberately NOT treated as a Scene Delta
+ * input here — just display text (see CONTEXT.md's note distinguishing a k8s
+ * Event from a Scene Delta).
+ */
+export interface PodEvent {
+  /**
+   * Type is the event type: "Normal" or "Warning".
+   */
+  type: string;
+  /**
+   * Reason is the short machine reason (e.g. "Scheduled", "BackOff").
+   */
+  reason: string;
+  /**
+   * Message is the human-readable event message.
+   */
+  message: string;
+  /**
+   * Count is how many times this event has occurred (>=1).
+   */
+  count: number /* int */;
+  /**
+   * LastSeen is the RFC3339 timestamp the event was last observed, or empty if
+   * the source carried no timestamp.
+   */
+  lastSeen: string;
+}
+/**
+ * LogTailMaxLines is the height cap of the pod log tail: the Detail Popup shows a
+ * small (~3 row) live tail, never a full log viewer (ADR-0003). It bounds both
+ * the initial history the backend requests (TailLines) and the ring window it
+ * streams, so the tail is always at most this many lines regardless of how
+ * chatty the pod is.
+ */
+export const LogTailMaxLines = 3;
+/**
+ * LogTail is one frame of a Pod's bounded live log tail, streamed to the Detail
+ * Popup after the pod is clicked (see CONTEXT.md). Lines is the current window —
+ * at most LogTailMaxLines entries, oldest first — replaced whole on each new
+ * line, so the frontend renders it directly without maintaining its own ring.
+ * This is a height-limited tail, not a full log viewer: there is no pagination,
+ * no "load more", and no way to fetch history beyond the window (ADR-0003).
+ */
+export interface LogTail {
+  /**
+   * Lines is the current tail window, oldest first, length 0..LogTailMaxLines.
+   */
+  lines: string[];
+}
+
+//////////
 // source: scenestate.go
 /*
 Package scene defines the wire contract between the htp-k8s backend and its
