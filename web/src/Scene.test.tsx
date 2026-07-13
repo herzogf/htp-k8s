@@ -1,14 +1,10 @@
 import { render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import {
-  type SceneState,
-  type Tower,
-  ViewModeNamespace,
-  ViewModeNode,
-} from './generated/scenestate'
+import { type Tower, type ViewMode, ViewModeNamespace, ViewModeNode } from './generated/scenestate'
 import { Scene } from './Scene'
 import { type TowerPlacement } from './scene/towerLayout'
+import { makeSceneState, makeTower } from './test-support/sceneFixtures'
 
 // jsdom has no WebGL context, so the real @react-three/fiber Canvas can't
 // mount here. Full 3D rendering correctness is covered by the Playwright
@@ -34,16 +30,21 @@ vi.mock('./scene/Tower', () => ({
   ),
 }))
 
-const tower = (name: string, col: number, row: number): Tower => ({
-  name,
-  grid: { col, row },
-  panels: [],
-})
+// The Panels InstancedMesh is WebGL (it writes instance matrix/color buffers on
+// a real three.js mesh), so stand it in here and just assert Scene wires the
+// snapshot's Towers through to it; the instancing itself is covered by
+// scene/panelLayout.test.ts and the Playwright e2e screenshot.
+vi.mock('./scene/Panels', () => ({
+  Panels: ({ towers }: { towers: Tower[] }) => (
+    <div data-testid="panels" data-tower-count={towers.length} />
+  ),
+}))
 
-const sceneState = (viewMode: SceneState['viewMode'], towers: Tower[] = []): SceneState => ({
-  viewMode,
-  towers,
-})
+const tower = (name: string, col: number, row: number): Tower =>
+  makeTower({ name, grid: { col, row } })
+
+const sceneState = (viewMode: ViewMode, towers: Tower[] = []) =>
+  makeSceneState({ viewMode, towers })
 
 describe('Scene', () => {
   it('renders an R3F canvas', () => {
@@ -98,6 +99,15 @@ describe('Scene', () => {
       'bravo',
       'charlie',
     ])
+  })
+
+  it("renders the instanced Panels, handing them the snapshot's Towers", () => {
+    const towers = [tower('alpha', 0, 0), tower('bravo', 1, 0)]
+
+    render(<Scene sceneState={sceneState(ViewModeNode, towers)} />)
+
+    const panels = screen.getByTestId('panels')
+    expect(panels).toHaveAttribute('data-tower-count', '2')
   })
 
   it('renders no Towers for an empty scene, but still shows the indicator', () => {

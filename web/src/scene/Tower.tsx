@@ -17,8 +17,9 @@ export const TOWER_COLOR = '#39d3ff'
  * shader: an emissive, low-opacity `meshStandardMaterial` gives the translucent
  * inner glow and `drei`'s `<Edges>` traces the crisp neon outline that reads as
  * a cyberpunk hologram. Depth writes are disabled so overlapping Towers blend
- * additively-ish instead of z-fighting into opaque slabs. Panels on the Tower
- * faces (the pods) are a later ticket (#15) — this renders only the structure.
+ * additively-ish instead of z-fighting into opaque slabs. This renders only the
+ * structure; the Pods on its faces are drawn separately as instanced Panels
+ * (see {@link Panels}).
  */
 export function Tower({ placement }: { placement: TowerPlacement }) {
   return (

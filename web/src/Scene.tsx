@@ -4,6 +4,7 @@ import { type SceneState } from './generated/scenestate'
 import { viewModeLabel } from './scene/sceneState'
 import { towerPlacements } from './scene/towerLayout'
 import { Tower, TOWER_COLOR } from './scene/Tower'
+import { Panels } from './scene/Panels'
 
 const WAITING_TEXT = 'Waiting for connection…'
 
@@ -20,8 +21,9 @@ export interface SceneProps {
  * Mode indicator from #11 as a HUD badge over the canvas.
  *
  * Towers are placed by {@link towerPlacements} (unit-tested independently of
- * WebGL) and drawn by {@link Tower}. Panels on the Tower faces and Floor Lanes
- * are later tickets built on top of this seam.
+ * WebGL) and drawn by {@link Tower}; each Tower's Pods are rendered as glowing
+ * Panels by {@link Panels} (a single InstancedMesh over the whole scene). Floor
+ * Lanes are a later ticket built on top of this seam.
  */
 export function Scene({ sceneState }: SceneProps) {
   const label = sceneState ? viewModeLabel(sceneState.viewMode) : WAITING_TEXT
@@ -40,7 +42,14 @@ export function Scene({ sceneState }: SceneProps) {
             circuit-board plane. Real Floor Lanes are a later, decorative ticket. */}
         <gridHelper args={[120, 60, TOWER_COLOR, '#0d2630']} />
         {sceneState ? (
-          placements.map((placement) => <Tower key={placement.name} placement={placement} />)
+          <>
+            {placements.map((placement) => (
+              <Tower key={placement.name} placement={placement} />
+            ))}
+            {/* Every Pod as a glowing Panel, drawn as one InstancedMesh over all
+                Towers (the scale decision — see {@link Panels}). */}
+            <Panels towers={sceneState.towers} />
+          </>
         ) : (
           <Text
             color="white"
