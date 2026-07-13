@@ -49,6 +49,29 @@ type Config struct {
 	// client reconnects for a fresh snapshot. Nil falls back to the
 	// snapshot-only /ws using Snapshot.
 	Subscribe func(ctx context.Context) (scene.SceneState, <-chan scene.SceneDelta, func())
+
+	// TowerDetail returns the on-demand Detail Popup summary for one Tower by
+	// name (issue #23), backing GET /api/towers/{name}. It is separate from the
+	// /ws snapshot+delta stream on purpose: detail is fetched only when a user
+	// clicks a Tower, so bundling it into every SceneState would bloat the
+	// broadcast at scale (ADR-0007/ADR-0008). It is read-only (ADR-0003) and
+	// degrades gracefully (ADR-0002) — a resource it can't fully read still
+	// yields a usable detail. Nil disables the endpoint (503).
+	TowerDetail func(ctx context.Context, name string) (scene.TowerDetail, error)
+
+	// PodDetail returns the on-demand Detail Popup detail for one Pod (issue #23),
+	// backing GET /api/pods/{namespace}/{name}. Read-only (ADR-0003). Nil
+	// disables the endpoint (503).
+	PodDetail func(ctx context.Context, namespace, name string) (scene.PodDetail, error)
+
+	// PodLogTail streams a Pod's bounded live log tail (issue #23), backing the
+	// SSE endpoint GET /api/pods/{namespace}/{name}/logtail. It drives emit with
+	// each new tail window and blocks until the passed ctx is cancelled (the
+	// client closing the stream) or the log stream ends; the handler cancels ctx
+	// on client disconnect so it stops promptly. It is a small height-limited
+	// tail, never a full log viewer or exec (ADR-0003). Nil disables the endpoint
+	// (503).
+	PodLogTail func(ctx context.Context, namespace, name string, emit func(scene.LogTail)) error
 }
 
 // StaticSnapshot adapts a fixed SceneState into a Config.Snapshot function,
@@ -75,6 +98,13 @@ func NewHandler(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
 	mux.HandleFunc("GET /ws", newWSHandler(cfg))
+	// On-demand Detail Popup endpoints (issue #23). All read-only GETs — the
+	// ServeMux rejects any other method with 405, so no mutating verb is reachable
+	// on this data path (ADR-0003). The more specific /logtail pattern coexists
+	// with the pod-detail pattern; Go's ServeMux routes the longer match first.
+	mux.HandleFunc("GET /api/towers/{name}", handleTowerDetail(cfg))
+	mux.HandleFunc("GET /api/pods/{namespace}/{name}", handlePodDetail(cfg))
+	mux.HandleFunc("GET /api/pods/{namespace}/{name}/logtail", handlePodLogTail(cfg))
 	mux.Handle("GET /", http.FileServerFS(frontendFS()))
 	return mux
 }
