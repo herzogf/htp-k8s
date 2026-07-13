@@ -26,11 +26,16 @@ builds:
     # Inject build metadata into main.{version,commit,date} so the image binary
     # self-reports via `htp-k8s version`. ko builds separately from GoReleaser,
     # so the release workflow's ko step exports VERSION/COMMIT/DATE from the tag
-    # (see .github/workflows/release.yml); `task release:image` sets dev
-    # defaults for local `ko build --local`.
+    # (see .github/workflows/release.yml).
+    #
+    # Use `index .Env "X"` (not `.Env.X`): ko templates with missingkey=error,
+    # so a bare `ko build` with those env vars UNSET — e.g. the report-only
+    # Trivy scan in pr.yml — would hard-fail on `.Env.X`. `index` returns empty
+    # for a missing key instead, and the if/else falls back to the same
+    # dev-build defaults as the Go source, so a bare build still works.
     ldflags:
       - -s
       - -w
-      - -X main.version={{.Env.VERSION}}
-      - -X main.commit={{.Env.COMMIT}}
-      - -X main.date={{.Env.DATE}}
+      - -X main.version={{if index .Env "VERSION"}}{{index .Env "VERSION"}}{{else}}dev{{end}}
+      - -X main.commit={{if index .Env "COMMIT"}}{{index .Env "COMMIT"}}{{else}}none{{end}}
+      - -X main.date={{if index .Env "DATE"}}{{index .Env "DATE"}}{{else}}unknown{{end}}
