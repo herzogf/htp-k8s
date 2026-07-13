@@ -1,0 +1,107 @@
+# GoReleaser configuration for htp-k8s (issue #30).
+#
+# Produces, on a git-tag push, a GitHub Release carrying: cross-platform Go
+# binaries, a checksums.txt, an auto-generated changelog, and a Syft-generated
+# CycloneDX SBOM per archive (ADR-0005 supply-chain posture). The container
+# image is built separately with `ko` (see .ko.yaml) — GoReleaser owns the
+# binaries/archives here, ko owns the image.
+#
+# NOT configured here (deliberately): GitHub-native artifact attestation
+# (actions/attest-*) and Trivy release scanning — those are issue #31, layered
+# on top in the release workflow, not GoReleaser blocks. No cosign signing
+# block either: ADR-0005 chose GitHub's keyless OIDC attestation over
+# GoReleaser's own signing to avoid two overlapping mechanisms.
+#
+# Verify locally without publishing anything:
+#   task release:snapshot      # -> goreleaser release --snapshot --clean
+#
+# The single binary embeds the frontend via go:embed (ADR-0001); the `before`
+# hook below runs `task release:frontend` so every archived binary carries the
+# real built UI, not the committed placeholder.
+version: 2
+
+project_name: htp-k8s
+
+before:
+  hooks:
+    # Build + embed the frontend (codegen -> vite build -> copy into
+    # internal/server/dist) so the compiled binaries embed the real UI.
+    - task release:frontend
+
+builds:
+  - id: htp-k8s
+    main: ./cmd/htp-k8s
+    binary: htp-k8s
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    # main.go has no version vars to -X into, so keep ldflags to a stripped
+    # build only; adding -X main.version would be silently ignored by the
+    # linker (no such symbol). Revisit if the binary grows a version var.
+    ldflags:
+      - -s
+      - -w
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: htp-k8s
+    # tar.gz everywhere except Windows, which gets a zip.
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# Auto-generated changelog from git history between tags. Uses git (not the
+# GitHub API) so it needs no token and works offline. NOTE: GoReleaser skips
+# the changelog during `--snapshot` (release notes are a publish-stage concern);
+# it is generated on a real tag push. `goreleaser check` validates this block.
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+      - "Merge pull request"
+      - "Merge branch"
+
+# Syft-generated SBOM, one per archive, in CycloneDX JSON (ADR-0005). Requires
+# the `syft` binary on PATH.
+sboms:
+  - id: cyclonedx
+    artifacts: archive
+    cmd: syft
+    args:
+      - "$artifact"
+      - "--output"
+      - "cyclonedx-json=$document"
+    documents:
+      - "${artifact}.cyclonedx.sbom.json"
+
+release:
+  # owner/repo are inferred from the git remote — no need to hardcode them.
+  # Publish as a draft so a human reviews the assets before it goes live; the
+  # release is only ever created on an explicit tag push (see release.yml).
+  draft: true
+  prerelease: auto
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"

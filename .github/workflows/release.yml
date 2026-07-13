@@ -1,0 +1,135 @@
+name: Release
+
+# Cuts a release ONLY on an explicit tag push (issue #30). There is NO
+# auto-tagging anywhere — a human pushes a `v*` tag when they decide to release,
+# and only then does this run. It never triggers on PRs or branch pushes, so it
+# does not run on the PR that introduces it.
+#
+# What it produces (ADR-0005 supply-chain posture):
+#   * GoReleaser -> a GitHub Release (draft) with cross-platform binaries, a
+#     checksums.txt, an auto-generated changelog, and a Syft CycloneDX SBOM per
+#     archive.
+#   * ko -> the container image, pushed to GHCR (no Dockerfile).
+#
+# Deliberately NOT here (issue #31, layered on later): GitHub-native artifact
+# attestation (actions/attest-*) and Trivy release scanning.
+#
+# All third-party actions are pinned to a commit SHA (repo convention); the
+# trailing comment records the human-readable version.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least privilege at the top; each job widens only what it needs.
+permissions:
+  contents: read
+
+jobs:
+  goreleaser:
+    name: GoReleaser (binaries, checksums, changelog, SBOM)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Create the GitHub Release and upload its assets.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history + tags so GoReleaser can build the changelog between
+          # the current and previous tag.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          # Pin the Go MINOR + check-latest to build against the newest patched
+          # 1.26.x (see docs/agents/findings.md and pr.yml for the full why).
+          # Bump this when the project moves to a new Go minor.
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+
+      # GoReleaser's `sboms` block shells out to `syft`; put it on PATH.
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      # GoReleaser's `before` hook runs `task release:frontend` (codegen + vite
+      # build + embed), so the archived binaries carry the real UI (ADR-0001).
+      # Node + Task above make that hook runnable.
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  image:
+    name: Container image (ko -> GHCR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Push the container image to GHCR.
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+
+      # Embed the real frontend before ko compiles the binary into the image.
+      - name: Build and embed frontend
+        run: task release:frontend
+
+      # ko builds the multi-arch image (no Dockerfile, no local daemon) and
+      # pushes it to GHCR under the repo, tagged with the git tag and `latest`.
+      # `ko login` uses the workflow's GITHUB_TOKEN — no extra secret needed.
+      # Values flow through `env:` and are referenced as shell vars (never
+      # interpolated into the script body) to avoid the ${{ }} injection pattern.
+      - name: Build and push image (ko)
+        env:
+          KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/htp-k8s
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          echo "$REGISTRY_TOKEN" | ko login ghcr.io \
+            --username "$REGISTRY_USER" --password-stdin
+          ko build --bare \
+            --platform=linux/amd64,linux/arm64 \
+            --tags "${RELEASE_TAG},latest" \
+            ./cmd/htp-k8s

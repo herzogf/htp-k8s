@@ -2,6 +2,8 @@
 *.test
 *.out
 /.task/
+# GoReleaser build output (issue #30).
+/dist/
 
 # Claude Code: commit shared subagent definitions (.claude/agents/), but not
 # transient worktrees, personal settings, or environment-provided skills.

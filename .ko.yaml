@@ -1,0 +1,28 @@
+# ko configuration for the htp-k8s container image (issue #30).
+#
+# Packaging decision (issue #1 / ADR-0001, ADR-0005): the image is built with
+# `ko` — NO Dockerfile and NO local Docker daemon required to *build* (ko can
+# build+push straight to a registry). `ko build --local ./cmd/htp-k8s` loads a
+# throwaway image into the local Docker daemon for verification/CVE scanning;
+# the real release build pushes to a registry from the tag workflow.
+#
+# The single Go binary embeds the frontend via go:embed (ADR-0001). `ko build`
+# compiles that binary; run `task release:frontend` first so the real built
+# frontend is embedded (the committed placeholder internal/server/dist/index.html
+# lets a bare `ko build` succeed for scanning without a frontend build — see
+# docs/agents/findings.md).
+
+# Distroless static base (Chainguard) — no shell, no package manager, minimal
+# CVE surface. ko runs the resulting image as a non-root user by default.
+defaultBaseImage: cgr.dev/chainguard/static:latest
+
+builds:
+  - id: htp-k8s
+    main: ./cmd/htp-k8s
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s
+      - -w
