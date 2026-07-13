@@ -74,11 +74,16 @@ type SceneWatcher struct {
 // doc's Project-fallback note) but is accepted so the rebuild path matches
 // BuildScene exactly and so adding a Project informer later needs no signature
 // change.
-func NewSceneWatcher(client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode) *SceneWatcher {
+//
+// The NamespaceFilter is the startup preset (see NamespaceFilter): it is baked
+// into the rebuild closure so every snapshot and every diffed Scene Delta is
+// filtered identically — the filtered scene is simply the scene, so deltas
+// never reveal a Namespace/Project the snapshot hid.
+func NewSceneWatcher(client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode, filter NamespaceFilter) *SceneWatcher {
 	rebuild := func(ctx context.Context) scene.SceneState {
 		ctx, cancel := context.WithTimeout(ctx, rebuildTimeout)
 		defer cancel()
-		return BuildScene(ctx, client, dyn, mode)
+		return BuildScene(ctx, client, dyn, mode, filter)
 	}
 
 	factory := informers.NewSharedInformerFactory(client, 0)

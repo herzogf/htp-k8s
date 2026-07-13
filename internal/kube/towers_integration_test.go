@@ -50,7 +50,7 @@ func TestBuildTowers_RealCluster(t *testing.T) {
 				len(wantNames), fakeNodeCount+1, fakeNodeCount)
 		}
 
-		towers, err := kube.BuildTowers(ctx, c.Clientset, dyn, scene.ViewModeNode)
+		towers, err := kube.BuildTowers(ctx, c.Clientset, dyn, scene.ViewModeNode, kube.NamespaceFilter{})
 		if err != nil {
 			t.Fatalf("BuildTowers node mode: %v", err)
 		}
@@ -65,7 +65,7 @@ func TestBuildTowers_RealCluster(t *testing.T) {
 			t.Fatal("cluster reported no namespaces")
 		}
 
-		towers, err := kube.BuildTowers(ctx, c.Clientset, dyn, scene.ViewModeNamespace)
+		towers, err := kube.BuildTowers(ctx, c.Clientset, dyn, scene.ViewModeNamespace, kube.NamespaceFilter{})
 		if err != nil {
 			t.Fatalf("BuildTowers namespace mode: %v", err)
 		}
@@ -91,7 +91,7 @@ func TestBuildTowers_RealCluster(t *testing.T) {
 			t.Fatalf("build impersonating dynamic client: %v", err)
 		}
 
-		towers, err := kube.BuildTowers(ctx, client, restrictedDyn, scene.ViewModeNamespace)
+		towers, err := kube.BuildTowers(ctx, client, restrictedDyn, scene.ViewModeNamespace, kube.NamespaceFilter{})
 		if err == nil {
 			t.Error("BuildTowers = nil error for a user who can list neither namespaces nor projects, want an informational error")
 		}
