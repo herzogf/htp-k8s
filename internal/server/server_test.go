@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -195,6 +197,123 @@ func TestWS_SnapshotBuiltPerConnection(t *testing.T) {
 
 	if first, second := readTowerName(), readTowerName(); first == second {
 		t.Errorf("both connections saw tower %q; snapshot was not rebuilt per connection", first)
+	}
+}
+
+// TestWS_SnapshotThenDeltas proves the ADR-0007 wire shape end to end: with a
+// Subscribe configured, the first /ws frame is the full SceneState snapshot
+// (well-formed, valid viewMode, no `type` tag — what the e2e smoke test and the
+// current frontend rely on), and every frame after it is a Scene Delta carrying
+// a `type` discriminator. It also confirms the handler runs the unsubscribe on
+// disconnect.
+func TestWS_SnapshotThenDeltas(t *testing.T) {
+	deltas := make(chan scene.SceneDelta, 2)
+	deltas <- scene.SceneDelta{Type: scene.DeltaTowerAdded, Tower: &scene.Tower{Name: "node-x", Panels: []scene.Panel{}}}
+	deltas <- scene.SceneDelta{
+		Type:      scene.DeltaPanelAdded,
+		TowerName: "node-x",
+		Panel:     &scene.Panel{Namespace: "ns", Pod: "p1", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+	}
+
+	var unsubscribed atomic.Bool
+	cfg := server.Config{
+		Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
+			return scene.SceneState{ViewMode: scene.ViewModeNode, Towers: []scene.Tower{}},
+				deltas,
+				func() { unsubscribed.Store(true) }
+		},
+	}
+	ts := httptest.NewServer(server.NewHandler(cfg))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial %s: %v", wsURL, err)
+	}
+	defer resp.Body.Close()
+
+	// Frame 1: the snapshot. It must parse as a SceneState with a valid
+	// viewMode and must NOT carry a delta `type` tag.
+	_, body, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	var snap scene.SceneState
+	if err := json.Unmarshal(body, &snap); err != nil {
+		t.Fatalf("unmarshal snapshot %q: %v", body, err)
+	}
+	if snap.ViewMode != scene.ViewModeNode {
+		t.Errorf("snapshot viewMode = %q, want %q", snap.ViewMode, scene.ViewModeNode)
+	}
+	var tagged struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(body, &tagged); err != nil {
+		t.Fatalf("re-unmarshal snapshot: %v", err)
+	}
+	if tagged.Type != "" {
+		t.Errorf("snapshot carries a delta type tag %q, want none", tagged.Type)
+	}
+
+	// Frames 2..: the deltas, each with a `type` discriminator.
+	want := []scene.SceneDeltaType{scene.DeltaTowerAdded, scene.DeltaPanelAdded}
+	for i, wantType := range want {
+		_, body, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read delta %d: %v", i, err)
+		}
+		var d scene.SceneDelta
+		if err := json.Unmarshal(body, &d); err != nil {
+			t.Fatalf("unmarshal delta %d %q: %v", i, body, err)
+		}
+		if d.Type != wantType {
+			t.Errorf("delta %d type = %q, want %q", i, d.Type, wantType)
+		}
+	}
+
+	// Closing the client connection must trigger the handler's unsubscribe.
+	conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for !unsubscribed.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !unsubscribed.Load() {
+		t.Error("unsubscribe was not called after client disconnect")
+	}
+}
+
+// TestWS_ClosedDeltaChannelEndsConnection proves a dropped subscriber (its delta
+// channel closed by the watcher) ends the /ws connection, so the client can
+// reconnect for a fresh snapshot.
+func TestWS_ClosedDeltaChannelEndsConnection(t *testing.T) {
+	deltas := make(chan scene.SceneDelta)
+	cfg := server.Config{
+		Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
+			return scene.SceneState{ViewMode: scene.ViewModeNamespace}, deltas, func() {}
+		},
+	}
+	ts := httptest.NewServer(server.NewHandler(cfg))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer resp.Body.Close()
+	defer conn.Close()
+
+	if _, _, err := conn.ReadMessage(); err != nil { // consume snapshot
+		t.Fatalf("read snapshot: %v", err)
+	}
+
+	// Dropping the subscriber closes the channel; the server should then close
+	// the connection, which the client observes as a read error.
+	close(deltas)
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := conn.ReadMessage(); err == nil {
+		t.Error("expected connection to close after delta channel closed, got a frame")
 	}
 }
 

@@ -10,8 +10,8 @@
 // package and consumed by the frontend. It carries the View Mode and the set
 // of Towers, each Tower carrying its own Panels (one per Pod, #14). Per ADR-0007
 // the wire protocol is a full SceneState snapshot on connect followed by
-// incremental Scene Deltas; the deltas are a later ticket and are not defined
-// here.
+// incremental Scene Deltas; the SceneState snapshot is defined here, and the
+// SceneDelta stream that follows it in delta.go.
 package scene
 
 // ViewMode determines what a Tower represents in the scene (see CONTEXT.md).
