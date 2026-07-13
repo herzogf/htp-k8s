@@ -53,7 +53,7 @@ func TestSceneWatcher_RealCluster(t *testing.T) {
 		t.Fatalf("create pod node: %v", err)
 	}
 
-	w := kube.NewSceneWatcher(c.Clientset, nil, scene.ViewModeNode)
+	w := kube.NewSceneWatcher(c.Clientset, nil, scene.ViewModeNode, kube.NamespaceFilter{})
 	w.Start(ctx)
 
 	snap, ch, unsub := w.SnapshotAndSubscribe()

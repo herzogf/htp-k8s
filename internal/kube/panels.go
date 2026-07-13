@@ -37,13 +37,21 @@ const crashLoopBackOff = "CrashLoopBackOff"
 // returned map is always non-nil (empty when there are no pods, or when the pod
 // listing failed).
 //
+// admitNamespace is the Namespace Filter's pod-scoping predicate over a pod's
+// namespace name: a pod whose namespace it rejects contributes no Panel. It is
+// how the filter reaches pods in Node-mode, where a Tower is a Node (not hidden
+// by the filter) so the pods themselves must be scoped to the admitted
+// namespaces (see BuildScene). A nil predicate admits every pod — the no-filter
+// default and the Namespace-mode path, where filtering the Towers already drops
+// hidden namespaces' pods (AttachPanels).
+//
 // Listing pods is cluster-wide. If it fails — e.g. a restricted user who cannot
 // list pods at the cluster scope — BuildPanels degrades to an empty result with
 // an informational error rather than hard-failing the scene (ADR-0002),
 // mirroring BuildTowers: the caller still gets a valid SceneState. (The
 // OpenShift per-Project pod-listing fallback, the Panel analogue of
 // BuildTowers' Project fallback, is issue #55.)
-func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.ViewMode) (map[string][]scene.Panel, error) {
+func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.ViewMode, admitNamespace func(string) bool) (map[string][]scene.Panel, error) {
 	byTower := map[string][]scene.Panel{}
 
 	list, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
@@ -53,6 +61,10 @@ func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.Vi
 
 	for i := range list.Items {
 		pod := &list.Items[i]
+		if admitNamespace != nil && !admitNamespace(pod.Namespace) {
+			// The Namespace Filter excludes this pod's namespace from the scene.
+			continue
+		}
 		tower := towerForPod(pod, mode)
 		if tower == "" {
 			// No owning Tower under this View Mode (e.g. an unscheduled pod in
