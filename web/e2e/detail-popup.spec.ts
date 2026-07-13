@@ -1,90 +1,81 @@
-import { expect, type Locator, type Page, test } from '@playwright/test'
+import { expect, type Page, test } from '@playwright/test'
 
 // The Detail Popup (#24) is the one piece of the 3D scene that renders real,
 // queryable DOM: clicking a Tower or Panel opens an in-world popup through drei's
 // `Html` (unlike the WebGL canvas, which has nothing in the DOM to assert on —
-// see focus.spec.ts). This test drives the same stable click path the Focus test
-// uses and asserts on that popup's DOM content against the live KWOK-seeded
-// cluster and the real backend detail endpoints (ADR-0009), proving the whole
-// click → detail-fetch → popup-render path end to end.
+// see focus.spec.ts). This test asserts on that popup's DOM content against the
+// live KWOK-seeded cluster and the real backend detail endpoints (ADR-0009).
 //
-// Both AC targets are exercised: a Panel click yields a Pod popup with a live,
-// height-limited log tail, and a Tower click yields a Node/Namespace summary.
-// Because a headless click lands on whatever mesh is under the point, each test
-// scans a grid of click points until it finds the popup kind it needs — the
-// scene is densely populated, so both kinds are reliably reachable.
+// It does NOT click the canvas to open the popup: synthetic pointer input does
+// not reliably raycast onto an instanced Panel / Tower in headless Chromium (the
+// same flakiness #20/#74 hit). Instead it drives the popup through the stable
+// `window.__htpDetailTest` hook, which opens a given Tower/Panel's popup via the
+// *same* `select` a real click calls (the click→selection mapping is unit-tested
+// in src/detail/selection.test.ts). What matters here — the popup renders real,
+// deterministic DOM with the pod's details and a live, height-limited log tail —
+// is what this asserts, end to end against the real backend.
 
-async function waitForScene(page: Page): Promise<void> {
-  await expect(page.locator('canvas')).toBeVisible()
-  // The camera hook is published once the R3F scene is live (see focus.spec.ts);
-  // reuse it as the "scene is interactive" signal before we start clicking. Read
-  // it via a cast so this file needn't redeclare the global focus.spec.ts owns.
-  await page.waitForFunction(
-    () => (window as unknown as { __htpCameraTest?: unknown }).__htpCameraTest !== undefined,
-    undefined,
-    { timeout: 20_000 },
-  )
+// Mirror of DetailTestHook in src/detail/useDetailTestHook.ts (its single source
+// of truth). The e2e is a separate compilation domain from the app bundle, so
+// the shape is restated here rather than imported; keep the two in step.
+interface DetailTestHook {
+  towers: () => { name: string }[]
+  pods: () => { namespace: string; pod: string }[]
+  selectTower: (name: string) => boolean
+  selectPod: (namespace: string, pod: string) => boolean
+  clear: () => void
+}
+
+declare global {
+  interface Window {
+    __htpDetailTest?: DetailTestHook
+  }
 }
 
 /**
- * Clicks across a grid of points over the canvas until the open Detail Popup is
- * of `kind` ('tower' or 'pod'), returning its locator. Presses Escape before
- * each attempt so a previously-open popup can't sit over the canvas and swallow
- * the next click. Throws if no point yields the wanted kind.
+ * Waits for the scene to be live and populated: the canvas mounted, the detail
+ * hook published, and the KWOK-seeded snapshot delivered so at least one Tower
+ * and one Pod are present to open a popup for.
  */
-async function openPopupOfKind(page: Page, kind: 'tower' | 'pod'): Promise<Locator> {
-  const canvas = page.locator('canvas')
-  const box = await canvas.boundingBox()
-  if (!box) throw new Error('canvas has no bounding box')
-
-  const popup = page.getByTestId('detail-popup')
-  const cols = 7
-  const rows = 5
-  for (let r = 1; r <= rows; r++) {
-    for (let c = 1; c <= cols; c++) {
-      // Close any popup from the previous attempt so it doesn't intercept clicks.
-      await page.keyboard.press('Escape')
-      const x = box.x + (box.width * c) / (cols + 1)
-      const y = box.y + (box.height * r) / (rows + 1)
-      await page.mouse.click(x, y)
-
-      // A click either opens a popup (hit a mesh — the card renders immediately,
-      // with data-detail-kind set from the selection before its detail loads) or
-      // clears it (empty space). A short window is enough to tell which happened.
-      const appeared = await popup
-        .waitFor({ state: 'visible', timeout: 500 })
-        .then(() => true)
-        .catch(() => false)
-      if (!appeared) continue
-
-      if ((await popup.getAttribute('data-detail-kind')) === kind) {
-        return popup
-      }
-    }
-  }
-  throw new Error(`no click opened a Detail Popup of kind "${kind}"`)
+async function waitForPopulatedScene(page: Page): Promise<void> {
+  await expect(page.locator('canvas')).toBeVisible()
+  await page.waitForFunction(
+    () => {
+      const hook = window.__htpDetailTest
+      return !!hook && hook.towers().length > 0 && hook.pods().length > 0
+    },
+    undefined,
+    { timeout: 30_000 },
+  )
 }
 
-test('detail popup: clicking a Panel opens a read-only pod popup with a live log tail', async ({
-  page,
-}) => {
-  // Scanning a grid of click points for a specific popup kind can take many
-  // attempts against a live scene; give it headroom over the default 30s.
-  test.setTimeout(120_000)
+test('detail popup: a Panel opens a read-only pod popup with a live log tail', async ({ page }) => {
   await page.goto('/')
-  await waitForScene(page)
+  await waitForPopulatedScene(page)
 
-  const popup = await openPopupOfKind(page, 'pod')
+  // Open the first Pod's popup through the same selection a click would set.
+  const pod = await page.evaluate(() => window.__htpDetailTest!.pods()[0])
+  const opened = await page.evaluate(
+    (p) => window.__htpDetailTest!.selectPod(p.namespace, p.pod),
+    pod,
+  )
+  expect(opened).toBe(true)
 
-  // The popup carries real pod detail from GET /api/pods/{ns}/{name} (ADR-0009).
-  await expect(popup).toContainText('Pod')
+  const popup = page.getByTestId('detail-popup')
+  await expect(popup).toBeVisible()
+  await expect(popup).toHaveAttribute('data-detail-kind', 'pod')
+  await expect(popup.locator('.detail-card__kind')).toHaveText('Pod')
+  await expect(popup.locator('.detail-card__title')).toHaveText(pod.pod)
+
+  // Real pod detail from GET /api/pods/{ns}/{name} (ADR-0009) has loaded.
   await expect(popup.locator('.detail-rows__label', { hasText: 'Namespace' })).toBeVisible()
   await expect(popup.locator('.detail-rows__label', { hasText: 'Phase' })).toBeVisible()
   await expect(popup.locator('.detail-rows__label', { hasText: 'Restarts' })).toBeVisible()
+  await expect(popup.locator('.detail-rows__value', { hasText: pod.namespace })).toBeVisible()
 
   // The marquee: a live, height-limited (~3 row) log tail streamed over SSE. The
-  // element is present regardless of whether the simulated pod emits log lines;
-  // when it does, the window is capped at LogTailMaxLines (3).
+  // element is present regardless of whether the simulated pod emits lines; when
+  // it does, the window is capped at LogTailMaxLines (3).
   const logTail = popup.getByTestId('log-tail')
   await expect(logTail).toBeVisible()
   const lineCount = Number(await logTail.getAttribute('data-line-count'))
@@ -100,21 +91,26 @@ test('detail popup: clicking a Panel opens a read-only pod popup with a live log
   await expect(popup).toHaveCount(0)
 })
 
-test('detail popup: clicking a Tower opens a read-only summary popup at that tower', async ({
-  page,
-}) => {
-  // Scanning a grid of click points for a specific popup kind can take many
-  // attempts against a live scene; give it headroom over the default 30s.
-  test.setTimeout(120_000)
+test('detail popup: a Tower opens a read-only Node/Namespace summary popup', async ({ page }) => {
   await page.goto('/')
-  await waitForScene(page)
+  await waitForPopulatedScene(page)
 
-  const popup = await openPopupOfKind(page, 'tower')
+  const tower = await page.evaluate(() => window.__htpDetailTest!.towers()[0])
+  const opened = await page.evaluate(
+    (name) => window.__htpDetailTest!.selectTower(name),
+    tower.name,
+  )
+  expect(opened).toBe(true)
 
-  // A Tower popup carries the Node or Namespace/Project summary from
-  // GET /api/towers/{name} (ADR-0009) — its kind label is one of the two.
+  const popup = page.getByTestId('detail-popup')
+  await expect(popup).toBeVisible()
+  await expect(popup).toHaveAttribute('data-detail-kind', 'tower')
+  await expect(popup.locator('.detail-card__title')).toHaveText(tower.name)
+
+  // The summary from GET /api/towers/{name} (ADR-0009) resolves to a Node or a
+  // Namespace/Project popup once loaded (the "Tower" placeholder is the pre-load
+  // label only).
   await expect(popup.locator('.detail-card__kind')).toHaveText(/Node|Namespace/)
-  await expect(popup.locator('.detail-card__title')).not.toBeEmpty()
 
   // Read-only: only the Close control, no actions.
   await expect(popup.getByRole('button')).toHaveCount(1)

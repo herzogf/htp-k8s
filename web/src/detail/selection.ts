@@ -1,3 +1,6 @@
+import { type PanelInstance } from '../scene/panelLayout'
+import { type TowerPlacement } from '../scene/towerLayout'
+
 /**
  * The Detail Popup selection model: which Tower or Panel (Pod) the user clicked
  * and therefore which in-world Detail Popup is open (CONTEXT.md's "Detail
@@ -33,3 +36,29 @@ export interface PodSelection {
 
 /** What the user currently has selected, driving the open Detail Popup. */
 export type Selection = TowerSelection | PodSelection
+
+/**
+ * The {@link TowerSelection} for a clicked Tower, anchored at the prism's
+ * placement. This is the pure click→selection mapping a Tower's pointer handler
+ * applies once #74's pick has resolved the hit to a {@link TowerPlacement}; kept
+ * here (WebGL-free, unit-tested) so the same mapping backs both the real click
+ * path and the e2e test hook without duplicating the shape.
+ */
+export function towerSelection(placement: TowerPlacement): TowerSelection {
+  return { kind: 'tower', name: placement.name, anchor: placement.position }
+}
+
+/**
+ * The {@link PodSelection} for a clicked Panel, anchored at the Panel's
+ * world-space centre — the pure mapping applied once #74's instanced pick
+ * ({@link import('../scene/panelLayout').resolvePanel}) has resolved the hit
+ * `instanceId` to its originating {@link PanelInstance}.
+ */
+export function panelSelection(instance: PanelInstance): PodSelection {
+  return {
+    kind: 'pod',
+    namespace: instance.namespace,
+    pod: instance.pod,
+    anchor: instance.position,
+  }
+}

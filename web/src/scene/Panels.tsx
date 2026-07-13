@@ -1,6 +1,7 @@
 import { type ThreeEvent } from '@react-three/fiber'
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
+import { panelSelection } from '../detail/selection'
 import { useSelection } from '../detail/selectionContext'
 import { type Tower } from '../generated/scenestate'
 import { panelFocusPose } from './focus'
@@ -51,12 +52,7 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
     }
     event.stopPropagation()
     focus?.requestFocus(panelFocusPose(instance.position))
-    select({
-      kind: 'pod',
-      namespace: instance.namespace,
-      pod: instance.pod,
-      anchor: instance.position,
-    })
+    select(panelSelection(instance))
   }
 
   useLayoutEffect(() => {

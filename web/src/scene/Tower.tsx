@@ -1,5 +1,6 @@
 import { Edges } from '@react-three/drei'
 import { type ThreeEvent } from '@react-three/fiber'
+import { towerSelection } from '../detail/selection'
 import { useSelection } from '../detail/selectionContext'
 import { towerFocusPose } from './focus'
 import { useFocus } from './focusContext'
@@ -39,7 +40,7 @@ export function Tower({ placement }: { placement: TowerPlacement }) {
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     event.stopPropagation()
     focus?.requestFocus(towerFocusPose(placement.position))
-    select({ kind: 'tower', name: placement.name, anchor: placement.position })
+    select(towerSelection(placement))
   }
 
   return (

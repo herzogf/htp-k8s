@@ -12,6 +12,7 @@ import { FocusContext } from './scene/focusContext'
 import { DetailLayer } from './detail/DetailLayer'
 import { type Selection } from './detail/selection'
 import { SelectionContext, type SelectionApi } from './detail/selectionContext'
+import { useDetailTestHook } from './detail/useDetailTestHook'
 
 const WAITING_TEXT = 'Waiting for connection…'
 
@@ -48,6 +49,10 @@ export function Scene({ sceneState }: SceneProps) {
     () => ({ selection, select, clear }),
     [selection, select, clear],
   )
+  // Publish a stable test handle so the e2e can open a Tower/Panel popup
+  // deterministically, instead of relying on a headless canvas raycast landing
+  // on a specific instance (the #20/#74 flakiness). It drives the same `select`.
+  useDetailTestHook(sceneState, select, clear)
 
   return (
     <div className="scene-root">
