@@ -12,12 +12,10 @@ tasks:
       the Go structs, build the frontend, embed its output into the Go backend,
       then compile the binary (ADR-0001).
     cmds:
-      # Codegen first so the frontend typechecks against wire types that match
-      # the current Go SceneState (issue #10) — not a stale checked-in copy.
-      - task: codegen
-      - task: web:build
-      - rm -rf internal/server/dist
-      - cp -r web/dist internal/server/dist
+      # Regenerate + build + embed the frontend (release:frontend does codegen
+      # first so the frontend typechecks against wire types matching the current
+      # Go SceneState — issue #10 — not a stale checked-in copy), then compile.
+      - task: release:frontend
       - go build -o bin/htp-k8s ./cmd/htp-k8s
 
   codegen:
@@ -52,3 +50,43 @@ tasks:
     desc: Vet all Go packages.
     cmds:
       - go vet ./cmd/... ./internal/...
+
+  release:frontend:
+    desc: >
+      Build and embed the frontend for release artifacts (issue #30): regenerate
+      the wire types, build the frontend, and copy its output into
+      internal/server/dist so a subsequent `go build` / `ko build` / GoReleaser
+      run embeds the real UI (ADR-0001). This is the frontend-embed half of
+      `build`, minus the Go compile — GoReleaser and ko do the compile. It is
+      the GoReleaser `before` hook (see .goreleaser.yaml).
+    cmds:
+      - task: codegen
+      - task: web:build
+      - rm -rf internal/server/dist
+      - cp -r web/dist internal/server/dist
+
+  release:snapshot:
+    desc: >
+      Dry-run the release with GoReleaser (issue #30): build cross-platform
+      binaries, checksums, changelog, and a Syft CycloneDX SBOM locally WITHOUT
+      publishing anything. Requires goreleaser + syft on PATH. Artifacts land in
+      ./dist. The frontend is embedded via the GoReleaser `before` hook.
+    cmds:
+      - goreleaser release --snapshot --clean
+
+  release:image:
+    desc: >
+      Build the container image locally with ko (issue #30) and load it into the
+      local Docker daemon for verification/CVE scanning — no registry push
+      (ADR-0005). Embeds the real frontend first. Requires ko + a Docker daemon.
+    cmds:
+      - task: release:frontend
+      # Provide dev defaults for the version ldflags .ko.yaml injects, so a
+      # local build works without the release workflow's tag-derived env. COMMIT
+      # falls back to the short SHA; VERSION/DATE to simple dev markers.
+      - >-
+        KO_DOCKER_REPO=ko.local
+        VERSION="${VERSION:-dev}"
+        COMMIT="${COMMIT:-$(git rev-parse --short HEAD)}"
+        DATE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+        ko build --local ./cmd/htp-k8s
