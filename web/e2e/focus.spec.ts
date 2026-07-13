@@ -90,13 +90,18 @@ function dot(a: readonly number[], b: readonly number[]): number {
 }
 
 /**
- * Clicks the canvas until a Focus fly-to starts, returning the moment it does.
- * The scene fills the middle of the frame, so the centre almost always lands on
- * a Tower/Panel; a small ring of fallback offsets makes the test robust to the
- * exact framing (a click into empty space simply focuses nothing and we try the
- * next point) without depending on any single pixel being a mesh.
+ * Clicks the canvas until a Focus fly-to starts, returning that fly-to's goal
+ * pose. The scene fills the middle of the frame (the default camera looks at the
+ * tower grid's centre), so the centre almost always lands on a Tower/Panel; a
+ * small ring of fallback offsets makes this robust to the exact framing (a click
+ * into empty space simply focuses nothing and we try the next point) without
+ * depending on any single pixel being a mesh.
+ *
+ * The goal is read *inside* the wait predicate, at the frame Focus becomes
+ * active, so it's captured atomically — no race against a fly-to that settles
+ * before a separate read runs.
  */
-async function clickUntilFocusing(page: Page): Promise<void> {
+async function clickUntilFocusing(page: Page): Promise<Vec3Pose> {
   const canvas = page.locator('canvas')
   const box = await canvas.boundingBox()
   if (!box) throw new Error('canvas has no bounding box')
@@ -115,14 +120,22 @@ async function clickUntilFocusing(page: Page): Promise<void> {
   ]
   for (const [dx, dy] of offsets) {
     await page.mouse.click(cx + dx, cy + dy)
-    // Give the click's raycast + the next animation frame time to start a tween.
-    const started = await page
-      .waitForFunction(() => window.__htpCameraTest?.isFocusing() === true, undefined, {
-        timeout: 1000,
-      })
-      .then(() => true)
-      .catch(() => false)
-    if (started) return
+    // Resolve with the fly-to's goal the moment one is active; keep polling (up
+    // to the timeout) while no fly-to has started, then try the next point.
+    const handle = await page
+      .waitForFunction(
+        () => {
+          const hook = window.__htpCameraTest
+          return hook && hook.isFocusing() ? hook.getFocusGoal() : null
+        },
+        undefined,
+        { timeout: 1000 },
+      )
+      .catch(() => null)
+    if (handle) {
+      const goal = (await handle.jsonValue()) as Vec3Pose | null
+      if (goal) return goal
+    }
   }
   throw new Error('no click on the scene started a Focus fly-to')
 }
@@ -144,31 +157,41 @@ test('focus: clicking the scene smoothly animates the camera to face what was cl
   const before = await cameraPosition(page)
   const forwardBefore = normalize(await cameraForward(page))
 
-  // Click a Tower/Panel — this is the interaction under test.
-  await clickUntilFocusing(page)
-
-  // A fly-to is now animating: capture where it's headed (the clicked subject's
-  // viewing pose). The click actually resolved to a scene object, not empty space.
-  const goal = await focusGoal(page)
-  expect(goal).not.toBeNull()
-  const target = goal as Vec3Pose
+  // Click a Tower/Panel — this is the interaction under test — and capture where
+  // the resulting fly-to is headed (the clicked subject's viewing pose). That a
+  // goal comes back proves the click resolved to a scene object, not empty space.
+  const target = await clickUntilFocusing(page)
   // There is somewhere to fly: the goal camera pose differs from where we started.
   expect(distance(before, target.position)).toBeGreaterThan(0.5)
 
-  // Smooth, not a teleport: mid-flight the camera sits strictly between its start
-  // and its destination — it has left the start but not yet arrived.
-  await page.waitForTimeout(200)
-  const midFlight = await cameraPosition(page)
-  expect(distance(before, midFlight)).toBeGreaterThan(0.05)
-  expect(distance(midFlight, target.position)).toBeGreaterThan(0.05)
-
-  // Let the fly-to settle.
+  // Sample the camera as the fly-to runs, until it settles. Reading whether it's
+  // still focusing each step, then its position, lets us prove the motion was a
+  // smooth animation rather than a teleport — independent of the headless frame
+  // rate, which the fixed-timing approach can't be. Bounded so a stuck fly-to
+  // fails loudly instead of hanging.
+  const samples: Array<[number, number, number]> = [before]
+  const deadline = Date.now() + 6000
+  let focusing = true
+  while (focusing && Date.now() < deadline) {
+    focusing = await page.evaluate(() => window.__htpCameraTest?.isFocusing() === true)
+    samples.push(await cameraPosition(page))
+    if (focusing) await page.waitForTimeout(40)
+  }
+  // The fly-to actually ended (didn't run past the deadline still animating).
   await page.waitForFunction(() => window.__htpCameraTest?.isFocusing() === false, undefined, {
-    timeout: 5000,
+    timeout: 2000,
   })
 
+  // Smooth, not a teleport: at least one sample sat strictly between the start
+  // and the goal — the camera passed *through* the space rather than jumping. A
+  // single-frame teleport would leave every sample either at the start or the goal.
+  const sawIntermediate = samples.some(
+    (p) => distance(before, p) > 0.05 && distance(p, target.position) > 0.05,
+  )
+  expect(sawIntermediate).toBe(true)
+
   // It arrived: the camera has come to rest at the clicked subject's viewing
-  // pose (position and target both), a clearly different place from the start.
+  // pose, a clearly different place from the start.
   const settled = await cameraPosition(page)
   expect(distance(settled, target.position)).toBeLessThan(0.5)
   expect(distance(settled, before)).toBeGreaterThan(0.5)

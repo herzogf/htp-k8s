@@ -1,7 +1,13 @@
 import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import { Euler, Vector3 } from 'three'
-import { FOCUS_DURATION_SECONDS, focusLookAngles, type Pose, samplePose } from './focus'
+import {
+  FOCUS_DURATION_SECONDS,
+  focusLookAngles,
+  MAX_FOCUS_STEP_SECONDS,
+  type Pose,
+  samplePose,
+} from './focus'
 import { useFocus } from './focusContext'
 import {
   applyLook,
@@ -213,7 +219,9 @@ export function FreeFlyControls() {
       // camera there, and aim it at the pose's look-at target. We also fold that
       // aim back into yaw/pitch so free-fly resumes seamlessly from the focused
       // view once the tween ends (or the user interrupts it).
-      tween.current.elapsed += delta
+      // Cap the step so a stall's oversized delta can't leap the tween to its
+      // end in one frame (which would read as a teleport, not a smooth fly-to).
+      tween.current.elapsed += Math.min(delta, MAX_FOCUS_STEP_SECONDS)
       const pose = samplePose(
         tween.current.from,
         tween.current.to,

@@ -63,6 +63,18 @@ export const PANEL_VIEW_DISTANCE = 1.8
 export const FOCUS_DURATION_SECONDS = 0.9
 
 /**
+ * MAX_FOCUS_STEP_SECONDS caps how much a single frame may advance a fly-to. A
+ * stall — a GC pause, a tab regaining focus, a hitch on the click that starts
+ * the fly-to — can hand the render loop one enormous `delta`; without a cap that
+ * frame would leap the tween straight to its end, turning the smooth Focus into
+ * the teleport it exists to avoid. Capping the step spreads the fly-to over real
+ * frames instead, at the cost of it running a touch longer in wall-clock after a
+ * stall. At a normal frame rate every real delta is well under this, so it has
+ * no effect on the usual smooth animation.
+ */
+export const MAX_FOCUS_STEP_SECONDS = 1 / 30
+
+/**
  * The Focus camera Pose for a Tower, given the world-space centre of its prism
  * (a {@link TowerPlacement} position). The camera stands off the Tower's front
  * (+Z) face — the face its Panels are on — raised to {@link TOWER_VIEW_HEIGHT}

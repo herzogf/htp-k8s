@@ -5,6 +5,7 @@ import {
   easeInOutCubic,
   FOCUS_DURATION_SECONDS,
   focusLookAngles,
+  MAX_FOCUS_STEP_SECONDS,
   PANEL_VIEW_DISTANCE,
   panelFocusPose,
   type Pose,
@@ -128,6 +129,15 @@ describe('FOCUS_DURATION_SECONDS', () => {
   it('is a smooth animation, not an instant jump, but not a sluggish one', () => {
     expect(FOCUS_DURATION_SECONDS).toBeGreaterThan(0.3)
     expect(FOCUS_DURATION_SECONDS).toBeLessThan(2)
+  })
+})
+
+describe('MAX_FOCUS_STEP_SECONDS', () => {
+  it('caps a frame well below the whole duration, so a stalled frame cannot jump the fly-to to its end', () => {
+    expect(MAX_FOCUS_STEP_SECONDS).toBeGreaterThan(0)
+    // Many capped steps must fit inside a fly-to, so even a big stall leaves the
+    // animation spread across several frames rather than teleporting.
+    expect(MAX_FOCUS_STEP_SECONDS).toBeLessThan(FOCUS_DURATION_SECONDS / 4)
   })
 })
 
