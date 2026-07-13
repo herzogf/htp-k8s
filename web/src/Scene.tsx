@@ -5,6 +5,7 @@ import { viewModeLabel } from './scene/sceneState'
 import { towerPlacements } from './scene/towerLayout'
 import { Tower, TOWER_COLOR } from './scene/Tower'
 import { Panels } from './scene/Panels'
+import { FreeFlyControls } from './scene/FreeFlyControls'
 
 const WAITING_TEXT = 'Waiting for connection…'
 
@@ -32,6 +33,11 @@ export function Scene({ sceneState }: SceneProps) {
   return (
     <div className="scene-root">
       <Canvas camera={{ position: [10, 9, 15], fov: 50 }}>
+        {/* Manual free-fly navigation (#20): WASD + pointer-lock mouse-look. It
+            stays dormant on load — seeding its aim from the camera's initial
+            orientation — so the default framed skyline is unchanged until the
+            user flies. Automated Demo Mode flight is a separate later ticket. */}
+        <FreeFlyControls />
         <color attach="background" args={['#05050a']} />
         {/* Dim ambient plus a key light: enough to read the prisms' faces while
             keeping the dark, high-contrast data-center mood. The Towers are
