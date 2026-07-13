@@ -49,6 +49,22 @@ func recvDelta(t *testing.T, ch <-chan scene.SceneDelta) scene.SceneDelta {
 	}
 }
 
+// recvStructuralDelta reads deltas from ch until a non-blink (structural) delta
+// arrives, skipping any transient DeltaPanelBlink pulses. The lifecycle tests
+// assert on structural add/update/remove deltas; a phase transition also emits a
+// blink (its own concern, covered by the blink tests), which may interleave with
+// the structural delta and is ignored here.
+func recvStructuralDelta(t *testing.T, ch <-chan scene.SceneDelta) scene.SceneDelta {
+	t.Helper()
+	for {
+		d := recvDelta(t, ch)
+		if d.Type == scene.DeltaPanelBlink {
+			continue
+		}
+		return d
+	}
+}
+
 // expectNoDelta asserts no delta arrives within a short window — used to prove a
 // change that shouldn't affect the scene (e.g. a no-op update) emits nothing.
 func expectNoDelta(t *testing.T, ch <-chan scene.SceneDelta) {
@@ -94,7 +110,7 @@ func TestSceneWatcher_NodeMode_PodLifecycle(t *testing.T) {
 	if _, err := client.CoreV1().Pods("team").Update(ctx, p, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update pod: %v", err)
 	}
-	got = recvDelta(t, ch)
+	got = recvStructuralDelta(t, ch)
 	if got.Type != scene.DeltaPanelUpdated || got.Panel == nil ||
 		got.Panel.Phase != scene.PodPhaseRunning || got.Panel.Color != scene.ColorRunning {
 		t.Fatalf("update delta = %+v, want PanelUpdated Running/%s", got, scene.ColorRunning)
@@ -104,7 +120,7 @@ func TestSceneWatcher_NodeMode_PodLifecycle(t *testing.T) {
 	if err := client.CoreV1().Pods("team").Delete(ctx, "web-1", metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete pod: %v", err)
 	}
-	got = recvDelta(t, ch)
+	got = recvStructuralDelta(t, ch)
 	if got.Type != scene.DeltaPanelRemoved || got.TowerName != "node-a" ||
 		got.Namespace != "team" || got.Pod != "web-1" {
 		t.Fatalf("remove delta = %+v, want PanelRemoved node-a team/web-1", got)
@@ -171,7 +187,7 @@ func TestSceneWatcher_NamespaceMode(t *testing.T) {
 	if _, err := client.CoreV1().Pods("alpha").Update(ctx, p, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update pod: %v", err)
 	}
-	got = recvDelta(t, ch)
+	got = recvStructuralDelta(t, ch)
 	if got.Type != scene.DeltaPanelUpdated || got.TowerName != "alpha" ||
 		got.Panel == nil || got.Panel.Phase != scene.PodPhaseRunning {
 		t.Fatalf("pod update delta = %+v, want PanelUpdated alpha Running", got)
@@ -181,7 +197,7 @@ func TestSceneWatcher_NamespaceMode(t *testing.T) {
 	if err := client.CoreV1().Pods("alpha").Delete(ctx, "job-1", metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete pod: %v", err)
 	}
-	got = recvDelta(t, ch)
+	got = recvStructuralDelta(t, ch)
 	if got.Type != scene.DeltaPanelRemoved || got.TowerName != "alpha" ||
 		got.Namespace != "alpha" || got.Pod != "job-1" {
 		t.Fatalf("pod remove delta = %+v, want PanelRemoved alpha alpha/job-1", got)
@@ -192,7 +208,7 @@ func TestSceneWatcher_NamespaceMode(t *testing.T) {
 	if _, err := client.CoreV1().Namespaces().Create(ctx, namespace("beta"), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create namespace: %v", err)
 	}
-	got = recvDelta(t, ch)
+	got = recvStructuralDelta(t, ch)
 	if got.Type != scene.DeltaTowerAdded || got.Tower == nil || got.Tower.Name != "beta" {
 		t.Fatalf("namespace add delta = %+v, want TowerAdded beta", got)
 	}

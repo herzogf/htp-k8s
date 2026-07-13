@@ -22,6 +22,54 @@ permissions:
   contents: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Docs-only fast path (issue #76). A cheap gate job that reports whether any
+  # NON-docs path changed. The three heavy jobs below (integration / e2e /
+  # container-scan) are gated on its output so a docs-only PR skips ~10-15 min
+  # of cluster-spinning.
+  #
+  # DO NOT "simplify" this into `on.pull_request.paths-ignore`. `main` has
+  # STRICT required status checks (ruleset 18831212): Backend (Go),
+  # Frontend (Node), Backend integration (kind + KWOK), E2E (Playwright),
+  # Container scan (Trivy). If a docs PR skipped the *workflow* via
+  # paths-ignore, those required checks would NEVER report and stay "pending"
+  # forever -> the docs PR becomes permanently UN-mergeable (worse than the
+  # status quo). So the workflow MUST still trigger on every PR; we skip only
+  # the heavy *jobs* at the job level. A job-level-skipped required check is
+  # treated as passing by branch protection (verified on a docs-only test PR
+  # for #76), unlike a skipped workflow.
+  #
+  # "Docs-only" = every changed path is under **/*.md, docs/**, or LICENSE.
+  # ANYTHING else runs the full suite: code, web/, config, and especially
+  # .github/** (a workflow change must never skip its own validation). A PR
+  # touching BOTH docs and code runs everything. The `every` predicate-quantifier
+  # makes `nondocs` true iff a file matches `**` AND none of the docs negations,
+  # so any non-docs file — and thus any mixed PR — flips it true. (An OR over
+  # bare `!` patterns would NOT express this correctly; keep `every`.)
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # dorny/paths-filter lists the PR's changed files via the GitHub API on
+      # pull_request events (no checkout needed), which reads the pulls API.
+      pull-requests: read
+    outputs:
+      nondocs: ${{ steps.filter.outputs.nondocs }}
+    steps:
+      - name: Detect non-docs changes
+        id: filter
+        uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        with:
+          predicate-quantifier: 'every'
+          filters: |
+            nondocs:
+              - '**'
+              - '!**/*.md'
+              - '!docs/**'
+              - '!LICENSE'
+
   backend:
     name: Backend (Go)
     runs-on: ubuntu-latest
@@ -129,6 +177,12 @@ jobs:
 
   integration:
     name: Backend integration (kind + KWOK)
+    # Skipped on docs-only PRs (issue #76). needs: changes makes this wait for
+    # the gate; if: runs it only when a non-docs path changed. A skipped
+    # required check counts as passing for branch protection — see the changes
+    # job comment. Docs-only PRs stay mergeable with this skipped.
+    needs: changes
+    if: ${{ needs.changes.outputs.nondocs == 'true' }}
     runs-on: ubuntu-latest
     # kind pulls a node image and boots a real single-node cluster; give it
     # more headroom than the fast jobs. Ran ~45s live in dev (issue #5), but
@@ -153,6 +207,9 @@ jobs:
 
   e2e:
     name: E2E (Playwright)
+    # Skipped on docs-only PRs (issue #76) — see the integration/changes jobs.
+    needs: changes
+    if: ${{ needs.changes.outputs.nondocs == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -276,6 +333,12 @@ jobs:
 
   container-scan:
     name: Container scan (Trivy)
+    # Skipped on docs-only PRs (issue #76) — see the integration/changes jobs.
+    # The nightly full-suite backstop (issue #29) still scans against the live
+    # Trivy vuln DB regardless of PR paths, so a docs-only stretch can't hide a
+    # newly-published CVE.
+    needs: changes
+    if: ${{ needs.changes.outputs.nondocs == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
