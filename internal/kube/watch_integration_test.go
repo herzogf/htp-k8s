@@ -124,6 +124,120 @@ func TestSceneWatcher_RealCluster(t *testing.T) {
 	}
 }
 
+// TestSceneWatcher_RealCluster_Blink verifies blink-trigger detection end to end
+// against a real API server's watch (kind, ADR-0004): a real container-restart
+// bump and a real Kubernetes Event each surface as a DeltaPanelBlink for the
+// correct Panel, through the real pod watch and the real Events watch
+// respectively. The fake-clientset unit tests (blink_test.go) cover the pure
+// activity→delta logic; this exercises the same detection over a live watch.
+//
+// Both activities are driven on bare, unmanaged Nodes (no kubelet, no KWOK) so
+// nothing but this test writes the pods' status or events — a deterministic
+// signal rather than a race with a simulator. The two activities run on
+// separate pods so the per-Panel blink debounce never coalesces them.
+//
+// Gated behind the "integration" build tag; run with:
+//
+//	go test -tags=integration ./internal/kube/...
+func TestSceneWatcher_RealCluster_Blink(t *testing.T) {
+	c := testcluster.New(t, testcluster.Options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const blinkNode = "blink-node"
+	if _, err := c.Clientset.CoreV1().Nodes().Create(ctx, bareNode(blinkNode), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create blink node: %v", err)
+	}
+	const restartPodName = "blink-restart"
+	const eventPodName = "blink-event"
+	for _, name := range []string{restartPodName, eventPodName} {
+		if _, err := c.Clientset.CoreV1().Pods("default").Create(ctx, probePod(name, blinkNode), metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create pod %s: %v", name, err)
+		}
+	}
+
+	w := kube.NewSceneWatcher(c.Clientset, nil, scene.ViewModeNode, kube.NamespaceFilter{})
+	w.Start(ctx)
+
+	snap, ch, unsub := w.SnapshotAndSubscribe()
+	defer unsub()
+
+	// Wait until both Panels exist in the reconstructed scene, so a blink for
+	// either resolves to a Panel (the homing gate) rather than being dropped.
+	recon := newReconScene(snap)
+	counts := map[scene.SceneDeltaType]int{}
+	drainUntil(t, ch, recon, counts, 60*time.Second, func() bool {
+		return recon.hasPanel(blinkNode, "default", restartPodName) &&
+			recon.hasPanel(blinkNode, "default", eventPodName)
+	})
+
+	// --- Real container restart → restart blink ---
+	// Bump the pod's total restart count via the status subresource; the real
+	// pod watch delivers the old/new pair the detector compares.
+	bumpRestartCount(ctx, t, c, restartPodName)
+	drainForBlink(t, ch, 60*time.Second, func(d scene.SceneDelta) bool {
+		return d.TowerName == blinkNode && d.Namespace == "default" &&
+			d.Pod == restartPodName && d.Activity == scene.ActivityRestart
+	})
+
+	// --- Real Kubernetes Event → event blink ---
+	// A genuine Event object about the pod, created through the API server, flows
+	// through the real Events watch to the blink detector.
+	if _, err := c.Clientset.CoreV1().Events("default").Create(ctx,
+		podEvent("default", "blink-evt", eventPodName, "", "Warning", "BackOff", metav1.Now()),
+		metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create event: %v", err)
+	}
+	drainForBlink(t, ch, 60*time.Second, func(d scene.SceneDelta) bool {
+		return d.TowerName == blinkNode && d.Namespace == "default" &&
+			d.Pod == eventPodName && d.Activity == scene.ActivityEvent
+	})
+}
+
+// bumpRestartCount increments the pod's single container's restart count by one
+// via the status subresource — the deterministic "a container restarted" signal
+// this test asserts a restart blink for. It seeds a container status if none
+// exists yet.
+func bumpRestartCount(ctx context.Context, t *testing.T, c *testcluster.Cluster, name string) {
+	t.Helper()
+	got, err := c.Clientset.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pod for restart bump: %v", err)
+	}
+	if len(got.Status.ContainerStatuses) == 0 {
+		got.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  "app",
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		}}
+	}
+	got.Status.ContainerStatuses[0].RestartCount++
+	if _, err := c.Clientset.CoreV1().Pods("default").UpdateStatus(ctx, got, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update pod status for restart bump: %v", err)
+	}
+}
+
+// drainForBlink reads deltas until one satisfies match or timeout elapses,
+// failing the test on timeout. Non-matching deltas (structural changes, blinks
+// for other Panels, any incidental Events the API server emits) are ignored, so
+// the real watch's nondeterministic extra traffic can't fail the assertion.
+func drainForBlink(t *testing.T, ch <-chan scene.SceneDelta, timeout time.Duration, match func(scene.SceneDelta) bool) {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case d, ok := <-ch:
+			if !ok {
+				t.Fatal("delta channel closed before a matching blink (subscriber dropped)")
+			}
+			if d.Type == scene.DeltaPanelBlink && match(d) {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for the expected blink delta")
+		}
+	}
+}
+
 // setPodRunning fetches the pod and flips its status phase to Running via the
 // status subresource — the deterministic "update" this test asserts a
 // PanelUpdated for.
