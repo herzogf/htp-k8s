@@ -1,6 +1,6 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { type PodDetail, type TowerDetail } from '../generated/scenestate'
+import { makePodDetail, makeTowerDetail } from '../test-support/sceneFixtures'
 import { usePodDetail, useTowerDetail } from './useDetail'
 
 // getApiBaseUrl() with no VITE_WS_URL derives http://localhost:8080 (see config).
@@ -12,7 +12,7 @@ afterEach(() => {
 
 describe('useTowerDetail', () => {
   it('loads then returns the TowerDetail for the given tower', async () => {
-    const payload: TowerDetail = { name: 'node-a', kind: 'node' }
+    const payload = makeTowerDetail()
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })),
@@ -71,16 +71,7 @@ describe('useTowerDetail', () => {
 
 describe('usePodDetail', () => {
   it('loads the PodDetail for the given pod identity', async () => {
-    const payload: PodDetail = {
-      namespace: 'team',
-      pod: 'web-1',
-      node: 'node-a',
-      phase: 'Running',
-      color: '#39ff14',
-      restartCount: 0,
-      containers: [],
-      events: [],
-    }
+    const payload = makePodDetail({ containers: [] })
     const fetchMock = vi.fn<(url: string) => Promise<Response>>(
       async () => new Response(JSON.stringify(payload), { status: 200 }),
     )

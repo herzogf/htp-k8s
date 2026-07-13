@@ -1,9 +1,16 @@
 import {
   ColorRunning,
+  type ContainerDetail,
+  type NamespaceSummary,
+  type NodeSummary,
   type Panel,
+  type PodDetail,
   PodPhaseRunning,
   type SceneState,
   type Tower,
+  type TowerDetail,
+  TowerKindNamespace,
+  TowerKindNode,
   ViewModeNode,
 } from '../generated/scenestate'
 
@@ -61,6 +68,85 @@ export function makeSceneState(overrides: Partial<SceneState> = {}): SceneState 
   return {
     viewMode: ViewModeNode,
     towers: [],
+    ...overrides,
+  }
+}
+
+/**
+ * The on-demand Detail wire-contract factories (issue #24, ADR-0009). Same
+ * intent as the Scene factories above: one place the `TowerDetail`/`PodDetail`
+ * defaults live, so a new required field on those generated types is a one-line
+ * change here rather than a sweep across the detail-popup tests.
+ */
+
+/** Builds a complete Node summary for a Node-mode {@link TowerDetail}. */
+export function makeNodeSummary(overrides: Partial<NodeSummary> = {}): NodeSummary {
+  return {
+    ready: true,
+    status: 'Ready',
+    kubeletVersion: 'v1.31.0',
+    os: 'linux',
+    architecture: 'amd64',
+    cpu: '8',
+    memory: '32Gi',
+    pods: '110',
+    labels: { role: 'worker' },
+    podCount: 12,
+    ...overrides,
+  }
+}
+
+/** Builds a complete Namespace/Project summary for a Namespace-mode {@link TowerDetail}. */
+export function makeNamespaceSummary(overrides: Partial<NamespaceSummary> = {}): NamespaceSummary {
+  return { phase: 'Active', labels: { team: 'x' }, podCount: 4, ...overrides }
+}
+
+/**
+ * Builds a complete {@link TowerDetail}, defaulting to a Node-mode Tower with a
+ * full {@link makeNodeSummary}. For a Namespace-mode fixture pass
+ * `{ kind: TowerKindNamespace, node: undefined, namespace: makeNamespaceSummary() }`,
+ * or use {@link makeNamespaceTowerDetail}.
+ */
+export function makeTowerDetail(overrides: Partial<TowerDetail> = {}): TowerDetail {
+  return { name: 'node-a', kind: TowerKindNode, node: makeNodeSummary(), ...overrides }
+}
+
+/** Builds a Namespace-mode {@link TowerDetail} with a full Namespace summary. */
+export function makeNamespaceTowerDetail(overrides: Partial<TowerDetail> = {}): TowerDetail {
+  return {
+    name: 'team-x',
+    kind: TowerKindNamespace,
+    namespace: makeNamespaceSummary(),
+    ...overrides,
+  }
+}
+
+/** Builds a complete container status for a {@link makePodDetail}. */
+export function makeContainerDetail(overrides: Partial<ContainerDetail> = {}): ContainerDetail {
+  return {
+    name: 'app',
+    image: 'app:1',
+    ready: true,
+    restartCount: 0,
+    state: 'Running',
+    ...overrides,
+  }
+}
+
+/**
+ * Builds a complete {@link PodDetail}, defaulting to a healthy single-container
+ * Running pod with no events. Pass `containers`/`events` to model other states.
+ */
+export function makePodDetail(overrides: Partial<PodDetail> = {}): PodDetail {
+  return {
+    namespace: 'team',
+    pod: 'web-1',
+    node: 'node-a',
+    phase: PodPhaseRunning,
+    color: ColorRunning,
+    restartCount: 0,
+    containers: [makeContainerDetail()],
+    events: [],
     ...overrides,
   }
 }

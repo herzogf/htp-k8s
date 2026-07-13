@@ -33,21 +33,3 @@ export interface PodSelection {
 
 /** What the user currently has selected, driving the open Detail Popup. */
 export type Selection = TowerSelection | PodSelection
-
-/**
- * Whether two selections refer to the same clicked target (same kind and
- * identity), ignoring the anchor. Used to avoid re-fetching / re-opening a
- * stream when a re-selection lands on the already-open element.
- */
-export function sameSelection(a: Selection | null, b: Selection | null): boolean {
-  if (a === null || b === null) {
-    return a === b
-  }
-  if (a.kind === 'tower' && b.kind === 'tower') {
-    return a.name === b.name
-  }
-  if (a.kind === 'pod' && b.kind === 'pod') {
-    return a.namespace === b.namespace && a.pod === b.pod
-  }
-  return false
-}

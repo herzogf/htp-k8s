@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { type PodDetail, type TowerDetail } from '../generated/scenestate'
+import { makePodDetail, makeTowerDetail } from '../test-support/sceneFixtures'
 import {
   fetchPodDetail,
   fetchTowerDetail,
@@ -40,7 +40,7 @@ describe('fetchTowerDetail', () => {
   })
 
   it('requests the tower url and returns the parsed TowerDetail', async () => {
-    const payload: TowerDetail = { name: 'node-a', kind: 'node' }
+    const payload = makeTowerDetail()
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
@@ -78,16 +78,7 @@ describe('fetchPodDetail', () => {
   })
 
   it('requests the pod url and returns the parsed PodDetail', async () => {
-    const payload: PodDetail = {
-      namespace: 'team',
-      pod: 'web-1',
-      node: 'node-a',
-      phase: 'Running',
-      color: '#39ff14',
-      restartCount: 0,
-      containers: [],
-      events: [],
-    }
+    const payload = makePodDetail({ containers: [] })
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 

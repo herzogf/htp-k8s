@@ -1,34 +1,13 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { FakeEventSource } from '../test-support/fakeEventSource'
 import { useLogTail } from './useLogTail'
 
-// jsdom has no EventSource; stand one in so the hook's open/message/close
-// lifecycle (the ADR-0009 SSE wiring) is exercised without a real server.
-class FakeEventSource {
-  static instances: FakeEventSource[] = []
-
-  readonly url: string
-  closed = false
-  onmessage: ((event: MessageEvent) => void) | null = null
-
-  constructor(url: string) {
-    this.url = url
-    FakeEventSource.instances.push(this)
-  }
-
-  close() {
-    this.closed = true
-  }
-
-  emit(data: string) {
-    this.onmessage?.({ data } as MessageEvent)
-  }
-}
-
+// getApiBaseUrl() with no VITE_WS_URL derives http://localhost:8080 (see config).
 const BASE = 'http://localhost:8080'
 
 beforeEach(() => {
-  FakeEventSource.instances = []
+  FakeEventSource.reset()
   vi.stubGlobal('EventSource', FakeEventSource)
 })
 

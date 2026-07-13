@@ -60,13 +60,15 @@ export function PodDetailPopup({
  * and `data-line-count` make the tail assertable in the e2e DOM.
  */
 function LogTailView({ lines }: { lines: string[] }) {
+  // Cap the window on the frontend too (the backend already bounds it): slice
+  // once so what we count and what we render are the same ≤3 lines, making the
+  // height cap authoritative here rather than only trusting the frame size.
+  const shown = lines.slice(-LogTailMaxLines)
   return (
     <section className="detail-logtail" aria-label="Live log tail">
       <h4 className="detail-section__title">Log tail</h4>
-      <pre className="detail-logtail__lines" data-testid="log-tail" data-line-count={lines.length}>
-        {lines.length === 0
-          ? '(waiting for log output…)'
-          : lines.slice(-LogTailMaxLines).join('\n')}
+      <pre className="detail-logtail__lines" data-testid="log-tail" data-line-count={shown.length}>
+        {shown.length === 0 ? '(waiting for log output…)' : shown.join('\n')}
       </pre>
     </section>
   )

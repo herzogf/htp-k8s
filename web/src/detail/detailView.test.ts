@@ -1,46 +1,39 @@
 import { describe, expect, it } from 'vitest'
 import { type PodDetail, type TowerDetail } from '../generated/scenestate'
+import {
+  makeContainerDetail,
+  makeNamespaceTowerDetail,
+  makeNodeSummary,
+  makePodDetail,
+  makeTowerDetail,
+} from '../test-support/sceneFixtures'
+
 import { podDetailRows, summarizeContainers, towerDetailView } from './detailView'
 
-const nodeDetail = (overrides: Partial<TowerDetail> = {}): TowerDetail => ({
-  name: 'node-a',
-  kind: 'node',
-  node: {
-    ready: true,
-    status: 'Ready',
-    kubeletVersion: 'v1.31.0',
-    os: 'linux',
-    architecture: 'amd64',
-    cpu: '8',
-    memory: '32Gi',
-    pods: '110',
-    labels: { role: 'worker', zone: 'a' },
-    podCount: 12,
-  },
-  ...overrides,
-})
+const nodeDetail = (overrides: Partial<TowerDetail> = {}): TowerDetail =>
+  makeTowerDetail({
+    node: makeNodeSummary({ labels: { role: 'worker', zone: 'a' } }),
+    ...overrides,
+  })
 
-const namespaceDetail = (overrides: Partial<TowerDetail> = {}): TowerDetail => ({
-  name: 'team-x',
-  kind: 'namespace',
-  namespace: { phase: 'Active', labels: { team: 'x' }, podCount: 4 },
-  ...overrides,
-})
+const namespaceDetail = (overrides: Partial<TowerDetail> = {}): TowerDetail =>
+  makeNamespaceTowerDetail(overrides)
 
-const podDetail = (overrides: Partial<PodDetail> = {}): PodDetail => ({
-  namespace: 'team',
-  pod: 'web-1',
-  node: 'node-a',
-  phase: 'Running',
-  color: '#39ff14',
-  restartCount: 2,
-  containers: [
-    { name: 'app', image: 'app:1', ready: true, restartCount: 1, state: 'Running' },
-    { name: 'sidecar', image: 'proxy:1', ready: false, restartCount: 1, state: 'Waiting' },
-  ],
-  events: [],
-  ...overrides,
-})
+const podDetail = (overrides: Partial<PodDetail> = {}): PodDetail =>
+  makePodDetail({
+    restartCount: 2,
+    containers: [
+      makeContainerDetail({ ready: true, restartCount: 1 }),
+      makeContainerDetail({
+        name: 'sidecar',
+        image: 'proxy:1',
+        ready: false,
+        restartCount: 1,
+        state: 'Waiting',
+      }),
+    ],
+    ...overrides,
+  })
 
 describe('towerDetailView', () => {
   it('flattens a Node summary in Node-mode', () => {

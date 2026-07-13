@@ -1,16 +1,12 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { type PodDetail } from '../generated/scenestate'
+import { FakeEventSource } from '../test-support/fakeEventSource'
+import { makeContainerDetail, makePodDetail } from '../test-support/sceneFixtures'
 import { PodDetailPopup } from './PodDetailPopup'
 
-const podDetail: PodDetail = {
-  namespace: 'team',
-  pod: 'web-1',
-  node: 'node-a',
-  phase: 'Running',
-  color: '#39ff14',
+const podDetail = makePodDetail({
   restartCount: 3,
-  containers: [{ name: 'app', image: 'app:1', ready: true, restartCount: 3, state: 'Running' }],
+  containers: [makeContainerDetail({ restartCount: 3 })],
   events: [
     {
       type: 'Warning',
@@ -20,27 +16,10 @@ const podDetail: PodDetail = {
       lastSeen: '',
     },
   ],
-}
-
-class FakeEventSource {
-  static instances: FakeEventSource[] = []
-  readonly url: string
-  closed = false
-  onmessage: ((event: MessageEvent) => void) | null = null
-  constructor(url: string) {
-    this.url = url
-    FakeEventSource.instances.push(this)
-  }
-  close() {
-    this.closed = true
-  }
-  emit(data: string) {
-    this.onmessage?.({ data } as MessageEvent)
-  }
-}
+})
 
 beforeEach(() => {
-  FakeEventSource.instances = []
+  FakeEventSource.reset()
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.stubGlobal(
     'fetch',

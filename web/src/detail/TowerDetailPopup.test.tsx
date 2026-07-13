@@ -1,24 +1,10 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type TowerDetail } from '../generated/scenestate'
+import { makeTowerDetail } from '../test-support/sceneFixtures'
 import { TowerDetailPopup } from './TowerDetailPopup'
 
-const nodeDetail: TowerDetail = {
-  name: 'node-a',
-  kind: 'node',
-  node: {
-    ready: true,
-    status: 'Ready',
-    kubeletVersion: 'v1.31.0',
-    os: 'linux',
-    architecture: 'amd64',
-    cpu: '8',
-    memory: '32Gi',
-    pods: '110',
-    labels: { role: 'worker' },
-    podCount: 12,
-  },
-}
+const nodeDetail = makeTowerDetail()
 
 function stubFetch(body: unknown, status = 200) {
   vi.stubGlobal(
