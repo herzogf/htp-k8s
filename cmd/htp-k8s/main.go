@@ -35,6 +35,12 @@ var (
 // API server can't hang server startup.
 const probeTimeout = 10 * time.Second
 
+// detailTimeout bounds a single on-demand Detail Popup fetch (a Tower or Pod
+// detail lookup) so a slow API server can't leave a request hanging. It does NOT
+// apply to the log tail, which is a long-lived follow stream bounded instead by
+// the client staying connected.
+const detailTimeout = 10 * time.Second
+
 func main() {
 	args := os.Args[1:]
 	// Handle version reporting before anything else — it must work without a
@@ -157,6 +163,24 @@ func run(args []string, env func(string) string) error {
 		Handler: server.NewHandler(server.Config{
 			Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
 				return watcher.SnapshotAndSubscribe()
+			},
+			// On-demand Detail Popup data (issue #23), served off the /ws stream
+			// so per-click detail never bloats the SceneState broadcast. All
+			// read-only (ADR-0003). Detail fetches are bounded by detailTimeout;
+			// the log tail deliberately is not (it follows until the client
+			// disconnects, which cancels the request context).
+			TowerDetail: func(ctx context.Context, name string) (scene.TowerDetail, error) {
+				ctx, cancel := context.WithTimeout(ctx, detailTimeout)
+				defer cancel()
+				return kube.BuildTowerDetail(ctx, client, dyn, mode, name)
+			},
+			PodDetail: func(ctx context.Context, namespace, name string) (scene.PodDetail, error) {
+				ctx, cancel := context.WithTimeout(ctx, detailTimeout)
+				defer cancel()
+				return kube.BuildPodDetail(ctx, client, namespace, name)
+			},
+			PodLogTail: func(ctx context.Context, namespace, name string, emit func(scene.LogTail)) error {
+				return kube.PodLogTail(ctx, client, namespace, name, emit)
 			},
 		}),
 	}
