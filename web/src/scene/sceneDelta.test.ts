@@ -62,6 +62,26 @@ describe('parseSceneDelta narrows each kind', () => {
       ),
     ).toEqual({ type: 'panelRemoved', towerName: 'node-a', namespace: 'team', pod: 'web-1' })
   })
+
+  it('panelBlink → carries the tower name, pod identity, and activity', () => {
+    expect(
+      parseSceneDelta(
+        wireDelta({
+          type: 'panelBlink',
+          towerName: 'node-a',
+          namespace: 'team',
+          pod: 'web-1',
+          activity: 'restart',
+        }),
+      ),
+    ).toEqual({
+      type: 'panelBlink',
+      towerName: 'node-a',
+      namespace: 'team',
+      pod: 'web-1',
+      activity: 'restart',
+    })
+  })
 })
 
 describe('parseSceneDelta rejects malformed payloads', () => {
@@ -114,6 +134,29 @@ describe('parseSceneDelta rejects malformed payloads', () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(
       parseSceneDelta(wireDelta({ type: 'panelRemoved', towerName: 'node-a', namespace: 'team' })),
+    ).toBeNull()
+  })
+
+  it('panelBlink missing the activity → null', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(
+      parseSceneDelta(
+        wireDelta({ type: 'panelBlink', towerName: 'node-a', namespace: 'team', pod: 'web-1' }),
+      ),
+    ).toBeNull()
+  })
+
+  it('panelBlink missing the pod → null', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(
+      parseSceneDelta(
+        wireDelta({
+          type: 'panelBlink',
+          towerName: 'node-a',
+          namespace: 'team',
+          activity: 'event',
+        }),
+      ),
     ).toBeNull()
   })
 })
