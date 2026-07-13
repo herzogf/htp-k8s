@@ -15,9 +15,12 @@ name: Release
 #     container image (by digest), plus an SBOM attestation for each archive's
 #     GoReleaser CycloneDX SBOM. All verifiable with `gh attestation verify`, no
 #     key management (GitHub OIDC).
-#   * Trivy (issue #31) -> a report-only CVE scan of the released image; SARIF is
-#     uploaded to the Security tab. Report-only, NEVER blocking (ADR-0005): a
-#     Critical/fixable finding surfaces but does not fail the release.
+#   * Trivy (issue #31) -> a CVE scan of the released image; SARIF is uploaded to
+#     the Security tab. FINDINGS never block the release (ADR-0005): a
+#     Critical/fixable CVE surfaces but does not fail the build. A scan/upload
+#     OPERATIONAL failure, however, DOES fail the release — if Trivy can't run
+#     (auth, image pull, DB download, hang) or the SARIF can't reach the Security
+#     tab, that's a real failure, not a silently-empty security report.
 #
 # All third-party actions are pinned to a commit SHA (repo convention); the
 # trailing comment records the human-readable version.
@@ -289,19 +292,24 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      # Report-only, never blocking (ADR-0005): scan the RELEASED image (by
-      # digest) but never fail the release, so pin exit-code to 0 and don't let
-      # a scanner hiccup break the job. Mirrors the PR-time scan in pr.yml,
-      # except that one scans a `--local` image (no registry) while this pulls
-      # the just-pushed GHCR image — which is private by default. trivy-action
-      # runs Trivy in its own context and does NOT inherit the host `ko login`
-      # docker config, so give Trivy explicit GHCR pull creds via its native
-      # TRIVY_USERNAME/TRIVY_PASSWORD env (GITHUB_TOKEN's packages:read is
-      # covered by this job's packages: write). Without this the pull 401s and,
-      # being continue-on-error, fails silently to an empty Security tab.
-      - name: Trivy scan (report-only)
+      # Scan the RELEASED image (by digest). FINDINGS are non-blocking but a scan
+      # OPERATIONAL failure fails the release. The two settings encode exactly
+      # that: exit-code "0" makes Trivy exit 0 when it *finds* vulnerabilities
+      # (Criticals included) so CVEs never fail the build; and with NO
+      # continue-on-error, a genuine scan *error* — auth/401, image-pull, DB
+      # download, hang — exits non-zero and fails the step (and thus the
+      # release), rather than passing off a silently-empty security report.
+      # (#70 will add a timeout-minutes here later; with continue-on-error gone,
+      # a hang -> timeout will then correctly fail the release too.)
+      #
+      # Mirrors the PR-time scan in pr.yml, except that one scans a `--local`
+      # image (no registry) while this pulls the just-pushed GHCR image — private
+      # by default. trivy-action runs Trivy in its own context and does NOT
+      # inherit the host `ko login` docker config, so give Trivy explicit GHCR
+      # pull creds via its native TRIVY_USERNAME/TRIVY_PASSWORD env (the
+      # GITHUB_TOKEN packages:read is covered by this job's packages: write).
+      - name: Trivy scan (findings non-blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        continue-on-error: true
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -312,9 +320,10 @@ jobs:
           exit-code: "0"
           ignore-unfixed: false
 
+      # No continue-on-error and no if: always() — this runs only after the scan
+      # above succeeds, and a failed upload fails the release. The invariant: a
+      # real SARIF lands in the Security tab, or the build fails.
       - name: Upload Trivy SARIF to Security tab
-        if: ${{ always() }}
-        continue-on-error: true
         uses: github/codeql-action/upload-sarif@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # v3
         with:
           sarif_file: trivy-results.sarif
