@@ -18,8 +18,12 @@
 # shape mirrors fakeNode()/fakePod() in internal/testcluster/kwok.go — kept in
 # sync by hand, since a workflow shell step can't import the Go constants.
 #
-# The e2e job invokes this with continue-on-error, so a KWOK hiccup degrades to
-# the bare single-node scene rather than blocking the PR (ADR-0004 modest tier).
+# Seeding is a HARD correctness gate for the e2e job (maintainer decision): a
+# robust, populated test scene is required, so this script verifies the expected
+# end state (all fake nodes Ready, all pods in their intended phases) and exits
+# non-zero if it isn't fully there within the timeouts. The job does NOT run
+# continue-on-error — a seeding failure fails the e2e job rather than silently
+# degrading to the bare single-node scene.
 #
 # Requires: kubectl on PATH and a working KUBECONFIG (the e2e job exports one).
 set -euo pipefail
@@ -177,3 +181,71 @@ kubectl get pods -n "${NS}" -l "${POD_SELECTOR}" \
   --sort-by='.spec.nodeName'
 echo
 echo "Node count (towers) = $(kubectl get nodes --no-headers | wc -l) (1 real kind node + ${NODE_COUNT} fake KWOK nodes)"
+
+# ---------------------------------------------------------------------------
+# 7. Hard correctness gate. `set -e` only catches commands that fail; a
+#    `kubectl apply` can return 0 while nodes never go Ready or pods never reach
+#    their phase. So assert the actual end state: exactly ${NODE_COUNT} fake
+#    nodes Ready, and every seeded pod in the phase its label intends. Poll
+#    briefly (KWOK reconciles asynchronously), then exit non-zero with a clear
+#    message if the populated scene isn't fully there — which fails the e2e job.
+# ---------------------------------------------------------------------------
+log "Verifying seeded end state (hard gate)"
+
+# Expected pod count per intended phase, derived from the same round-robin as
+# the creation loop so it stays correct if the counts are ever retuned.
+declare -A expected
+for ((i = 0; i < POD_COUNT; i++)); do
+  ph="${PHASE_CYCLE[$((i % ${#PHASE_CYCLE[@]}))]}"
+  expected["${ph}"]=$(( ${expected["${ph}"]:-0} + 1 ))
+done
+
+# check_group <seed-phase-label> <want-phase> <want-waiting-reason-or-empty>:
+# prints a diagnostic line if the pods carrying that label don't all show the
+# intended phase (and, for crashloop, the CrashLoopBackOff container-waiting
+# reason the backend derives on) in the expected number; prints nothing if OK.
+check_group() {
+  local label="$1" wphase="$2" wwait="$3" want total got
+  want="${expected[${label}]:-0}"
+  total=$(kubectl get pods -n "${NS}" -l "htp-k8s.io/seed-phase=${label}" --no-headers 2>/dev/null | wc -l)
+  got=$(kubectl get pods -n "${NS}" -l "htp-k8s.io/seed-phase=${label}" \
+          -o custom-columns='P:.status.phase,W:.status.containerStatuses[0].state.waiting.reason' \
+          --no-headers 2>/dev/null \
+        | awk -v p="${wphase}" -v w="${wwait}" \
+            '{ wait = ($2 == "<none>" ? "" : $2) } $1 == p && wait == w { n++ } END { print n + 0 }')
+  if [ "${total}" -ne "${want}" ] || [ "${got}" -ne "${want}" ]; then
+    printf '  seed-phase=%s: want %d pods in phase=%s%s, have %d matching of %d\n' \
+      "${label}" "${want}" "${wphase}" "${wwait:+ waiting=${wwait}}" "${got}" "${total}"
+  fi
+}
+
+deadline=$(( SECONDS + 90 ))
+while :; do
+  problems=""
+
+  # Nodes: exactly ${NODE_COUNT} fake nodes reporting Ready=True.
+  ready=$(kubectl get nodes -l type=kwok \
+            -o jsonpath='{range .items[*]}{range .status.conditions[?(@.type=="Ready")]}{.status}{"\n"}{end}{end}' 2>/dev/null \
+          | grep -c '^True$' || true)
+  if [ "${ready}" -ne "${NODE_COUNT}" ]; then
+    problems+="  fake nodes Ready: want ${NODE_COUNT}, have ${ready}"$'\n'
+  fi
+
+  # Pods: every label group at its intended phase.
+  problems+="$(check_group running   Running   '')"$'\n'
+  problems+="$(check_group pending   Pending   '')"$'\n'
+  problems+="$(check_group succeeded Succeeded '')"$'\n'
+  problems+="$(check_group failed    Failed    '')"$'\n'
+  problems+="$(check_group crashloop Running   CrashLoopBackOff)"$'\n'
+
+  if [ -z "${problems//[$'\n\t ']/}" ]; then
+    echo "OK: ${NODE_COUNT} fake nodes Ready and ${POD_COUNT} pods in their intended phases."
+    break
+  fi
+  if [ "${SECONDS}" -ge "${deadline}" ]; then
+    echo "ERROR: seeded KWOK data did not reach the expected end state within timeout:" >&2
+    printf '%s' "${problems}" | grep . >&2 || true
+    exit 1
+  fi
+  sleep 3
+done

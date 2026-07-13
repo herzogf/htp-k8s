@@ -211,13 +211,13 @@ jobs:
       # Runs before the Playwright step so the objects exist when the app lists
       # them on /ws connect.
       #
-      # continue-on-error: seeding is a screenshot-populating nicety, not a
-      # correctness gate. If KWOK flakes, the e2e still runs against the bare
-      # single-node cluster (one tower) and the smoke assertions hold — the
-      # modest tier degrades gracefully rather than destabilizing the PR
-      # (ADR-0004 acceptance).
+      # This is a HARD correctness gate, not a best-effort nicety: seed.sh
+      # asserts the populated end state (all fake nodes Ready, all pods in their
+      # intended phases) and exits non-zero if it can't be established in time,
+      # which fails the e2e job. Maintainer decision — a robust, populated test
+      # scene is required; we do NOT silently degrade to the bare single-node
+      # cluster and report green.
       - name: Seed modest KWOK nodes/pods
-        continue-on-error: true
         run: ./test/e2e/kwok/seed.sh
 
       - name: Run Playwright e2e suite
