@@ -1,6 +1,6 @@
 name: Release
 
-# Cuts a release ONLY on an explicit tag push (issue #30). There is NO
+# Cuts a release ONLY on an explicit tag push (issues #30/#31). There is NO
 # auto-tagging anywhere — a human pushes a `v*` tag when they decide to release,
 # and only then does this run. It never triggers on PRs or branch pushes, so it
 # does not run on the PR that introduces it.
@@ -10,9 +10,14 @@ name: Release
 #     checksums.txt, an auto-generated changelog, and a Syft CycloneDX SBOM per
 #     archive.
 #   * ko -> the container image, pushed to GHCR (no Dockerfile).
-#
-# Deliberately NOT here (issue #31, layered on later): GitHub-native artifact
-# attestation (actions/attest-*) and Trivy release scanning.
+#   * GitHub-native artifact attestations (issue #31) -> keyless, Sigstore-backed
+#     build-provenance for the release binaries (via checksums.txt) and the
+#     container image (by digest), plus an SBOM attestation for each archive's
+#     GoReleaser CycloneDX SBOM. All verifiable with `gh attestation verify`, no
+#     key management (GitHub OIDC).
+#   * Trivy (issue #31) -> a report-only CVE scan of the released image; SARIF is
+#     uploaded to the Security tab. Report-only, NEVER blocking (ADR-0005): a
+#     Critical/fixable finding surfaces but does not fail the release.
 #
 # All third-party actions are pinned to a commit SHA (repo convention); the
 # trailing comment records the human-readable version.
@@ -34,6 +39,11 @@ jobs:
     permissions:
       # Create the GitHub Release and upload its assets.
       contents: write
+      # Keyless build-provenance attestation for the release binaries
+      # (issue #31): id-token mints the OIDC token Sigstore signs with,
+      # attestations writes the attestation to the repo's attestation store.
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -83,6 +93,94 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Build provenance for every released binary in ONE call: checksums.txt
+      # (GoReleaser's sha256 manifest of the archives + their SBOM files) is the
+      # subject list, so `gh attestation verify <archive>` works for each. This
+      # attests the binaries; the container image is attested by digest in the
+      # `image` job, and the per-archive SBOMs in the `attest-sboms` job.
+      - name: Attest build provenance (release binaries)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-checksums: dist/checksums.txt
+
+      # Hand the archives + their GoReleaser CycloneDX SBOMs to the fan-out
+      # `attest-sboms` job (a job can't matrix over files it doesn't yet have).
+      # Short retention — this is a within-run handoff, not a release asset.
+      - name: Upload archives + SBOMs for attestation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dist
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.cyclonedx.sbom.json
+          if-no-files-found: error
+          retention-days: 1
+
+  attest-sboms:
+    name: Attest SBOMs (per archive)
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Keyless SBOM attestation (issue #31): same OIDC + attestation-store
+      # writes as the provenance step. No packages/contents write needed here.
+      id-token: write
+      attestations: write
+    # actions/attest-sbom binds ONE SBOM to its subject per call, and GoReleaser
+    # emits one CycloneDX SBOM per archive — so fan out one attestation per
+    # archive. fail-fast: false so one platform's failure doesn't cancel the
+    # rest (each attestation is independent).
+    strategy:
+      fail-fast: false
+      # One entry per GoReleaser archive — keep in sync with .goreleaser.yaml's
+      # builds (goos linux/darwin/windows x goarch amd64/arm64; windows -> zip).
+      matrix:
+        artifact:
+          - linux_amd64.tar.gz
+          - linux_arm64.tar.gz
+          - darwin_amd64.tar.gz
+          - darwin_arm64.tar.gz
+          - windows_amd64.zip
+          - windows_arm64.zip
+    steps:
+      - name: Download archives + SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: dist
+
+      # Resolve the exact archive + SBOM filenames (the version is in the name,
+      # so glob on the stable os_arch suffix). The suffix flows through `env`
+      # and is used as a shell var — never interpolated into the script body —
+      # to avoid the ${{ }} injection pattern (repo convention).
+      - name: Resolve archive + SBOM paths
+        id: paths
+        env:
+          SUFFIX: ${{ matrix.artifact }}
+        run: |
+          shopt -s nullglob
+          archives=(dist/*_"$SUFFIX")
+          if [ "${#archives[@]}" -ne 1 ]; then
+            echo "expected exactly one archive matching dist/*_$SUFFIX, got: ${archives[*]:-<none>}" >&2
+            exit 1
+          fi
+          archive="${archives[0]}"
+          sbom="${archive}.cyclonedx.sbom.json"
+          if [ ! -f "$sbom" ]; then
+            echo "missing SBOM for $archive (expected $sbom)" >&2
+            exit 1
+          fi
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "sbom=$sbom" >> "$GITHUB_OUTPUT"
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: ${{ steps.paths.outputs.archive }}
+          sbom-path: ${{ steps.paths.outputs.sbom }}
+
   image:
     name: Container image (ko -> GHCR)
     runs-on: ubuntu-latest
@@ -91,6 +189,15 @@ jobs:
       contents: read
       # Push the container image to GHCR.
       packages: write
+      # Attest the image by digest (issue #31): id-token mints the OIDC token,
+      # attestations writes the attestation. push-to-registry also uses
+      # packages: write to attach the attestation to the image in GHCR.
+      id-token: write
+      attestations: write
+      # Upload the report-only Trivy SARIF to the Security tab (issue #31); the
+      # workflow default is only contents: read, so the upload would 403 without
+      # this (see docs/agents/findings.md).
+      security-events: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -135,7 +242,11 @@ jobs:
       # Tagging: always tag the exact version. Add `latest` ONLY for a stable
       # release — a prerelease tag (contains `-` per SemVer, e.g. v1.2.3-rc.1)
       # must not move `latest`.
+      #
+      # Capture ko's published, digest-pinned reference (its stdout) so the next
+      # step can attest the image BY DIGEST and Trivy can scan that exact image.
       - name: Build and push image (ko)
+        id: build
         env:
           KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/htp-k8s
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -152,9 +263,59 @@ jobs:
             *)   tags="$RELEASE_TAG,latest" ;;
           esac
 
-          VERSION="$RELEASE_TAG" \
-          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          ko build --bare \
+          export VERSION="$RELEASE_TAG"
+          export DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # ko prints the fully-qualified, digest-pinned ref (repo@sha256:...)
+          # to stdout; --bare makes the repo exactly KO_DOCKER_REPO. Take the
+          # last stdout line to be robust, then split name@digest.
+          image_ref="$(ko build --bare \
             --platform=linux/amd64,linux/arm64 \
             --tags "$tags" \
-            ./cmd/htp-k8s
+            ./cmd/htp-k8s | tail -n1)"
+
+          echo "Published image: ${image_ref}"
+          echo "image=${image_ref}" >> "$GITHUB_OUTPUT"
+          echo "name=${image_ref%@*}" >> "$GITHUB_OUTPUT"
+          echo "digest=${image_ref##*@}" >> "$GITHUB_OUTPUT"
+
+      # Keyless build-provenance for the pushed image, keyed to its digest and
+      # attached to the image in GHCR (push-to-registry) so `gh attestation
+      # verify oci://<image>` works for end users (issue #31).
+      - name: Attest build provenance (container image)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ steps.build.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # Report-only, never blocking (ADR-0005): scan the RELEASED image (by
+      # digest) but never fail the release, so pin exit-code to 0 and don't let
+      # a scanner hiccup break the job. Mirrors the PR-time scan in pr.yml,
+      # except that one scans a `--local` image (no registry) while this pulls
+      # the just-pushed GHCR image — which is private by default. trivy-action
+      # runs Trivy in its own context and does NOT inherit the host `ko login`
+      # docker config, so give Trivy explicit GHCR pull creds via its native
+      # TRIVY_USERNAME/TRIVY_PASSWORD env (GITHUB_TOKEN's packages:read is
+      # covered by this job's packages: write). Without this the pull 401s and,
+      # being continue-on-error, fails silently to an empty Security tab.
+      - name: Trivy scan (report-only)
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        continue-on-error: true
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+          ignore-unfixed: false
+
+      - name: Upload Trivy SARIF to Security tab
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # v3
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-release-image
