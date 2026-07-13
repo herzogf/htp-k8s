@@ -73,7 +73,7 @@ func TestBuildTowers_NodeMode(t *testing.T) {
 		node("worker-1"),
 	)
 
-	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNode)
+	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNode, kube.NamespaceFilter{})
 	if err != nil {
 		t.Fatalf("BuildTowers node mode: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestBuildTowers_NamespaceMode(t *testing.T) {
 		namespace("app"),
 	)
 
-	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNamespace)
+	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNamespace, kube.NamespaceFilter{})
 	if err != nil {
 		t.Fatalf("BuildTowers namespace mode: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestBuildTowers_OpenShiftProjectFallback(t *testing.T) {
 
 	dyn := projectDynamicClient(project("team-b"), project("team-a"))
 
-	got, err := kube.BuildTowers(context.Background(), client, dyn, scene.ViewModeNamespace)
+	got, err := kube.BuildTowers(context.Background(), client, dyn, scene.ViewModeNamespace, kube.NamespaceFilter{})
 	if err != nil {
 		t.Fatalf("BuildTowers openshift fallback: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestBuildTowers_NamespaceMode_NoSourceDegrades(t *testing.T) {
 	client.PrependReactor("list", "namespaces", forbiddenNamespaceList())
 
 	// nil dynamic client → no Project fallback available.
-	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNamespace)
+	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNamespace, kube.NamespaceFilter{})
 	if err == nil {
 		t.Fatal("expected an informational error when no namespace source is readable, got nil")
 	}
@@ -162,7 +162,7 @@ func TestBuildTowers_NamespaceMode_NoSourceDegrades(t *testing.T) {
 func TestBuildTowers_Empty(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
-	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNode)
+	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNode, kube.NamespaceFilter{})
 	if err != nil {
 		t.Fatalf("BuildTowers empty: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestBuildTowers_GridIsNearSquare(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(objs...)
 
-	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNode)
+	got, err := kube.BuildTowers(context.Background(), client, nil, scene.ViewModeNode, kube.NamespaceFilter{})
 	if err != nil {
 		t.Fatalf("BuildTowers: %v", err)
 	}

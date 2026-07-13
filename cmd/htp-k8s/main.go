@@ -25,29 +25,69 @@ const defaultAddr = ":8080"
 const probeTimeout = 10 * time.Second
 
 func main() {
-	if err := run(os.Args[1:], os.Getenv("HTP_K8S_ADDR")); err != nil {
+	if err := run(os.Args[1:], os.Getenv); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// resolveAddr determines the listen address from CLI flags (highest
-// precedence), falling back to envAddr, then defaultAddr.
-func resolveAddr(args []string, envAddr string) (string, error) {
+// options is the runtime configuration parsed from CLI flags and environment.
+type options struct {
+	// addr is the host:port the server listens on.
+	addr string
+	// filter is the startup Namespace Filter preset applied to every scene.
+	filter kube.NamespaceFilter
+}
+
+// parseFlags parses the CLI flags into runtime options, applying environment
+// fallbacks for any value not given on the command line (flag > env > default).
+// It also builds and validates the Namespace Filter preset here, so a malformed
+// name pattern or label selector — or asking for two filter modes at once —
+// fails at startup rather than silently misbehaving. env is injected (rather
+// than calling os.Getenv directly) so tests can drive it hermetically.
+func parseFlags(args []string, env func(string) string) (options, error) {
 	addrDefault := defaultAddr
-	if envAddr != "" {
-		addrDefault = envAddr
+	if v := env("HTP_K8S_ADDR"); v != "" {
+		addrDefault = v
 	}
 
 	fs := flag.NewFlagSet("htp-k8s", flag.ContinueOnError)
-	addr := fs.String("addr", addrDefault, "address (host:port) the server listens on; overrides HTP_K8S_ADDR")
+	addr := fs.String("addr", addrDefault,
+		"address (host:port) the server listens on; overrides HTP_K8S_ADDR")
+	namePattern := fs.String("namespace-filter", env("HTP_K8S_NAMESPACE_FILTER"),
+		"preset Namespace/Project name filter with shell wildcards (e.g. 'openshift-*'); the default filter mode. Overrides HTP_K8S_NAMESPACE_FILTER")
+	labelSelector := fs.String("namespace-label-filter", env("HTP_K8S_NAMESPACE_LABEL_FILTER"),
+		"preset advanced Namespace/Project label selector (e.g. 'team=platform'); mutually exclusive with -namespace-filter. Overrides HTP_K8S_NAMESPACE_LABEL_FILTER")
 	if err := fs.Parse(args); err != nil {
-		return "", err
+		return options{}, err
 	}
-	return *addr, nil
+
+	filter, err := buildFilter(*namePattern, *labelSelector)
+	if err != nil {
+		return options{}, err
+	}
+	return options{addr: *addr, filter: filter}, nil
 }
 
-func run(args []string, envAddr string) error {
-	addr, err := resolveAddr(args, envAddr)
+// buildFilter turns the two mutually-exclusive filter flags into a single
+// NamespaceFilter. Name-pattern matching is the default mode; the label
+// selector is the advanced alternative. Setting both is rejected — there is one
+// filter in one mode — and an empty pair yields the no-filter zero value, so
+// nothing is hidden by default.
+func buildFilter(namePattern, labelSelector string) (kube.NamespaceFilter, error) {
+	switch {
+	case namePattern != "" && labelSelector != "":
+		return kube.NamespaceFilter{}, errors.New(
+			"set only one of -namespace-filter (name mode) or -namespace-label-filter (label mode), not both")
+	case labelSelector != "":
+		return kube.LabelFilter(labelSelector)
+	default:
+		// Empty namePattern yields the no-filter zero value (admits everything).
+		return kube.NameFilter(namePattern)
+	}
+}
+
+func run(args []string, env func(string) string) error {
+	opts, err := parseFlags(args, env)
 	if err != nil {
 		return err
 	}
@@ -69,11 +109,11 @@ func run(args []string, envAddr string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	watcher := kube.NewSceneWatcher(client, dyn, mode)
+	watcher := kube.NewSceneWatcher(client, dyn, mode, opts.filter)
 	watcher.Start(ctx)
 
 	httpServer := &http.Server{
-		Addr: addr,
+		Addr: opts.addr,
 		Handler: server.NewHandler(server.Config{
 			Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
 				return watcher.SnapshotAndSubscribe()
@@ -81,7 +121,7 @@ func run(args []string, envAddr string) error {
 		}),
 	}
 
-	log.Printf("htp-k8s backend listening on %s", addr)
+	log.Printf("htp-k8s backend listening on %s", opts.addr)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("server error: %w", err)
 	}
