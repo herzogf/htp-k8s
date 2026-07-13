@@ -2,6 +2,14 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import { Euler, Vector3 } from 'three'
 import {
+  FOCUS_DURATION_SECONDS,
+  focusLookAngles,
+  MAX_FOCUS_STEP_SECONDS,
+  type Pose,
+  samplePose,
+} from './focus'
+import { useFocus } from './focusContext'
+import {
   applyLook,
   FLY_SPEED,
   keyToMove,
@@ -11,12 +19,24 @@ import {
   type MoveKeys,
 } from './freeFly'
 
-/** The shape exposed on `window` for the e2e camera-interaction test (#20). */
+/** An in-flight Focus fly-to: the pose we started from, where we're headed, and how far along we are. */
+interface FocusTween {
+  from: Pose
+  to: Pose
+  /** Seconds elapsed since the tween began. */
+  elapsed: number
+}
+
+/** The shape exposed on `window` for the e2e camera-interaction test (#20, extended for Focus in #21). */
 export interface CameraTestHook {
   /** The live camera world position as `[x, y, z]`. */
   getPosition: () => [number, number, number]
   /** The live camera orientation as a quaternion `[x, y, z, w]`. */
   getQuaternion: () => [number, number, number, number]
+  /** Whether a click-to-Focus fly-to is currently animating the camera. */
+  isFocusing: () => boolean
+  /** The destination pose of the active Focus fly-to, or `null` when idle. */
+  getFocusGoal: () => Pose | null
 }
 
 declare global {
@@ -49,6 +69,7 @@ declare global {
 export function FreeFlyControls() {
   const camera = useThree((state) => state.camera)
   const gl = useThree((state) => state.gl)
+  const focus = useFocus()
 
   const held = useRef<MoveKeys>({ ...NO_KEYS })
   // yaw/pitch seeded from the camera's initial orientation (see the mount
@@ -56,6 +77,14 @@ export function FreeFlyControls() {
   const look = useRef({ yaw: 0, pitch: 0, ready: false })
   const euler = useRef(new Euler(0, 0, 0, 'YXZ'))
   const step = useRef(new Vector3())
+  // The active click-to-Focus fly-to (#21), or null when the user is in
+  // ordinary free-fly. The rig integrates it in the same useFrame that drives
+  // free-fly, so the two share the one camera without fighting over it.
+  const tween = useRef<FocusTween | null>(null)
+  // Scratch vector reused each frame to read the camera's current forward
+  // direction (the `from` look-at a new fly-to eases away from), without
+  // allocating in the render loop.
+  const forward = useRef(new Vector3())
 
   // Seed yaw/pitch from the camera's current orientation. Reading it (rather
   // than assuming a look-at-origin default) is what guarantees activating the
@@ -133,6 +162,17 @@ export function FreeFlyControls() {
     window.__htpCameraTest = {
       getPosition: () => camera.position.toArray() as [number, number, number],
       getQuaternion: () => camera.quaternion.toArray() as [number, number, number, number],
+      // Focus (#21) also renders into the WebGL canvas, so the e2e reads whether
+      // a fly-to is running and where it's headed through the same hook to prove
+      // a click animates the camera to the clicked Tower/Panel.
+      isFocusing: () => tween.current !== null,
+      getFocusGoal: () =>
+        tween.current
+          ? {
+              position: [...tween.current.to.position],
+              target: [...tween.current.to.target],
+            }
+          : null,
     }
     return () => {
       delete window.__htpCameraTest
@@ -146,6 +186,63 @@ export function FreeFlyControls() {
       return
     }
 
+    // A click on a Tower/Panel queues a target pose; pick it up and start a fresh
+    // fly-to from wherever the camera is *now*, so the animation is continuous
+    // from the current view rather than snapping to a start pose.
+    const request = focus?.takeRequest()
+    if (request) {
+      // The `from` look-at is a unit step down the camera's current forward axis,
+      // so the tween eases the aim away from where we're already looking rather
+      // than snapping it.
+      forward.current.set(0, 0, -1).applyQuaternion(camera.quaternion).add(camera.position)
+      tween.current = {
+        from: {
+          position: camera.position.toArray() as [number, number, number],
+          target: forward.current.toArray() as [number, number, number],
+        },
+        to: request,
+        elapsed: 0,
+      }
+    }
+
+    const [x, y, z] = moveDirection(held.current)
+    const moving = x !== 0 || y !== 0 || z !== 0
+
+    // Free-fly input takes precedence: any movement key hands control straight
+    // back from an in-progress fly-to, so the user can interrupt Focus by flying.
+    if (moving && tween.current) {
+      tween.current = null
+    }
+
+    if (tween.current && !moving) {
+      // Advance the Focus fly-to: sample the eased pose for this frame, place the
+      // camera there, and aim it at the pose's look-at target. We also fold that
+      // aim back into yaw/pitch so free-fly resumes seamlessly from the focused
+      // view once the tween ends (or the user interrupts it).
+      // Cap the step so a stall's oversized delta can't leap the tween to its
+      // end in one frame (which would read as a teleport, not a smooth fly-to).
+      tween.current.elapsed += Math.min(delta, MAX_FOCUS_STEP_SECONDS)
+      const pose = samplePose(
+        tween.current.from,
+        tween.current.to,
+        tween.current.elapsed / FOCUS_DURATION_SECONDS,
+      )
+      camera.position.set(...pose.position)
+      // focusLookAngles is the pure, tested reduction of the look-at to yaw/pitch;
+      // applying it through the same euler as free-fly below means both paths
+      // orient the camera identically, so control hands over without a jump.
+      const { yaw, pitch } = focusLookAngles(pose.position, pose.target)
+      look.current.yaw = yaw
+      look.current.pitch = pitch
+      euler.current.set(pitch, yaw, 0, 'YXZ')
+      camera.quaternion.setFromEuler(euler.current)
+
+      if (tween.current.elapsed >= FOCUS_DURATION_SECONDS) {
+        tween.current = null
+      }
+      return
+    }
+
     // Re-apply the current aim. While the pointer isn't locked this is the exact
     // seeded orientation, so the view holds perfectly still.
     euler.current.set(look.current.pitch, look.current.yaw, 0, 'YXZ')
@@ -153,8 +250,7 @@ export function FreeFlyControls() {
 
     // Translate along the camera-local move direction, rotated into world space,
     // scaled by speed and the frame time so travel is frame-rate independent.
-    const [x, y, z] = moveDirection(held.current)
-    if (x !== 0 || y !== 0 || z !== 0) {
+    if (moving) {
       step.current
         .set(x, y, z)
         .applyQuaternion(camera.quaternion)

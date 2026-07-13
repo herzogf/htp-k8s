@@ -1,4 +1,7 @@
 import { Edges } from '@react-three/drei'
+import { type ThreeEvent } from '@react-three/fiber'
+import { towerFocusPose } from './focus'
+import { useFocus } from './focusContext'
 import { TOWER_FOOTPRINT, TOWER_HEIGHT, type TowerPlacement } from './towerLayout'
 
 /**
@@ -20,10 +23,22 @@ export const TOWER_COLOR = '#39d3ff'
  * additively-ish instead of z-fighting into opaque slabs. This renders only the
  * structure; the Pods on its faces are drawn separately as instanced Panels
  * (see {@link Panels}).
+ *
+ * Clicking a Tower triggers Focus (#21): it hands the {@link towerFocusPose} for
+ * this Tower's placement to the shared {@link FocusController}, which the camera
+ * rig picks up and smoothly flies to. The click is stopped from propagating so a
+ * ray that also grazes a farther Tower focuses only the one actually clicked.
  */
 export function Tower({ placement }: { placement: TowerPlacement }) {
+  const focus = useFocus()
+
+  const onClick = (event: ThreeEvent<MouseEvent>) => {
+    event.stopPropagation()
+    focus?.requestFocus(towerFocusPose(placement.position))
+  }
+
   return (
-    <mesh position={placement.position}>
+    <mesh position={placement.position} onClick={onClick}>
       <boxGeometry args={[TOWER_FOOTPRINT, TOWER_HEIGHT, TOWER_FOOTPRINT]} />
       <meshStandardMaterial
         color={TOWER_COLOR}
