@@ -6,6 +6,7 @@ import { viewModeLabel } from './scene/sceneState'
 import { towerPlacements } from './scene/towerLayout'
 import { Tower, TOWER_COLOR } from './scene/Tower'
 import { Panels } from './scene/Panels'
+import { FloorLanes } from './scene/FloorLanes'
 import { FreeFlyControls } from './scene/FreeFlyControls'
 import { createFocusController } from './scene/focus'
 import { FocusContext } from './scene/focusContext'
@@ -30,8 +31,9 @@ export interface SceneProps {
  *
  * Towers are placed by {@link towerPlacements} (unit-tested independently of
  * WebGL) and drawn by {@link Tower}; each Tower's Pods are rendered as glowing
- * Panels by {@link Panels} (a single InstancedMesh over the whole scene). Floor
- * Lanes are a later ticket built on top of this seam.
+ * Panels by {@link Panels} (a single InstancedMesh over the whole scene), and
+ * the floor between grid-adjacent Towers carries decorative traveling light
+ * pulses drawn by {@link FloorLanes} (#28).
  */
 export function Scene({ sceneState }: SceneProps) {
   const label = sceneState ? viewModeLabel(sceneState.viewMode) : WAITING_TEXT
@@ -83,10 +85,15 @@ export function Scene({ sceneState }: SceneProps) {
             <ambientLight intensity={0.35} />
             <directionalLight position={[8, 16, 10]} intensity={0.5} />
             {/* The scene floor: a faint cyan grid on near-black, echoing the film's
-              circuit-board plane. Real Floor Lanes are a later, decorative ticket. */}
+              circuit-board plane. FloorLanes (below, inside the sceneState branch)
+              draws the decorative traveling light pulses on top of it. */}
             <gridHelper args={[120, 60, TOWER_COLOR, '#0d2630']} />
             {sceneState ? (
               <>
+                {/* Floor Lanes: decorative traveling light pulses between
+                  grid-adjacent Towers, sitting just above the gridHelper floor
+                  (#28). */}
+                <FloorLanes towers={sceneState.towers} />
                 {placements.map((placement) => (
                   <Tower key={placement.name} placement={placement} />
                 ))}
