@@ -62,6 +62,11 @@ jobs:
         uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
         with:
           version: 3.x
+          # Authenticate the go-task release lookup so it uses the higher
+          # authenticated GitHub API rate limit rather than the low anonymous
+          # one that intermittently rate-limited this step (issue #66).
+          # GITHUB_TOKEN is already available under the job's permissions.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # GoReleaser's `sboms` block shells out to `syft`; put it on PATH.
       - name: Install Syft
@@ -107,6 +112,9 @@ jobs:
         uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
         with:
           version: 3.x
+          # Authenticated go-task release lookup — avoids the anonymous GitHub
+          # API rate-limit flake (issue #66). See the goreleaser job for details.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up ko
         uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
