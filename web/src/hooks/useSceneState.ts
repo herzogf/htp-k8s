@@ -1,19 +1,25 @@
 import { useEffect, useState } from 'react'
 import { type SceneState } from '../generated/scenestate'
-import { parseSceneState } from '../scene/sceneState'
+import { reduceScene } from '../scene/reduceScene'
+import { parseSceneFrame } from '../scene/sceneState'
 
 /**
- * Opens a WebSocket connection to `url` and returns the most recent
- * {@link SceneState} snapshot received over it (or `null` before a valid
- * snapshot arrives).
+ * Opens a WebSocket connection to `url` and returns the current reconciled
+ * {@link SceneState} (or `null` before the first snapshot arrives).
  *
- * The backend sends a full `SceneState` JSON snapshot on connect, followed by
- * incremental Scene Deltas in a later ticket (ADR-0007). Text frames are
- * parsed with {@link parseSceneState}; non-text payloads (Blob/ArrayBuffer)
- * and frames that don't parse as a well-formed snapshot are ignored, leaving
- * the last good state in place.
+ * Per ADR-0007 the backend sends a full `SceneState` snapshot on connect, then a
+ * stream of incremental Scene Deltas. Each text frame is routed by
+ * {@link parseSceneFrame}: a snapshot establishes (or, on reconnect, replaces)
+ * the state; a delta is applied to the current state with {@link reduceScene},
+ * so the scene live-updates (Towers/Panels appear, disappear, recolor) without
+ * re-parsing raw messages in the rendering components. A delta arriving before
+ * any snapshot has nothing to reconcile against and is ignored until the
+ * snapshot arrives.
  *
- * The socket is reopened whenever `url` changes, and closed on unmount.
+ * Non-text payloads (Blob/ArrayBuffer) and frames that route to nothing (bad
+ * JSON, an unknown delta kind, a snapshot without `viewMode`) are ignored,
+ * leaving the last good state in place. The socket is reopened whenever `url`
+ * changes, and closed on unmount.
  */
 export function useSceneState(url: string): SceneState | null {
   const [sceneState, setSceneState] = useState<SceneState | null>(null)
@@ -25,10 +31,16 @@ export function useSceneState(url: string): SceneState | null {
       if (typeof event.data !== 'string') {
         return
       }
-      const parsed = parseSceneState(event.data)
-      if (parsed !== null) {
-        setSceneState(parsed)
+      const frame = parseSceneFrame(event.data)
+      if (frame === null) {
+        return
       }
+      if (frame.kind === 'snapshot') {
+        setSceneState(frame.snapshot)
+        return
+      }
+      // A delta reconciles against the current snapshot; drop it if none yet.
+      setSceneState((prev) => (prev === null ? null : reduceScene(prev, frame.delta)))
     }
 
     socket.addEventListener('message', handleMessage)

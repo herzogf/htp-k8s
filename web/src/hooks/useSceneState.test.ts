@@ -1,7 +1,13 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { type ViewMode, ViewModeNamespace, ViewModeNode } from '../generated/scenestate'
-import { makeSceneState } from '../test-support/sceneFixtures'
+import {
+  PodPhaseCrashLoopBackOff,
+  type SceneDelta as WireSceneDelta,
+  type ViewMode,
+  ViewModeNamespace,
+  ViewModeNode,
+} from '../generated/scenestate'
+import { makePanel, makeSceneState, makeTower } from '../test-support/sceneFixtures'
 import { useSceneState } from './useSceneState'
 
 type Listener = (event: MessageEvent) => void
@@ -44,6 +50,9 @@ class FakeWebSocket {
 // A full, valid SceneState frame as the backend sends it — built through the
 // shared factory so a new required field lands in one place, not here.
 const snapshot = (viewMode: ViewMode) => JSON.stringify(makeSceneState({ viewMode }))
+
+/** A Scene Delta frame as the backend sends it after the snapshot. */
+const deltaFrame = (delta: WireSceneDelta) => JSON.stringify(delta)
 
 describe('useSceneState', () => {
   beforeEach(() => {
@@ -105,6 +114,145 @@ describe('useSceneState', () => {
     })
 
     expect(result.current).toEqual(makeSceneState({ viewMode: ViewModeNode }))
+  })
+
+  it('applies a delta to the snapshot so the scene live-updates', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit('message', { data: JSON.stringify(makeSceneState({ towers: [] })) })
+    })
+    const tower = makeTower({ name: 'node-a', panels: [makePanel({ pod: 'p1' })] })
+    act(() => {
+      socket.emit('message', { data: deltaFrame({ type: 'towerAdded', tower }) })
+    })
+
+    expect(result.current).toEqual(makeSceneState({ towers: [tower] }))
+  })
+
+  it('applies a rapid-fire sequence of deltas in arrival order', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit('message', {
+        data: JSON.stringify(
+          makeSceneState({ towers: [makeTower({ name: 'node-a', panels: [] })] }),
+        ),
+      })
+    })
+    act(() => {
+      socket.emit('message', {
+        data: deltaFrame({
+          type: 'panelAdded',
+          towerName: 'node-a',
+          panel: makePanel({ namespace: 'team', pod: 'web-1' }),
+        }),
+      })
+      socket.emit('message', {
+        data: deltaFrame({
+          type: 'panelUpdated',
+          towerName: 'node-a',
+          panel: makePanel({ namespace: 'team', pod: 'web-1', phase: PodPhaseCrashLoopBackOff }),
+        }),
+      })
+      socket.emit('message', {
+        data: deltaFrame({ type: 'towerMoved', towerName: 'node-a', grid: { col: 2, row: 1 } }),
+      })
+    })
+
+    expect(result.current).toEqual(
+      makeSceneState({
+        towers: [
+          makeTower({
+            name: 'node-a',
+            grid: { col: 2, row: 1 },
+            panels: [
+              makePanel({ namespace: 'team', pod: 'web-1', phase: PodPhaseCrashLoopBackOff }),
+            ],
+          }),
+        ],
+      }),
+    )
+  })
+
+  it('removes a Tower on a towerRemoved delta (no stale state)', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit('message', {
+        data: JSON.stringify(
+          makeSceneState({
+            towers: [makeTower({ name: 'node-a' }), makeTower({ name: 'node-b' })],
+          }),
+        ),
+      })
+    })
+    act(() => {
+      socket.emit('message', { data: deltaFrame({ type: 'towerRemoved', towerName: 'node-a' }) })
+    })
+
+    expect(result.current?.towers.map((t) => t.name)).toEqual(['node-b'])
+  })
+
+  it('ignores a delta that arrives before any snapshot', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit('message', {
+        data: deltaFrame({ type: 'towerAdded', tower: makeTower({ name: 'orphan' }) }),
+      })
+    })
+
+    expect(result.current).toBeNull()
+  })
+
+  it('replaces reconciled delta state wholesale when a fresh snapshot arrives', () => {
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit('message', {
+        data: JSON.stringify(makeSceneState({ towers: [makeTower({ name: 'node-a' })] })),
+      })
+    })
+    act(() => {
+      socket.emit('message', {
+        data: deltaFrame({ type: 'towerAdded', tower: makeTower({ name: 'node-b' }) }),
+      })
+    })
+    // A reconnect snapshot (e.g. after a View Mode switch) resets everything.
+    act(() => {
+      socket.emit('message', {
+        data: JSON.stringify(
+          makeSceneState({ viewMode: ViewModeNamespace, towers: [makeTower({ name: 'team-x' })] }),
+        ),
+      })
+    })
+
+    expect(result.current).toEqual(
+      makeSceneState({ viewMode: ViewModeNamespace, towers: [makeTower({ name: 'team-x' })] }),
+    )
+  })
+
+  it('keeps the last good state when an unknown delta type arrives', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    act(() => {
+      socket.emit('message', {
+        data: JSON.stringify(makeSceneState({ towers: [makeTower({ name: 'node-a' })] })),
+      })
+    })
+    act(() => {
+      socket.emit('message', { data: deltaFrame({ type: 'somethingNew' } as WireSceneDelta) })
+    })
+
+    expect(result.current).toEqual(makeSceneState({ towers: [makeTower({ name: 'node-a' })] }))
   })
 
   it('ignores non-text payloads', () => {
