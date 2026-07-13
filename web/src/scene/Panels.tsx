@@ -1,4 +1,4 @@
-import { type ThreeEvent, useFrame } from '@react-three/fiber'
+import { type ThreeEvent, useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { panelSelection } from '../detail/selection'
@@ -7,11 +7,114 @@ import { type PanelActivity, type Tower } from '../generated/scenestate'
 import { blinkStore } from './blinks'
 import { panelFocusPose } from './focus'
 import { useFocus } from './focusContext'
+import {
+  PANEL_LOD_FAR_DISTANCE,
+  PANEL_LOD_NEAR_DISTANCE,
+  PANEL_TEXT_COLUMNS,
+  PANEL_TEXT_DARKEN,
+  PANEL_TEXT_ROWS,
+  PANEL_TEXT_SCROLL_SPEED,
+  panelTextPhase,
+} from './panelLOD'
 import { PANEL_SIZE, panelInstanceIndex, panelInstances, resolvePanel } from './panelLayout'
 
 /** The color a Panel flashes toward at a blink's peak — pure white, so even an
  * already-saturated phase color (neon green) still visibly brightens. */
 const BLINK_FLASH = new THREE.Color(0xffffff)
+
+/**
+ * Formats a JS number as a GLSL float literal. WebGL2/GLSL ES 3.00 (what three
+ * targets) has no implicit int→float conversion, so a bare integer constant
+ * like `PANEL_TEXT_COLUMNS` (`4`) would fail to compile as `vec2(4, ...)`;
+ * this guarantees every injected literal carries a decimal point.
+ */
+function glslFloat(value: number): string {
+  return Number.isInteger(value) ? value.toFixed(1) : `${value}`
+}
+
+/**
+ * Panel text LOD (#25): patches the InstancedMesh's `meshBasicMaterial` shader
+ * (via `onBeforeCompile`, the supported way to extend a built-in three.js
+ * material) to draw the "hinted, illegible scrolling text" look of the
+ * *Hackers* reference stills at close/mid camera distance, fading to the plain
+ * flat-colored quad (today's baseline look, effectively zero extra cost) beyond
+ * {@link PANEL_LOD_FAR_DISTANCE}.
+ *
+ * This is deliberately GPU-only: the distance from camera is computed
+ * per-fragment from `mvPosition` (already computed by the stock
+ * `project_vertex` chunk — view space puts the camera at the origin, so its
+ * length *is* the distance, with no extra uniform needed), so there is no
+ * per-instance or per-frame JS loop driving the transition — it stays cheap
+ * and correctly instance-aware (each instance's own fragments fade
+ * independently) however many Panels are on screen. The only thing JS updates
+ * per frame is a single scalar time uniform (see the `uPanelLodTime` write in
+ * {@link Panels}'s `useFrame`), and the only new per-instance CPU-side data is
+ * a `phase` float written once per instance list change (not per frame) so
+ * neighbouring Panels don't scroll their text in lockstep.
+ *
+ * Only the fragment shader's final color is touched (multiplying
+ * `diffuseColor.rgb`, right after the stock `color_fragment` chunk applies the
+ * instance's phase color) — the existing instancing/instanceColor/picking
+ * pipeline this material already relies on (blink recoloring, click picking) is
+ * untouched.
+ */
+function patchPanelMaterial(
+  this: THREE.MeshBasicMaterial,
+  shader: THREE.WebGLProgramParametersWithUniforms,
+): void {
+  shader.vertexShader = `
+attribute float instancePhase;
+varying float vPanelLodDist;
+varying float vPanelLodPhase;
+varying vec2 vPanelLodUv;
+${shader.vertexShader}`.replace(
+    '#include <project_vertex>',
+    `#include <project_vertex>
+	// Panel LOD (#25): view-space length of the vertex position *is* its
+	// distance from the camera (view space is camera-relative), so this needs
+	// no extra camera-position uniform.
+	vPanelLodDist = length( mvPosition.xyz );
+	vPanelLodPhase = instancePhase;
+	vPanelLodUv = uv;`,
+  )
+
+  shader.fragmentShader = `
+varying float vPanelLodDist;
+varying float vPanelLodPhase;
+varying vec2 vPanelLodUv;
+uniform float uPanelLodTime;
+${shader.fragmentShader}`.replace(
+    '#include <color_fragment>',
+    `#include <color_fragment>
+	{
+		// 1 (full text-like detail) at/below the near threshold, 0 (flat blob) at/
+		// beyond the far threshold — the exact curve panelDetailBlend documents
+		// and is unit-tested against (panelLOD.ts is this shader's source of truth
+		// for the two threshold constants baked in below).
+		float lodBlend = 1.0 - smoothstep(${glslFloat(PANEL_LOD_NEAR_DISTANCE)}, ${glslFloat(PANEL_LOD_FAR_DISTANCE)}, vPanelLodDist);
+		// A small, per-instance-offset glyph grid: each cell is pseudo-randomly on
+		// or off, forming a blocky, illegible dot-matrix "text" texture (never
+		// resolving into real characters — CONTEXT.md's "hinted/illegible") that
+		// scrolls over time, out of phase between Panels via vPanelLodPhase.
+		vec2 cell = floor( vPanelLodUv * vec2( ${glslFloat(PANEL_TEXT_COLUMNS)}, ${glslFloat(PANEL_TEXT_ROWS)} ) );
+		float scrollRows = floor( uPanelLodTime * ${glslFloat(PANEL_TEXT_SCROLL_SPEED)} + vPanelLodPhase * ${glslFloat(PANEL_TEXT_ROWS)} );
+		float glyphSeed = cell.x + ( cell.y + scrollRows ) * 13.0 + vPanelLodPhase * 97.0;
+		float glyphNoise = fract( sin( glyphSeed * 12.9898 ) * 43758.5453 );
+		float glyphOn = step( 0.45, glyphNoise );
+		// Dim (not black) "off" cells so the Panel's phase color stays legible
+		// through the texture even at close range — texture on top of color, not
+		// a replacement for it — and fade the whole effect out toward the plain
+		// flat blob as lodBlend falls to 0.
+		float lit = mix( 1.0, mix( ${glslFloat(PANEL_TEXT_DARKEN)}, 1.0, glyphOn ), lodBlend );
+		diffuseColor.rgb *= lit;
+	}`,
+  )
+
+  shader.uniforms.uPanelLodTime = { value: 0 }
+  // Stash this compile's uniforms on the material so the component's `useFrame`
+  // can update the time uniform without re-deriving or re-compiling anything.
+  this.userData.panelLodUniforms = shader.uniforms
+}
 
 /**
  * The shape exposed on `window` for the e2e blink test (#19). Blinks fire from
@@ -49,6 +152,45 @@ declare global {
   }
 }
 
+/** A Panel's on-screen footprint as fractions of the canvas ([0, 1] on both
+ * axes, `y` measured top-down to match image-pixel coordinates), as reported
+ * by {@link PanelLodTestHook.getPanelScreenRect}. */
+export interface ScreenRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/**
+ * The shape exposed on `window` for the e2e Panel text LOD test (#25). The
+ * near/mid "hinted, illegible scrolling text" versus far "flat color blob"
+ * swap (see {@link patchPanelMaterial}) happens entirely inside a fragment
+ * shader — there is no per-instance JS state a test could read the way
+ * {@link BlinkTestHook} reads the instance-color buffer, since the LOD detail
+ * never touches it. So instead of exposing the *decision*, this exposes just
+ * enough geometry for the test to sample the *rendered pixels* of one exact
+ * Panel — its own projected on-screen rectangle, independent of the camera's
+ * current position or angle — so a screenshot crop never accidentally spans a
+ * neighbouring Panel or Tower edge (which would confound "is this panel
+ * showing texture" with "are there several differently-colored things here").
+ */
+export interface PanelLodTestHook {
+  /**
+   * Projects a Pod's Panel quad to its on-screen {@link ScreenRect} using the
+   * live camera, or `null` if that Pod isn't in the scene. Purely a read of
+   * already-public scene/camera state (no scene mutation) — a read-only
+   * affordance in a read-only viewer (ADR-0003).
+   */
+  getPanelScreenRect: (namespace: string, pod: string) => ScreenRect | null
+}
+
+declare global {
+  interface Window {
+    __htpPanelLodTest?: PanelLodTestHook
+  }
+}
+
 /**
  * Panels renders every Pod in the scene as a small glowing rectangle on its
  * Tower's face, drawn as a SINGLE `InstancedMesh` over all Panels across all
@@ -62,6 +204,16 @@ declare global {
  * Panel reads as a flat neon light at exactly its phase color regardless of
  * scene lighting — the glowing-rectangle look of the reference stills, and a
  * cheap fallback that stays legible at any camera distance.
+ *
+ * Text LOD (#25) is layered onto that same material via {@link
+ * patchPanelMaterial}'s `onBeforeCompile`: close/mid Panels additionally show
+ * "hinted, illegible scrolling text" detail, fading to the plain flat blob
+ * above (this is the far LOD path — no separate code path or draw call) beyond
+ * {@link PANEL_LOD_FAR_DISTANCE}. The near/far distance curve and the look's
+ * tuning constants are the pure, unit-tested seam in `panelLOD.ts`; the
+ * transition itself runs entirely on the GPU per-fragment (no per-instance or
+ * per-frame JS loop), so it stays cheap and instance-aware however many Panels
+ * are in view.
  *
  * Picking is instance-aware from the start: the `panelInstances` list is stashed
  * on the mesh's `userData` in the same order the instances are written, so a
@@ -85,6 +237,8 @@ declare global {
 export function Panels({ towers }: { towers: readonly Tower[] }) {
   const instances = useMemo(() => panelInstances(towers), [towers])
   const meshRef = useRef<THREE.InstancedMesh>(null)
+  const materialRef = useRef<THREE.MeshBasicMaterial>(null)
+  const camera = useThree((state) => state.camera)
   const focus = useFocus()
   const { select } = useSelection()
   // Whether the previous frame drew any blink. When a blink settles we need one
@@ -118,21 +272,42 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
 
     const dummy = new THREE.Object3D()
     const color = new THREE.Color()
+    // Panel LOD (#25): each instance's scroll phase, computed once here (not
+    // per frame) from its Pod identity, so the shader's glyph pattern (see
+    // patchPanelMaterial) can offset that one instance's scroll without every
+    // Panel scrolling in lockstep. A fresh buffer sized to the current
+    // instance count, same lifecycle as the matrix/color buffers above.
+    const phases = new Float32Array(instances.length)
     instances.forEach((instance, i) => {
       dummy.position.set(...instance.position)
       dummy.updateMatrix()
       mesh.setMatrixAt(i, dummy.matrix)
       mesh.setColorAt(i, color.set(instance.color))
+      phases[i] = panelTextPhase(instance.namespace, instance.pod)
     })
     mesh.instanceMatrix.needsUpdate = true
     if (mesh.instanceColor) {
       mesh.instanceColor.needsUpdate = true
     }
     mesh.count = instances.length
+    mesh.geometry.setAttribute('instancePhase', new THREE.InstancedBufferAttribute(phases, 1))
     // Stash the ordered instance list so instance-aware picking (#20) can
     // resolve a hit instanceId back to its Pod.
     mesh.userData.panelInstances = instances
   }, [instances])
+
+  // Panel LOD (#25): advance the shader's scroll clock every frame, regardless
+  // of blink activity. This is the ONLY per-frame LOD cost — one scalar
+  // uniform write, O(1) in the Panel count, since the near/far distance fade
+  // and the glyph pattern itself are evaluated per-fragment on the GPU (see
+  // patchPanelMaterial), not looped over instances in JS.
+  useFrame(() => {
+    const uniforms = materialRef.current?.userData.panelLodUniforms as
+      { uPanelLodTime?: { value: number } } | undefined
+    if (uniforms?.uPanelLodTime) {
+      uniforms.uPanelLodTime.value = performance.now() / 1000
+    }
+  })
 
   // Drive the transient blink each frame: a Panel with an active pulse in the
   // out-of-band blinkStore (fed by a #18 panelBlink delta, NOT the reducer) is
@@ -194,6 +369,48 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
     }
   }, [instances])
 
+  // Expose the e2e Panel LOD hook (#25): project a named Pod's Panel quad to
+  // its on-screen rect using the live camera (see PanelLodTestHook), so the
+  // test can crop a screenshot to exactly one Panel's own pixels — regardless
+  // of where the camera currently is — rather than guessing screen coordinates
+  // or risking a crop that spans a neighbour. `camera` is the same mutable
+  // object FreeFlyControls/Focus update in place every frame, so re-running
+  // this effect on every camera tick isn't needed: each call below reads the
+  // camera's current transform at call time.
+  useEffect(() => {
+    window.__htpPanelLodTest = {
+      getPanelScreenRect: (namespace, pod) => {
+        const instance = instances.find((p) => p.namespace === namespace && p.pod === pod)
+        if (!instance) {
+          return null
+        }
+        const [cx, cy, cz] = instance.position
+        const half = PANEL_SIZE / 2
+        let minX = Infinity
+        let minY = Infinity
+        let maxX = -Infinity
+        let maxY = -Infinity
+        for (const [dx, dy] of [
+          [-half, -half],
+          [half, half],
+        ]) {
+          const corner = new THREE.Vector3(cx + dx, cy + dy, cz).project(camera)
+          const xFrac = (corner.x + 1) / 2
+          // NDC y is up; image/pixel y is down.
+          const yFrac = (1 - corner.y) / 2
+          minX = Math.min(minX, xFrac)
+          maxX = Math.max(maxX, xFrac)
+          minY = Math.min(minY, yFrac)
+          maxY = Math.max(maxY, yFrac)
+        }
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+      },
+    }
+    return () => {
+      delete window.__htpPanelLodTest
+    }
+  }, [instances, camera])
+
   if (instances.length === 0) {
     return null
   }
@@ -207,7 +424,11 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
       args={[undefined, undefined, instances.length]}
     >
       <planeGeometry args={[PANEL_SIZE, PANEL_SIZE]} />
-      <meshBasicMaterial toneMapped={false} />
+      <meshBasicMaterial
+        ref={materialRef}
+        toneMapped={false}
+        onBeforeCompile={patchPanelMaterial}
+      />
     </instancedMesh>
   )
 }
