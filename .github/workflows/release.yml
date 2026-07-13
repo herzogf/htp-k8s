@@ -299,8 +299,9 @@ jobs:
       # continue-on-error, a genuine scan *error* — auth/401, image-pull, DB
       # download, hang — exits non-zero and fails the step (and thus the
       # release), rather than passing off a silently-empty security report.
-      # (#70 will add a timeout-minutes here later; with continue-on-error gone,
-      # a hang -> timeout will then correctly fail the release too.)
+      # The step-level timeout-minutes (#70) bounds a setup hang so it fails fast
+      # instead of stalling to the job timeout; with continue-on-error gone, that
+      # timeout then correctly fails the release too.
       #
       # Mirrors the PR-time scan in pr.yml, except that one scans a `--local`
       # image (no registry) while this pulls the just-pushed GHCR image — private
@@ -310,6 +311,7 @@ jobs:
       # GITHUB_TOKEN packages:read is covered by this job's packages: write).
       - name: Trivy scan (findings non-blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        timeout-minutes: 5
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
