@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -142,6 +143,8 @@ func TestPodLogTail_FakeClientset(t *testing.T) {
 	}
 	client := fake.NewSimpleClientset(p)
 
+	baseGoroutines := runtime.NumGoroutine()
+
 	var mu sync.Mutex
 	var last scene.LogTail
 	var emits int
@@ -156,13 +159,32 @@ func TestPodLogTail_FakeClientset(t *testing.T) {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
 	if emits == 0 {
 		t.Fatal("PodLogTail emitted no windows from the canned stream")
 	}
 	if len(last.Lines) > scene.LogTailMaxLines {
 		t.Errorf("final window has %d lines, exceeds cap %d", len(last.Lines), scene.LogTailMaxLines)
 	}
+	mu.Unlock()
+
+	// The ctx-watcher goroutine must exit when the stream ends on its own, even
+	// though this ctx (Background) is never cancelled — otherwise it would leak.
+	assertNoLingeringGoroutine(t, baseGoroutines)
+}
+
+// assertNoLingeringGoroutine polls until the goroutine count settles back to at
+// most base, failing if PodLogTail left a goroutine running past its return.
+func assertNoLingeringGoroutine(t *testing.T, base int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= base {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Errorf("goroutine count %d did not settle back to %d — PodLogTail leaked a goroutine",
+		runtime.NumGoroutine(), base)
 }
 
 // TestPodLogTail_CancelReturns asserts PodLogTail returns promptly when its

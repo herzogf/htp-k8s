@@ -54,10 +54,17 @@ func PodLogTail(ctx context.Context, client kubernetes.Interface, namespace, nam
 
 	// A blocking Read on the follow stream won't notice ctx cancellation on its
 	// own, so close the stream when ctx is done to unblock streamTail promptly.
-	// Closing an already-closed stream (the normal-return path) is harmless.
+	// The streamDone channel lets this watcher also exit when the stream ends on
+	// its own (EOF, e.g. the pod terminated) even if ctx is never cancelled, so
+	// it never outlives the call — closing an already-closed stream is harmless.
+	streamDone := make(chan struct{})
+	defer close(streamDone)
 	go func() {
-		<-ctx.Done()
-		_ = stream.Close()
+		select {
+		case <-ctx.Done():
+			_ = stream.Close()
+		case <-streamDone:
+		}
 	}()
 
 	return streamTail(ctx, stream, scene.LogTailMaxLines, emit)
