@@ -53,6 +53,17 @@ vi.mock('./scene/Panels', () => ({
   ),
 }))
 
+// FloorLanes (#28) is likewise WebGL (two InstancedMeshes it drives via
+// useFrame), so stand it in here and just assert Scene wires the snapshot's
+// Towers through to it; the lane routing/pulse maths are covered by
+// scene/laneLayout.test.ts and scene/laneActivity.test.ts, and the rendered
+// result by the Playwright e2e screenshot/video.
+vi.mock('./scene/FloorLanes', () => ({
+  FloorLanes: ({ towers }: { towers: Tower[] }) => (
+    <div data-testid="floor-lanes" data-tower-count={towers.length} />
+  ),
+}))
+
 // DetailLayer (#24) renders the Detail Popup through drei's `Html`, which needs
 // R3F/WebGL context absent under jsdom. Its selection→popup wiring is unit-tested
 // in detail/ and end-to-end by the Playwright popup test; here it's a no-op
@@ -129,6 +140,21 @@ describe('Scene', () => {
 
     const panels = screen.getByTestId('panels')
     expect(panels).toHaveAttribute('data-tower-count', '2')
+  })
+
+  it("renders FloorLanes, handing them the snapshot's Towers", () => {
+    const towers = [tower('alpha', 0, 0), tower('bravo', 1, 0)]
+
+    render(<Scene sceneState={sceneState(ViewModeNode, towers)} />)
+
+    const floorLanes = screen.getByTestId('floor-lanes')
+    expect(floorLanes).toHaveAttribute('data-tower-count', '2')
+  })
+
+  it('renders no FloorLanes before a snapshot arrives', () => {
+    render(<Scene sceneState={null} />)
+
+    expect(screen.queryByTestId('floor-lanes')).not.toBeInTheDocument()
   })
 
   it('renders no Towers for an empty scene, but still shows the indicator', () => {
