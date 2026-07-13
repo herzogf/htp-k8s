@@ -53,6 +53,43 @@ export const DeltaPanelUpdated: SceneDeltaType = "panelUpdated";
  */
 export const DeltaPanelRemoved: SceneDeltaType = "panelRemoved";
 /**
+ * DeltaPanelBlink is a transient "activity happened on this Panel" pulse
+ * (see CONTEXT.md's Panel: "brightness/blink encodes recent activity") — a
+ * pod phase transition, a container restart, or a new Kubernetes Event for
+ * the pod. Unlike every other delta kind it is NOT a structural change to
+ * the scene and carries no new scene state: it is a fire-and-forget one-shot
+ * signal the frontend renders as a brief animation and then forgets, so it
+ * is deliberately absent from Diff (a rebuild-and-diff can't see an
+ * instantaneous event) and emitted out-of-band by the watcher's activity
+ * detection. The delta identifies the Panel by SceneDelta.TowerName plus
+ * SceneDelta.Namespace and SceneDelta.Pod (the same identity DeltaPanelRemoved
+ * uses) and names the kind of activity in SceneDelta.Activity. Because it
+ * mutates no state, applying it to a SceneState is a no-op — the snapshot +
+ * deltas invariant the other kinds uphold is unaffected by dropping it.
+ */
+export const DeltaPanelBlink: SceneDeltaType = "panelBlink";
+/**
+ * PanelActivity names the kind of recent activity a DeltaPanelBlink reports, so
+ * the frontend can vary the blink (e.g. a restart or crash pulse harder than a
+ * routine phase change). It is carried only on DeltaPanelBlink.
+ */
+export type PanelActivity = string;
+/**
+ * ActivityPhaseChange is a change in the pod's phase-like status (see
+ * PodPhase) — e.g. Pending→Running, or a container entering CrashLoopBackOff.
+ */
+export const ActivityPhaseChange: PanelActivity = "phaseChange";
+/**
+ * ActivityRestart is an increase in the pod's total container restart count:
+ * a container was restarted (the classic "is this pod flapping" signal).
+ */
+export const ActivityRestart: PanelActivity = "restart";
+/**
+ * ActivityEvent is a new Kubernetes Event (Normal or Warning) for the pod —
+ * the "something just happened to this pod" signal from the Events API.
+ */
+export const ActivityEvent: PanelActivity = "event";
+/**
  * SceneDelta is one incremental change to the scene (see CONTEXT.md's "Scene
  * Delta") sent from backend to frontend after the initial SceneState snapshot,
  * per ADR-0007. It is a discriminated union keyed by Type: the frontend switches
@@ -92,12 +129,17 @@ export interface SceneDelta {
    */
   panel?: Panel;
   /**
-   * Namespace and Pod identify the affected Panel for DeltaPanelRemoved (a
-   * Panel's identity is its Pod's cluster-unique Namespace/Pod pair). Empty
-   * otherwise.
+   * Namespace and Pod identify the affected Panel for DeltaPanelRemoved and
+   * DeltaPanelBlink (a Panel's identity is its Pod's cluster-unique
+   * Namespace/Pod pair). Empty otherwise.
    */
   namespace?: string;
   pod?: string;
+  /**
+   * Activity names the kind of recent activity for DeltaPanelBlink (a phase
+   * change, a restart, or a new Event). Empty for every other kind.
+   */
+  activity?: PanelActivity;
 }
 
 //////////
