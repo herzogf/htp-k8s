@@ -11,7 +11,6 @@ import (
 	"os"
 	"time"
 
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/herzogf/htp-k8s/internal/kube"
@@ -24,10 +23,6 @@ const defaultAddr = ":8080"
 // probeTimeout bounds the startup permission probe so a slow or unreachable
 // API server can't hang server startup.
 const probeTimeout = 10 * time.Second
-
-// snapshotTimeout bounds the per-connection SceneState build (listing Nodes or
-// Namespaces/Projects) so a slow API server can't stall a /ws connect.
-const snapshotTimeout = 10 * time.Second
 
 func main() {
 	if err := run(os.Args[1:], os.Getenv("HTP_K8S_ADDR")); err != nil {
@@ -67,9 +62,23 @@ func run(args []string, envAddr string) error {
 		return err
 	}
 
+	// One shared watcher backs every /ws connection: it holds a live SceneState
+	// (LIST + WATCH) and fans Scene Deltas out to subscribers, so a client gets
+	// a fresh snapshot on connect (or reconnect) then only deltas (ADR-0007). It
+	// runs for the process's lifetime; ctx cancellation (below) stops it.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	watcher := kube.NewSceneWatcher(client, dyn, mode)
+	watcher.Start(ctx)
+
 	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: server.NewHandler(server.Config{Snapshot: snapshotProvider(client, dyn, mode)}),
+		Addr: addr,
+		Handler: server.NewHandler(server.Config{
+			Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
+				return watcher.SnapshotAndSubscribe()
+			},
+		}),
 	}
 
 	log.Printf("htp-k8s backend listening on %s", addr)
@@ -103,43 +112,4 @@ func resolveViewMode(client kubernetes.Interface) (scene.ViewMode, error) {
 	}
 	log.Printf("detected view mode: %s", mode)
 	return mode, nil
-}
-
-// snapshotProvider returns a server.Config.Snapshot function that builds a
-// fresh SceneState for each /ws connection: the detected View Mode plus the
-// current Towers listed from the cluster (see kube.BuildTowers), each with its
-// Panels nested in (see kube.BuildPanels / kube.AttachPanels). Building per
-// connection keeps the snapshot current without a watch cache — deltas that
-// push live changes are a later ticket (ADR-0007).
-//
-// Neither a Tower- nor a Panel-listing error fails the connection (ADR-0002):
-// each is logged and the client still receives a valid SceneState carrying the
-// View Mode, just with whatever Towers/Panels were obtained (possibly none).
-// This keeps the /ws contract — a well-formed frame with a valid viewMode —
-// intact regardless of RBAC.
-func snapshotProvider(client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode) func(context.Context) scene.SceneState {
-	return func(ctx context.Context) scene.SceneState {
-		ctx, cancel := context.WithTimeout(ctx, snapshotTimeout)
-		defer cancel()
-
-		towers, err := kube.BuildTowers(ctx, client, dyn, mode)
-		if err != nil {
-			log.Printf("build towers: %v", err)
-		}
-		if towers == nil {
-			// Keep the wire's Towers a JSON array ([]), never null, even
-			// when the listing failed outright (see scene.SceneState.Towers).
-			towers = []scene.Tower{}
-		}
-
-		panelsByTower, err := kube.BuildPanels(ctx, client, mode)
-		if err != nil {
-			log.Printf("build panels: %v", err)
-		}
-		// Nest each Tower's Panels into it (empty array for a Tower with no
-		// pods); pods whose Tower wasn't built are dropped.
-		towers = kube.AttachPanels(towers, panelsByTower)
-
-		return scene.SceneState{ViewMode: mode, Towers: towers}
-	}
 }
