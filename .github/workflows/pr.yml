@@ -48,6 +48,12 @@ jobs:
         uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
         with:
           version: 3.x
+          # Authenticate the go-task release lookup against the GitHub API so it
+          # uses the (higher) authenticated rate limit rather than the low
+          # anonymous one, which intermittently rate-limited this step before any
+          # real work ran (issue #66). GITHUB_TOKEN is already available under the
+          # workflow's `contents: read`; no extra permissions needed.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       # The frontend TypeScript wire types are generated from the Go SceneState
       # contract (issue #10). Regenerate on a pristine tree and fail on any diff
@@ -96,6 +102,9 @@ jobs:
         uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
         with:
           version: 3.x
+          # Authenticated go-task release lookup — avoids the anonymous GitHub
+          # API rate-limit flake (issue #66). See the Backend job for details.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lint
         run: task lint
@@ -169,6 +178,9 @@ jobs:
         uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
         with:
           version: 3.x
+          # Authenticated go-task release lookup — avoids the anonymous GitHub
+          # API rate-limit flake (issue #66). See the Backend job for details.
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install web dependencies
         run: npm ci
@@ -177,9 +189,28 @@ jobs:
       # The `web:e2e` task only runs `playwright install chromium` (browser
       # download). A fresh runner also needs the browser's system libraries,
       # which only `--with-deps` (an apt step) installs — so do it here.
+      #
+      # This step has intermittently HUNG on a fresh runner (~19 min observed
+      # while an identical parallel step passed — an isolated runner transient,
+      # not our code; issue #66). Harden it two ways:
+      #   * a per-attempt `timeout 240` fails a single hung install fast instead
+      #     of letting it burn the runner up to the job timeout;
+      #   * a bounded retry loop (3 attempts) auto-recovers from a transient hang
+      #     or download blip, and the `exit 1` after the last attempt means a
+      #     PERSISTENT failure still fails the job — the flake fix never masks a
+      #     real one.
+      # `timeout-minutes` is an outer safety net bounding the whole loop (3 ×
+      # 240s + backoffs) well under the 30-min job timeout.
       - name: Install Playwright browser + system deps
-        run: npx playwright install --with-deps chromium
         working-directory: web
+        timeout-minutes: 15
+        run: |
+          for i in 1 2 3; do
+            timeout 240 npx playwright install --with-deps chromium && break
+            echo "playwright install attempt $i failed/timed out; retrying"
+            sleep 5
+            [ "$i" = 3 ] && exit 1
+          done
 
       # ADR-0004: e2e is the genuine full-system check and was always meant to
       # run against a real cluster. Since issue #9 the binary FAILS startup when
