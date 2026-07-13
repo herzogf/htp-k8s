@@ -59,6 +59,54 @@ body {
   font-weight: 600;
 }
 
+/* Demo Mode's HUD toggle (issue #22): the same badge look as
+   .view-mode-indicator above, but a real, clickable <button> (pointer events
+   on, a hover/focus affordance) placed at the opposite top corner so the two
+   HUD elements never collide. */
+.demo-mode-toggle {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid rgba(120, 255, 200, 0.35);
+  border-radius: 0.4rem;
+  background: rgba(5, 10, 12, 0.65);
+  color: #7dffc8;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 8px rgba(120, 255, 200, 0.5);
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+}
+
+.demo-mode-toggle:hover {
+  border-color: rgba(120, 255, 200, 0.6);
+}
+
+.demo-mode-toggle__caption {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  opacity: 0.7;
+}
+
+.demo-mode-toggle__label {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+/* Once Demo Mode is on, the toggle itself reads as "lit" like the rest of the
+   cinematic HUD, so its own state is legible at a glance. */
+.demo-mode-toggle[data-demo-active='true'] {
+  border-color: rgba(120, 255, 200, 0.8);
+  background: rgba(10, 30, 24, 0.75);
+}
+
 /* ── Detail Popup (issue #24) ────────────────────────────────────────────────
    The in-world, read-only popup shown beside a clicked Tower or Panel. Rendered
    through drei's <Html> so it is real, queryable DOM anchored at a 3D point; the

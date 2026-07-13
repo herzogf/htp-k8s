@@ -2,6 +2,14 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import { Euler, Vector3 } from 'three'
 import {
+  type DemoIntro,
+  type DemoPose,
+  demoPose,
+  type RollRecovery,
+  sampleDemoIntro,
+  stepRollRecovery,
+} from './demoMode'
+import {
   FOCUS_DURATION_SECONDS,
   focusLookAngles,
   MAX_FOCUS_STEP_SECONDS,
@@ -27,7 +35,7 @@ interface FocusTween {
   elapsed: number
 }
 
-/** The shape exposed on `window` for the e2e camera-interaction test (#20, extended for Focus in #21). */
+/** The shape exposed on `window` for the e2e camera-interaction test (#20, extended for Focus in #21 and Demo Mode in #22). */
 export interface CameraTestHook {
   /** The live camera world position as `[x, y, z]`. */
   getPosition: () => [number, number, number]
@@ -37,6 +45,20 @@ export interface CameraTestHook {
   isFocusing: () => boolean
   /** The destination pose of the active Focus fly-to, or `null` when idle. */
   getFocusGoal: () => Pose | null
+  /** Whether Demo Mode's automated flight is currently driving the camera. */
+  isDemoActive: () => boolean
+}
+
+/** Props for {@link FreeFlyControls}. */
+export interface FreeFlyControlsProps {
+  /**
+   * Whether Demo Mode (#22) is switched on. While `true` the rig drives the
+   * camera along the automated cinematic flight path instead of user input;
+   * toggling it back to `false` hands control back to free-fly from the
+   * camera's current pose, easing its bank back to level rather than
+   * snapping — see the `useFrame` below for the hand-off mechanics.
+   */
+  demoActive?: boolean
 }
 
 declare global {
@@ -53,8 +75,10 @@ declare global {
 /**
  * FreeFlyControls is the manual free-fly camera rig (#20): WASD (plus Space/Shift
  * for up/down) flies the camera through the tower landscape, and pointer-lock
- * mouse-look aims it — the *Hackers* flythrough feel, driven by the user rather
- * than the automated Demo Mode flight (a separate, later ticket).
+ * mouse-look aims it — the *Hackers* flythrough feel, driven by the user. It
+ * also hosts the automated Demo Mode flight (#22, `demoActive` prop): both
+ * live in the same rig because they share the one live camera and must hand
+ * control between each other without a jump.
  *
  * It is deliberately dormant until the user acts: it seeds its yaw/pitch from the
  * camera's *current* orientation on mount and only ever re-applies that same
@@ -64,9 +88,11 @@ declare global {
  * (unit-tested without a renderer); this component is the thin rig that binds DOM
  * input and integrates it into the live camera each frame. Speed and look
  * sensitivity are the fixed {@link FLY_SPEED}/{@link LOOK_SENSITIVITY} tunings —
- * their single source of truth lives in the pure seam.
+ * their single source of truth lives in the pure seam. Demo Mode's flight path,
+ * intro ease-on, and roll ease-off likewise live in the pure {@link demoPose}/
+ * {@link sampleDemoIntro}/{@link stepRollRecovery} seam in `demoMode.ts`.
  */
-export function FreeFlyControls() {
+export function FreeFlyControls({ demoActive = false }: FreeFlyControlsProps = {}) {
   const camera = useThree((state) => state.camera)
   const gl = useThree((state) => state.gl)
   const focus = useFocus()
@@ -85,6 +111,19 @@ export function FreeFlyControls() {
   // direction (the `from` look-at a new fly-to eases away from), without
   // allocating in the render loop.
   const forward = useRef(new Vector3())
+
+  // Demo Mode state (#22). `demoElapsed` is the flight-loop clock, reset to 0
+  // each time Demo Mode switches on. `demoIntro` is the brief ease from
+  // wherever the camera was onto the (already-moving) flight path, non-null
+  // only for the first `DEMO_TRANSITION_SECONDS` after activation. `rollBank`
+  // is the last bank angle Demo Mode applied — captured every demo frame so a
+  // `rollRecovery` ease-back-to-level can start from the true value the
+  // instant Demo Mode switches off, rather than guessing or snapping to zero.
+  const demoElapsed = useRef(0)
+  const demoIntro = useRef<DemoIntro | null>(null)
+  const rollBank = useRef(0)
+  const rollRecovery = useRef<RollRecovery | null>(null)
+  const wasDemoActive = useRef(false)
 
   // Seed yaw/pitch from the camera's current orientation. Reading it (rather
   // than assuming a look-at-origin default) is what guarantees activating the
@@ -173,11 +212,17 @@ export function FreeFlyControls() {
               target: [...tween.current.to.target],
             }
           : null,
+      // Demo Mode (#22): lets the e2e prove the automated flight is driving
+      // the camera (rather than merely observing incidental motion) and that
+      // it stops the instant the toggle switches off.
+      isDemoActive: () => demoActive,
     }
     return () => {
       delete window.__htpCameraTest
     }
-  }, [camera])
+    // Re-registers the hook whenever demoActive changes so isDemoActive never
+    // reads a stale closed-over value.
+  }, [camera, demoActive])
 
   useFrame((_, delta) => {
     // Until yaw/pitch are seeded from the initial orientation, do nothing — never
@@ -186,9 +231,87 @@ export function FreeFlyControls() {
       return
     }
 
+    // Detect the Demo Mode toggle's edges (compared against last frame, not
+    // React's commit timing, so this can never race a useEffect against
+    // useFrame — see the refs' doc comments above).
+    if (demoActive && !wasDemoActive.current) {
+      // Entering Demo Mode: capture the camera's current pose as the intro's
+      // start, reset the flight-loop clock, and drop any in-flight Focus
+      // tween — Demo Mode takes the camera over outright.
+      forward.current.set(0, 0, -1).applyQuaternion(camera.quaternion).add(camera.position)
+      demoIntro.current = {
+        from: {
+          position: camera.position.toArray() as [number, number, number],
+          target: forward.current.toArray() as [number, number, number],
+        },
+        elapsed: 0,
+      }
+      demoElapsed.current = 0
+      tween.current = null
+    } else if (!demoActive && wasDemoActive.current) {
+      // Leaving Demo Mode: ease the bank back to level from whatever it was
+      // the instant control hands back, instead of snapping it to zero — the
+      // "no jarring jump" hand-back Demo Mode's off-toggle requires (#22).
+      // Position/yaw/pitch need no equivalent recovery: `look.current` (and
+      // the camera position) were kept in sync with the live demo pose every
+      // demo frame below, so free-fly already resumes from exactly there.
+      if (Math.abs(rollBank.current) > 1e-6) {
+        rollRecovery.current = { from: rollBank.current, elapsed: 0 }
+      }
+    }
+    wasDemoActive.current = demoActive
+
+    if (demoActive) {
+      // Cap the flight clock's own step for the same reason the Focus tween
+      // caps its elapsed step below: a stall's oversized delta must not leap
+      // the flight path far ahead in one frame.
+      demoElapsed.current += Math.min(delta, MAX_FOCUS_STEP_SECONDS)
+
+      let flightPose: DemoPose
+      if (demoIntro.current) {
+        demoIntro.current.elapsed += Math.min(delta, MAX_FOCUS_STEP_SECONDS)
+        const sample = sampleDemoIntro(demoIntro.current, demoElapsed.current)
+        flightPose = sample.pose
+        if (sample.done) {
+          demoIntro.current = null
+        }
+      } else {
+        flightPose = demoPose(demoElapsed.current)
+      }
+
+      camera.position.set(...flightPose.position)
+      // focusLookAngles is the pure, tested reduction of the look-at to
+      // yaw/pitch shared with Focus; `roll` is Demo Mode's one addition, the
+      // bank neither Focus nor free-fly ever applies.
+      const { yaw, pitch } = focusLookAngles(flightPose.position, flightPose.target)
+      euler.current.set(pitch, yaw, flightPose.roll, 'YXZ')
+      camera.quaternion.setFromEuler(euler.current)
+      // Keep free-fly's own aim, and the last bank angle, continuously in
+      // sync with the live demo pose, so the instant Demo Mode switches off
+      // the code below picks up exactly where the flight left off.
+      look.current.yaw = yaw
+      look.current.pitch = pitch
+      rollBank.current = flightPose.roll
+      return
+    }
+
+    // The bank eased back toward level after Demo Mode switched off, or 0
+    // once fully settled (or if Demo Mode was never active this session).
+    let roll = 0
+    if (rollRecovery.current) {
+      const stepped = stepRollRecovery(
+        rollRecovery.current,
+        Math.min(delta, MAX_FOCUS_STEP_SECONDS),
+      )
+      roll = stepped.roll
+      rollRecovery.current = stepped.next
+    }
+
     // A click on a Tower/Panel queues a target pose; pick it up and start a fresh
     // fly-to from wherever the camera is *now*, so the animation is continuous
-    // from the current view rather than snapping to a start pose.
+    // from the current view rather than snapping to a start pose. (While Demo
+    // Mode is active we return above before ever reaching here, so a click
+    // during the flight simply leaves its request queued until Demo Mode ends.)
     const request = focus?.takeRequest()
     if (request) {
       // The `from` look-at is a unit step down the camera's current forward axis,
@@ -234,7 +357,7 @@ export function FreeFlyControls() {
       const { yaw, pitch } = focusLookAngles(pose.position, pose.target)
       look.current.yaw = yaw
       look.current.pitch = pitch
-      euler.current.set(pitch, yaw, 0, 'YXZ')
+      euler.current.set(pitch, yaw, roll, 'YXZ')
       camera.quaternion.setFromEuler(euler.current)
 
       if (tween.current.elapsed >= FOCUS_DURATION_SECONDS) {
@@ -245,7 +368,7 @@ export function FreeFlyControls() {
 
     // Re-apply the current aim. While the pointer isn't locked this is the exact
     // seeded orientation, so the view holds perfectly still.
-    euler.current.set(look.current.pitch, look.current.yaw, 0, 'YXZ')
+    euler.current.set(look.current.pitch, look.current.yaw, roll, 'YXZ')
     camera.quaternion.setFromEuler(euler.current)
 
     // Translate along the camera-local move direction, rotated into world space,

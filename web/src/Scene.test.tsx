@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { type Tower, type ViewMode, ViewModeNamespace, ViewModeNode } from './generated/scenestate'
@@ -22,10 +22,15 @@ vi.mock('@react-three/drei', () => ({
 
 // FreeFlyControls (#20) drives the live camera via useThree/useFrame, which have
 // no WebGL context under jsdom. Its movement/look maths is unit-tested in
-// scene/freeFly.test.ts and its wiring by the Playwright interaction test, so
-// here it's a no-op stand-in — Scene only mounts it inside the Canvas.
+// scene/freeFly.test.ts, Demo Mode's flight/hand-off maths in
+// scene/demoMode.test.ts, and the rig's wiring by the Playwright interaction/
+// demo e2e tests, so here it's a stand-in that just surfaces the `demoActive`
+// prop Scene passes it (as a data attribute), so this file can assert the HUD
+// toggle (#22) actually reaches the rig without a renderer.
 vi.mock('./scene/FreeFlyControls', () => ({
-  FreeFlyControls: () => null,
+  FreeFlyControls: ({ demoActive }: { demoActive?: boolean }) => (
+    <div data-testid="free-fly-controls" data-demo-active={demoActive ?? false} />
+  ),
 }))
 
 // Stand in for the WebGL Tower so we can assert the Scene -> Tower wiring
@@ -131,5 +136,43 @@ describe('Scene', () => {
 
     expect(screen.queryAllByTestId('tower')).toHaveLength(0)
     expect(screen.getByRole('status')).toBeInTheDocument()
+  })
+
+  // Demo Mode's HUD toggle (#22): the flight/hand-off maths itself is
+  // unit-tested in scene/demoMode.test.ts and proven live by the Playwright
+  // demo e2e; this just proves the toggle exists, is off by default, flips on
+  // click, and that its state actually reaches FreeFlyControls (the rig that
+  // drives the camera) rather than only updating its own label.
+  describe('Demo Mode toggle', () => {
+    it('is available even before any snapshot has arrived, starting off', () => {
+      render(<Scene sceneState={null} />)
+
+      const toggle = screen.getByRole('button', { name: /demo mode/i })
+      expect(toggle).toHaveAttribute('aria-pressed', 'false')
+      expect(toggle).toHaveTextContent(/off/i)
+      expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-demo-active', 'false')
+    })
+
+    it('switches on when clicked, handing demoActive through to FreeFlyControls', () => {
+      render(<Scene sceneState={sceneState(ViewModeNode)} />)
+
+      fireEvent.click(screen.getByRole('button', { name: /demo mode/i }))
+
+      const toggle = screen.getByRole('button', { name: /demo mode/i })
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      expect(toggle).toHaveTextContent(/on/i)
+      expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-demo-active', 'true')
+    })
+
+    it('switches back off on a second click', () => {
+      render(<Scene sceneState={sceneState(ViewModeNode)} />)
+
+      const toggle = screen.getByRole('button', { name: /demo mode/i })
+      fireEvent.click(toggle)
+      fireEvent.click(toggle)
+
+      expect(toggle).toHaveAttribute('aria-pressed', 'false')
+      expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-demo-active', 'false')
+    })
   })
 })
