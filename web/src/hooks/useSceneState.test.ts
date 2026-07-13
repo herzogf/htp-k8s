@@ -1,6 +1,7 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type ViewMode, ViewModeNamespace, ViewModeNode } from '../generated/scenestate'
+import { makeSceneState } from '../test-support/sceneFixtures'
 import { useSceneState } from './useSceneState'
 
 type Listener = (event: MessageEvent) => void
@@ -40,7 +41,9 @@ class FakeWebSocket {
   }
 }
 
-const snapshot = (viewMode: ViewMode) => JSON.stringify({ viewMode })
+// A full, valid SceneState frame as the backend sends it — built through the
+// shared factory so a new required field lands in one place, not here.
+const snapshot = (viewMode: ViewMode) => JSON.stringify(makeSceneState({ viewMode }))
 
 describe('useSceneState', () => {
   beforeEach(() => {
@@ -73,7 +76,7 @@ describe('useSceneState', () => {
       socket.emit('message', { data: snapshot(ViewModeNode) })
     })
 
-    expect(result.current).toEqual({ viewMode: 'node' })
+    expect(result.current).toEqual(makeSceneState({ viewMode: ViewModeNode }))
   })
 
   it('replaces the state with each new snapshot received', () => {
@@ -87,7 +90,7 @@ describe('useSceneState', () => {
       socket.emit('message', { data: snapshot(ViewModeNamespace) })
     })
 
-    expect(result.current).toEqual({ viewMode: 'namespace' })
+    expect(result.current).toEqual(makeSceneState({ viewMode: ViewModeNamespace }))
   })
 
   it('keeps the last good state when a malformed frame arrives', () => {
@@ -101,7 +104,7 @@ describe('useSceneState', () => {
       socket.emit('message', { data: 'not json' })
     })
 
-    expect(result.current).toEqual({ viewMode: 'node' })
+    expect(result.current).toEqual(makeSceneState({ viewMode: ViewModeNode }))
   })
 
   it('ignores non-text payloads', () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { type SceneState, ViewModeNamespace, ViewModeNode } from '../generated/scenestate'
+import { makeSceneState } from '../test-support/sceneFixtures'
 import { parseSceneState, viewModeLabel } from './sceneState'
 
 describe('parseSceneState', () => {
@@ -48,13 +49,13 @@ describe('parseSceneState', () => {
 
 describe('viewModeLabel', () => {
   it('labels Node mode', () => {
-    const state: SceneState = { viewMode: ViewModeNode, towers: [] }
+    const state = makeSceneState({ viewMode: ViewModeNode })
 
     expect(viewModeLabel(state.viewMode)).toBe('Node view')
   })
 
   it('labels Namespace/Project mode', () => {
-    const state: SceneState = { viewMode: ViewModeNamespace, towers: [] }
+    const state = makeSceneState({ viewMode: ViewModeNamespace })
 
     expect(viewModeLabel(state.viewMode)).toBe('Namespace / Project view')
   })
