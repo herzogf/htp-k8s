@@ -2,6 +2,8 @@ import { Canvas } from '@react-three/fiber'
 import { Text } from '@react-three/drei'
 import { type SceneState } from './generated/scenestate'
 import { viewModeLabel } from './scene/sceneState'
+import { towerPlacements } from './scene/towerLayout'
+import { Tower, TOWER_COLOR } from './scene/Tower'
 
 const WAITING_TEXT = 'Waiting for connection…'
 
@@ -11,28 +13,46 @@ export interface SceneProps {
 }
 
 /**
- * The 3D scene. Until a snapshot arrives it shows a waiting message; once the
- * backend's `SceneState` snapshot is received it renders the detected View
- * Mode as an on-screen indicator — both as in-world text in the canvas and a
- * HUD badge over it. Towers, Panels, and Floor Lanes are built in later
- * tickets on top of this seam (no towers yet, per issue #11).
+ * The 3D scene. Until a snapshot arrives it shows an in-world waiting message;
+ * once the backend's `SceneState` snapshot is received it renders the Towers at
+ * their grid positions in the cinematic *Hackers* data-center look (glowing,
+ * semi-transparent prisms on a dark circuit-board floor), and keeps the View
+ * Mode indicator from #11 as a HUD badge over the canvas.
+ *
+ * Towers are placed by {@link towerPlacements} (unit-tested independently of
+ * WebGL) and drawn by {@link Tower}. Panels on the Tower faces and Floor Lanes
+ * are later tickets built on top of this seam.
  */
 export function Scene({ sceneState }: SceneProps) {
   const label = sceneState ? viewModeLabel(sceneState.viewMode) : WAITING_TEXT
+  const placements = sceneState ? towerPlacements(sceneState.towers) : []
 
   return (
     <div className="scene-root">
-      <Canvas camera={{ position: [0, 0, 5] }}>
-        <Text
-          color="white"
-          fontSize={0.4}
-          maxWidth={6}
-          textAlign="center"
-          anchorX="center"
-          anchorY="middle"
-        >
-          {label}
-        </Text>
+      <Canvas camera={{ position: [10, 9, 15], fov: 50 }}>
+        <color attach="background" args={['#05050a']} />
+        {/* Dim ambient plus a key light: enough to read the prisms' faces while
+            keeping the dark, high-contrast data-center mood. The Towers are
+            emissive, so most of their glow is self-lit rather than from these. */}
+        <ambientLight intensity={0.35} />
+        <directionalLight position={[8, 16, 10]} intensity={0.5} />
+        {/* The scene floor: a faint cyan grid on near-black, echoing the film's
+            circuit-board plane. Real Floor Lanes are a later, decorative ticket. */}
+        <gridHelper args={[120, 60, TOWER_COLOR, '#0d2630']} />
+        {sceneState ? (
+          placements.map((placement) => <Tower key={placement.name} placement={placement} />)
+        ) : (
+          <Text
+            color="white"
+            fontSize={0.4}
+            maxWidth={6}
+            textAlign="center"
+            anchorX="center"
+            anchorY="middle"
+          >
+            {WAITING_TEXT}
+          </Text>
+        )}
       </Canvas>
       {sceneState && (
         <div className="view-mode-indicator" data-view-mode={sceneState.viewMode} role="status">
