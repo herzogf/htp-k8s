@@ -58,3 +58,152 @@ body {
   font-size: 1rem;
   font-weight: 600;
 }
+
+/* ── Detail Popup (issue #24) ────────────────────────────────────────────────
+   The in-world, read-only popup shown beside a clicked Tower or Panel. Rendered
+   through drei's <Html> so it is real, queryable DOM anchored at a 3D point; the
+   .detail-anchor wrapper offsets the card up/right so it sits beside the clicked
+   element rather than directly over it (it may overlap neighbouring Panels). */
+.detail-anchor {
+  transform: translate(1rem, -50%);
+  pointer-events: none;
+}
+
+.detail-card {
+  pointer-events: auto;
+  width: 17rem;
+  max-width: 17rem;
+  box-sizing: border-box;
+  padding: 0.6rem 0.75rem 0.7rem;
+  border: 1px solid rgba(120, 255, 200, 0.4);
+  border-radius: 0.45rem;
+  background: rgba(5, 12, 14, 0.9);
+  color: #cdfff0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  box-shadow: 0 0 18px rgba(57, 211, 255, 0.25);
+  backdrop-filter: blur(2px);
+  user-select: none;
+}
+
+.detail-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.detail-card__heading {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.detail-card__kind {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  opacity: 0.65;
+}
+
+.detail-card__title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  word-break: break-all;
+  text-shadow: 0 0 8px rgba(120, 255, 200, 0.5);
+}
+
+.detail-card__close {
+  flex: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: 1px solid rgba(120, 255, 200, 0.3);
+  border-radius: 0.3rem;
+  background: transparent;
+  color: #7dffc8;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.detail-card__close:hover {
+  background: rgba(120, 255, 200, 0.12);
+}
+
+.detail-card__status {
+  margin: 0.25rem 0;
+  opacity: 0.8;
+  font-style: italic;
+}
+
+.detail-rows {
+  margin: 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.6rem;
+}
+
+.detail-rows__row {
+  display: contents;
+}
+
+.detail-rows__label {
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
+.detail-rows__value {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
+.detail-section__title {
+  margin: 0.6rem 0 0.25rem;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  opacity: 0.65;
+}
+
+.detail-events__list {
+  margin: 0;
+  padding-left: 1rem;
+  max-height: 4.5rem;
+  overflow-y: auto;
+}
+
+.detail-events__item {
+  margin-bottom: 0.15rem;
+  font-size: 0.72rem;
+}
+
+.detail-events__reason {
+  font-weight: 600;
+  color: #7dffc8;
+}
+
+.detail-events__reason[data-event-type='Warning'] {
+  color: #ffb000;
+}
+
+/* The height-limited (~3 row) live log tail: capped so it can never grow into a
+   full log viewer (ADR-0003). Roughly three lines tall, then it scrolls. */
+.detail-logtail__lines {
+  margin: 0;
+  padding: 0.35rem 0.45rem;
+  max-height: 3.4rem;
+  overflow: auto;
+  border-radius: 0.3rem;
+  background: rgba(0, 0, 0, 0.55);
+  color: #9dffdd;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.68rem;
+  line-height: 1.1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

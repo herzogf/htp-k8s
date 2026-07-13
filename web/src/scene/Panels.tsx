@@ -1,6 +1,8 @@
 import { type ThreeEvent, useFrame } from '@react-three/fiber'
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
+import { panelSelection } from '../detail/selection'
+import { useSelection } from '../detail/selectionContext'
 import { type PanelActivity, type Tower } from '../generated/scenestate'
 import { blinkStore } from './blinks'
 import { panelFocusPose } from './focus'
@@ -66,10 +68,11 @@ declare global {
  * later click handler (#20) can turn a hit `instanceId` straight back into the
  * originating Pod via {@link resolvePanel}.
  *
- * Clicking a Panel triggers Focus (#21): the pointer event's `instanceId` is
- * resolved back to its {@link PanelInstance}, and that Pod's {@link
- * panelFocusPose} is handed to the shared {@link FocusController} for the camera
- * rig to fly to — close enough to read that specific Panel.
+ * Clicking a Panel does two things (#21, #24): the pointer event's `instanceId`
+ * is resolved back to its {@link PanelInstance}, that Pod's {@link panelFocusPose}
+ * is handed to the shared {@link FocusController} for the camera rig to fly to —
+ * close enough to read that specific Panel — and that Pod is selected, opening
+ * its in-world Detail Popup (pod detail + live log tail) anchored beside it.
  *
  * Blinks (#19) are the per-instance activity animation: a transient `panelBlink`
  * signal recorded on the out-of-band {@link blinkStore} (not a `SceneState`
@@ -83,6 +86,7 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
   const instances = useMemo(() => panelInstances(towers), [towers])
   const meshRef = useRef<THREE.InstancedMesh>(null)
   const focus = useFocus()
+  const { select } = useSelection()
   // Whether the previous frame drew any blink. When a blink settles we need one
   // final frame that restores every base color and uploads it; this ref is how
   // that trailing frame is detected so the mesh doesn't stay stuck bright.
@@ -93,7 +97,7 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     // Instanced picking: R3F reports which instance the ray hit as `instanceId`;
     // resolve it back to the Pod it was built from (panelLayout stashes the same
-    // ordered list on userData). A miss (no instanceId) simply focuses nothing.
+    // ordered list on userData). A miss (no instanceId) simply does nothing.
     if (event.instanceId === undefined) {
       return
     }
@@ -103,6 +107,7 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
     }
     event.stopPropagation()
     focus?.requestFocus(panelFocusPose(instance.position))
+    select(panelSelection(instance))
   }
 
   useLayoutEffect(() => {
