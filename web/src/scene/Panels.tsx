@@ -1,7 +1,10 @@
+import { type ThreeEvent } from '@react-three/fiber'
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { type Tower } from '../generated/scenestate'
-import { PANEL_SIZE, panelInstances } from './panelLayout'
+import { panelFocusPose } from './focus'
+import { useFocus } from './focusContext'
+import { PANEL_SIZE, panelInstances, resolvePanel } from './panelLayout'
 
 /**
  * Panels renders every Pod in the scene as a small glowing rectangle on its
@@ -21,10 +24,31 @@ import { PANEL_SIZE, panelInstances } from './panelLayout'
  * on the mesh's `userData` in the same order the instances are written, so a
  * later click handler (#20) can turn a hit `instanceId` straight back into the
  * originating Pod via {@link resolvePanel}.
+ *
+ * Clicking a Panel triggers Focus (#21): the pointer event's `instanceId` is
+ * resolved back to its {@link PanelInstance}, and that Pod's {@link
+ * panelFocusPose} is handed to the shared {@link FocusController} for the camera
+ * rig to fly to — close enough to read that specific Panel.
  */
 export function Panels({ towers }: { towers: readonly Tower[] }) {
   const instances = useMemo(() => panelInstances(towers), [towers])
   const meshRef = useRef<THREE.InstancedMesh>(null)
+  const focus = useFocus()
+
+  const onClick = (event: ThreeEvent<MouseEvent>) => {
+    // Instanced picking: R3F reports which instance the ray hit as `instanceId`;
+    // resolve it back to the Pod it was built from (panelLayout stashes the same
+    // ordered list on userData). A miss (no instanceId) simply focuses nothing.
+    if (event.instanceId === undefined) {
+      return
+    }
+    const instance = resolvePanel(instances, event.instanceId)
+    if (!instance) {
+      return
+    }
+    event.stopPropagation()
+    focus?.requestFocus(panelFocusPose(instance.position))
+  }
 
   useLayoutEffect(() => {
     const mesh = meshRef.current
@@ -57,6 +81,7 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
   return (
     <instancedMesh
       ref={meshRef}
+      onClick={onClick}
       // args = [geometry, material, count]; both are declared as children below,
       // so pass undefined and let R3F attach them. Count is the max instances.
       args={[undefined, undefined, instances.length]}
