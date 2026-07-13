@@ -78,9 +78,9 @@ describe('panelInstances', () => {
     expect(z).toBeGreaterThan(tower.position[2] + TOWER_FOOTPRINT / 2)
   })
 
-  it('centres a row of Panels on the Tower and stacks rows upward', () => {
+  it('centres a row of Panels on the Tower and fills rows downward from the top', () => {
     // One full row plus one: cols within a row are symmetric about the tower X,
-    // and the wrapped panel starts a new, higher row.
+    // and the wrapped panel starts a new row below the first (top-down fill).
     const panels = Array.from({ length: PANELS_PER_ROW + 1 }, (_, i) =>
       makePanel({ pod: `p-${i}` }),
     )
@@ -92,10 +92,26 @@ describe('panelInstances', () => {
     expect(xs[0]).toBeCloseTo(-xs[xs.length - 1])
     expect(xs).toEqual([...xs].sort((a, b) => a - b))
 
-    // The wrapped panel sits directly above the first column, a row higher.
+    // The first Pod's row is the highest; the wrapped panel sits directly below
+    // the first column, a row lower.
     const wrapped = instances[PANELS_PER_ROW]
     expect(wrapped.position[0]).toBeCloseTo(firstRow[0].position[0])
-    expect(wrapped.position[1]).toBeGreaterThan(firstRow[0].position[1])
+    expect(wrapped.position[1]).toBeLessThan(firstRow[0].position[1])
+  })
+
+  it('places the first Pod at the top of the face and fills downward', () => {
+    // Two rows' worth of Pods: every panel in an earlier row sits strictly
+    // higher than every panel in a later row, so the grid grows top-down.
+    const panels = Array.from({ length: PANELS_PER_ROW * 2 }, (_, i) =>
+      makePanel({ pod: `p-${i}` }),
+    )
+    const instances = panelInstances([makeTower({ name: 'solo', panels })])
+
+    const topRowMinY = Math.min(...instances.slice(0, PANELS_PER_ROW).map((p) => p.position[1]))
+    const nextRowMaxY = Math.max(
+      ...instances.slice(PANELS_PER_ROW, PANELS_PER_ROW * 2).map((p) => p.position[1]),
+    )
+    expect(topRowMinY).toBeGreaterThan(nextRowMaxY)
   })
 
   it('keeps every Panel off the floor', () => {

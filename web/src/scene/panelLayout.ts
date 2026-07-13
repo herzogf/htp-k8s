@@ -1,5 +1,5 @@
 import { type Tower } from '../generated/scenestate'
-import { TOWER_FOOTPRINT, towerPlacements } from './towerLayout'
+import { TOWER_FOOTPRINT, TOWER_HEIGHT, towerPlacements } from './towerLayout'
 
 /**
  * PANELS_PER_ROW is how many Panels sit side by side across a Tower's face
@@ -29,8 +29,8 @@ const PANEL_PITCH = PANEL_SIZE + PANEL_GAP
  */
 const PANEL_STANDOFF = 0.02
 
-/** Lifts the bottom row of Panels off the floor, leaving a base skirt on the Tower. */
-const PANEL_BASE_MARGIN = 0.4
+/** Drops the top row of Panels below the Tower's cap, leaving a header skirt. */
+const PANEL_TOP_MARGIN = 0.4
 
 /**
  * PanelInstance is one Pod resolved to a concrete glowing rectangle in the 3D
@@ -60,8 +60,9 @@ export interface PanelInstance {
  * call, not one mesh per Tower).
  *
  * Each Tower's Panels are laid out on its front (+Z, camera-facing) face in a
- * grid {@link PANELS_PER_ROW} wide, centred on the Tower and stacked upward, at
- * the Tower's own world placement (see {@link towerPlacements}). The output
+ * grid {@link PANELS_PER_ROW} wide, centred on the Tower and filled top-down
+ * (the first Pod at the top of the face, later rows stepping toward the floor),
+ * at the Tower's own world placement (see {@link towerPlacements}). The output
  * order is tower order then Panel order, so an instance index is a stable handle
  * back onto its (Tower, Pod) — {@link resolvePanel} reverses it — which is what
  * makes later click-picking (#20) instance-aware.
@@ -77,7 +78,9 @@ export function panelInstances(towers: readonly Tower[]): PanelInstance[] {
       const col = panelIndex % PANELS_PER_ROW
       const row = Math.floor(panelIndex / PANELS_PER_ROW)
       const x = towerX + (col - (PANELS_PER_ROW - 1) / 2) * PANEL_PITCH
-      const y = PANEL_BASE_MARGIN + PANEL_SIZE / 2 + row * PANEL_PITCH
+      // Fill top-down: the first Pod's row sits just below the Tower's cap and
+      // each subsequent row steps downward toward the floor.
+      const y = TOWER_HEIGHT - PANEL_TOP_MARGIN - PANEL_SIZE / 2 - row * PANEL_PITCH
 
       return {
         tower: tower.name,
