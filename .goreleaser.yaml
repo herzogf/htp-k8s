@@ -36,12 +36,14 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
-    # main.go has no version vars to -X into, so keep ldflags to a stripped
-    # build only; adding -X main.version would be silently ignored by the
-    # linker (no such symbol). Revisit if the binary grows a version var.
+    # Strip debug info and inject build metadata into main.{version,commit,date}
+    # so the released binary self-reports via `htp-k8s version` / `--version`.
     ldflags:
       - -s
       - -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
     goos:
       - linux
       - darwin

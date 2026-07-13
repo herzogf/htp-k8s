@@ -23,6 +23,14 @@ builds:
       - CGO_ENABLED=0
     flags:
       - -trimpath
+    # Inject build metadata into main.{version,commit,date} so the image binary
+    # self-reports via `htp-k8s version`. ko builds separately from GoReleaser,
+    # so the release workflow's ko step exports VERSION/COMMIT/DATE from the tag
+    # (see .github/workflows/release.yml); `task release:image` sets dev
+    # defaults for local `ko build --local`.
     ldflags:
       - -s
       - -w
+      - -X main.version={{.Env.VERSION}}
+      - -X main.commit={{.Env.COMMIT}}
+      - -X main.date={{.Env.DATE}}

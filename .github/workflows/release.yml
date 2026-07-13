@@ -116,20 +116,37 @@ jobs:
         run: task release:frontend
 
       # ko builds the multi-arch image (no Dockerfile, no local daemon) and
-      # pushes it to GHCR under the repo, tagged with the git tag and `latest`.
-      # `ko login` uses the workflow's GITHUB_TOKEN — no extra secret needed.
-      # Values flow through `env:` and are referenced as shell vars (never
-      # interpolated into the script body) to avoid the ${{ }} injection pattern.
+      # pushes it to GHCR under the repo. `ko login` uses the workflow's
+      # GITHUB_TOKEN — no extra secret needed. Values flow through `env:` and
+      # are referenced as shell vars (never interpolated into the script body)
+      # to avoid the ${{ }} injection pattern.
+      #
+      # VERSION/COMMIT/DATE feed the version ldflags in .ko.yaml so the image
+      # binary reports the real release via `htp-k8s version`.
+      #
+      # Tagging: always tag the exact version. Add `latest` ONLY for a stable
+      # release — a prerelease tag (contains `-` per SemVer, e.g. v1.2.3-rc.1)
+      # must not move `latest`.
       - name: Build and push image (ko)
         env:
           KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/htp-k8s
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REGISTRY_USER: ${{ github.actor }}
           RELEASE_TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
         run: |
           echo "$REGISTRY_TOKEN" | ko login ghcr.io \
             --username "$REGISTRY_USER" --password-stdin
+
+          tags="$RELEASE_TAG"
+          case "$RELEASE_TAG" in
+            *-*) echo "prerelease $RELEASE_TAG: not tagging latest" ;;
+            *)   tags="$RELEASE_TAG,latest" ;;
+          esac
+
+          VERSION="$RELEASE_TAG" \
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
           ko build --bare \
             --platform=linux/amd64,linux/arm64 \
-            --tags "${RELEASE_TAG},latest" \
+            --tags "$tags" \
             ./cmd/htp-k8s

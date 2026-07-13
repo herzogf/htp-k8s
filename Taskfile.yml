@@ -81,4 +81,12 @@ tasks:
       (ADR-0005). Embeds the real frontend first. Requires ko + a Docker daemon.
     cmds:
       - task: release:frontend
-      - KO_DOCKER_REPO=ko.local ko build --local ./cmd/htp-k8s
+      # Provide dev defaults for the version ldflags .ko.yaml injects, so a
+      # local build works without the release workflow's tag-derived env. COMMIT
+      # falls back to the short SHA; VERSION/DATE to simple dev markers.
+      - >-
+        KO_DOCKER_REPO=ko.local
+        VERSION="${VERSION:-dev}"
+        COMMIT="${COMMIT:-$(git rev-parse --short HEAD)}"
+        DATE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+        ko build --local ./cmd/htp-k8s

@@ -21,6 +21,17 @@ import (
 
 const defaultAddr = ":8080"
 
+// Build metadata. These defaults apply to plain `go build` / `go run` dev
+// builds; release builds inject the real values via `-ldflags -X` — both
+// GoReleaser (see .goreleaser.yaml) and ko (see .ko.yaml) set them, so a
+// released binary and the released container image both self-report their
+// version via `htp-k8s version` / `htp-k8s --version`.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 // probeTimeout bounds the startup permission probe so a slow or unreachable
 // API server can't hang server startup.
 const probeTimeout = 10 * time.Second
@@ -30,9 +41,38 @@ const probeTimeout = 10 * time.Second
 const snapshotTimeout = 10 * time.Second
 
 func main() {
-	if err := run(os.Args[1:], os.Getenv("HTP_K8S_ADDR")); err != nil {
+	args := os.Args[1:]
+	// Handle version reporting before anything else — it must work without a
+	// reachable cluster (unlike run, which connects on startup).
+	if versionRequested(args) {
+		fmt.Println(versionString())
+		return
+	}
+	if err := run(args, os.Getenv("HTP_K8S_ADDR")); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// versionRequested reports whether args ask for version output, via either the
+// `version` subcommand (first arg) or a `-version`/`--version` flag. Checked
+// before flag parsing because resolveAddr's FlagSet only knows `-addr` and
+// would otherwise reject `-version` as an unknown flag.
+func versionRequested(args []string) bool {
+	if len(args) > 0 && args[0] == "version" {
+		return true
+	}
+	for _, a := range args {
+		if a == "-version" || a == "--version" {
+			return true
+		}
+	}
+	return false
+}
+
+// versionString renders the build metadata injected at release time (or the
+// dev-build defaults) as a single line for `htp-k8s version`.
+func versionString() string {
+	return fmt.Sprintf("htp-k8s %s (commit %s, built %s)", version, commit, date)
 }
 
 // resolveAddr determines the listen address from CLI flags (highest
