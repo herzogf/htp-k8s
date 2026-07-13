@@ -7,6 +7,7 @@ import {
   ViewModeNamespace,
   ViewModeNode,
 } from '../generated/scenestate'
+import { blinkStore } from '../scene/blinks'
 import { makePanel, makeSceneState, makeTower } from '../test-support/sceneFixtures'
 import { useSceneState } from './useSceneState'
 
@@ -253,6 +254,39 @@ describe('useSceneState', () => {
     })
 
     expect(result.current).toEqual(makeSceneState({ towers: [makeTower({ name: 'node-a' })] }))
+  })
+
+  it('routes a panelBlink delta to the blink channel, not the scene reducer', () => {
+    const trigger = vi.spyOn(blinkStore, 'trigger')
+    const { result } = renderHook(() => useSceneState('ws://example.test/ws'))
+    const socket = FakeWebSocket.instances[0]
+
+    const scene = makeSceneState({
+      towers: [
+        makeTower({ name: 'node-a', panels: [makePanel({ namespace: 'team', pod: 'web-1' })] }),
+      ],
+    })
+    act(() => {
+      socket.emit('message', { data: JSON.stringify(scene) })
+    })
+    act(() => {
+      socket.emit('message', {
+        data: deltaFrame({
+          type: 'panelBlink',
+          towerName: 'node-a',
+          namespace: 'team',
+          pod: 'web-1',
+          activity: 'restart',
+        }),
+      })
+    })
+
+    // The pod was pulsed on the out-of-band store...
+    expect(trigger).toHaveBeenCalledWith('team', 'web-1', 'restart', expect.any(Number))
+    // ...and the reconciled SceneState is byte-for-byte unchanged — a blink is
+    // transient, never a state mutation (ADR-0007).
+    expect(result.current).toEqual(scene)
+    trigger.mockRestore()
   })
 
   it('ignores non-text payloads', () => {

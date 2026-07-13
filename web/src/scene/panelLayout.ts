@@ -106,3 +106,23 @@ export function resolvePanel(
 ): PanelInstance | undefined {
   return instances[instanceId]
 }
+
+/**
+ * The reverse of {@link resolvePanel}: finds the instance index for a Pod's
+ * cluster-unique `(namespace, pod)` identity, or `undefined` if no instance in
+ * the scene is that Pod. Where {@link resolvePanel} answers "which Pod is this
+ * instance?" (picking a click), this answers "which instance is this Pod?" — the
+ * pod→instance direction anything keyed by Pod identity needs to address one
+ * specific instance in the flattened list the InstancedMesh draws. The blink
+ * animation itself doesn't need it (it sweeps every instance against the blink
+ * store per frame); it's the lookup the #19 e2e hook uses to read one target
+ * Panel's rendered color back out of the mesh.
+ */
+export function panelInstanceIndex(
+  instances: readonly PanelInstance[],
+  namespace: string,
+  pod: string,
+): number | undefined {
+  const index = instances.findIndex((p) => p.namespace === namespace && p.pod === pod)
+  return index === -1 ? undefined : index
+}

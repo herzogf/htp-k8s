@@ -80,6 +80,15 @@ export function reduceScene(state: SceneState, delta: SceneDelta): SceneState {
         })),
       }
 
+    case 'panelBlink':
+      // A blink is a transient activity pulse (ADR-0007), not a change to the
+      // scene: useSceneState routes it to the visual blink channel and it never
+      // reaches this reducer at runtime. This no-op keeps the reducer total over
+      // the SceneDelta union and mirrors the backend, where applying a blink to a
+      // SceneState is likewise a no-op — the snapshot+deltas invariant is
+      // unaffected by dropping it.
+      return state
+
     default: {
       // Exhaustiveness guard: adding a new SceneDelta member without a case here
       // makes `delta` stop being `never` and fails the build.

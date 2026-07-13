@@ -238,6 +238,55 @@ describe('reduceScene — panelRemoved', () => {
   })
 })
 
+describe('reduceScene — panelBlink (transient, no state change)', () => {
+  it('is a no-op: a blink never changes the scene (same reference back)', () => {
+    // A blink is a transient activity pulse, not scene state (ADR-0007). The
+    // reducer must leave the scene exactly as it was — the same state reference,
+    // so no React re-render is provoked by a signal the renderer handles itself.
+    const initial = makeSceneState({
+      towers: [
+        makeTower({ name: 'node-a', panels: [makePanel({ namespace: 'team', pod: 'web-1' })] }),
+      ],
+    })
+
+    const next = reduceScene(initial, {
+      type: 'panelBlink',
+      towerName: 'node-a',
+      namespace: 'team',
+      pod: 'web-1',
+      activity: 'restart',
+    })
+
+    expect(next).toBe(initial)
+  })
+
+  it('does not perturb structural deltas applied around it', () => {
+    const initial = makeSceneState({
+      towers: [makeTower({ name: 'node-a', panels: [makePanel({ pod: 'p1' })] })],
+    })
+
+    const final = applyAll(initial, [
+      {
+        type: 'panelBlink',
+        towerName: 'node-a',
+        namespace: 'default',
+        pod: 'p1',
+        activity: 'event',
+      },
+      { type: 'panelAdded', towerName: 'node-a', panel: makePanel({ pod: 'p2' }) },
+      {
+        type: 'panelBlink',
+        towerName: 'node-a',
+        namespace: 'default',
+        pod: 'p2',
+        activity: 'phaseChange',
+      },
+    ])
+
+    expect(final.towers[0].panels.map((p) => p.pod)).toEqual(['p1', 'p2'])
+  })
+})
+
 describe('reduceScene — purity', () => {
   it('does not mutate the input state or its nested Towers/Panels', () => {
     const panel = makePanel({ namespace: 'team', pod: 'web-1' })

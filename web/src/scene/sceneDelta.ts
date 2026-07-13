@@ -1,6 +1,7 @@
 import type {
   GridPosition,
   Panel,
+  PanelActivity,
   SceneDelta as WireSceneDelta,
   Tower,
 } from '../generated/scenestate'
@@ -12,7 +13,13 @@ import type {
  * this is the discriminant a reducer switches on.
  */
 export type SceneDeltaType =
-  'towerAdded' | 'towerRemoved' | 'towerMoved' | 'panelAdded' | 'panelUpdated' | 'panelRemoved'
+  | 'towerAdded'
+  | 'towerRemoved'
+  | 'towerMoved'
+  | 'panelAdded'
+  | 'panelUpdated'
+  | 'panelRemoved'
+  | 'panelBlink'
 
 /**
  * A Scene Delta as the frontend models it: a true discriminated union with the
@@ -30,6 +37,13 @@ export type SceneDelta =
   | { type: 'panelAdded'; towerName: string; panel: Panel }
   | { type: 'panelUpdated'; towerName: string; panel: Panel }
   | { type: 'panelRemoved'; towerName: string; namespace: string; pod: string }
+  | {
+      type: 'panelBlink'
+      towerName: string
+      namespace: string
+      pod: string
+      activity: PanelActivity
+    }
 
 /**
  * Narrows a raw wire Scene Delta into the typed {@link SceneDelta} union, or
@@ -83,6 +97,26 @@ export function parseSceneDelta(raw: WireSceneDelta): SceneDelta | null {
         isNonEmptyString(raw.pod)
       ) {
         return { type, towerName: raw.towerName, namespace: raw.namespace, pod: raw.pod }
+      }
+      break
+    case 'panelBlink':
+      // A transient activity pulse (ADR-0007): identified like panelRemoved by
+      // (towerName, namespace, pod), plus the activity kind that shapes the
+      // flash. It carries no scene state and never reaches the reducer — it is
+      // routed to the visual blink channel in useSceneState.
+      if (
+        isNonEmptyString(raw.towerName) &&
+        isNonEmptyString(raw.namespace) &&
+        isNonEmptyString(raw.pod) &&
+        isNonEmptyString(raw.activity)
+      ) {
+        return {
+          type,
+          towerName: raw.towerName,
+          namespace: raw.namespace,
+          pod: raw.pod,
+          activity: raw.activity,
+        }
       }
       break
     default: {

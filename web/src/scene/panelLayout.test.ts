@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { ColorFailed, ColorRunning, PodPhaseFailed } from '../generated/scenestate'
 import { makePanel, makeSceneState, makeTower } from '../test-support/sceneFixtures'
-import { PANELS_PER_ROW, PANEL_SIZE, panelInstances, resolvePanel } from './panelLayout'
+import {
+  PANELS_PER_ROW,
+  PANEL_SIZE,
+  panelInstanceIndex,
+  panelInstances,
+  resolvePanel,
+} from './panelLayout'
 import { TOWER_FOOTPRINT, towerPlacements } from './towerLayout'
 
 describe('panelInstances', () => {
@@ -155,5 +161,41 @@ describe('resolvePanel', () => {
 
   it('returns undefined for an out-of-range index', () => {
     expect(resolvePanel([], 0)).toBeUndefined()
+  })
+})
+
+describe('panelInstanceIndex', () => {
+  const instances = panelInstances([
+    makeTower({
+      name: 'node-a',
+      grid: { col: 0, row: 0 },
+      panels: [
+        makePanel({ namespace: 'ns1', pod: 'a-0' }),
+        makePanel({ namespace: 'ns1', pod: 'a-1' }),
+      ],
+    }),
+    makeTower({
+      name: 'node-b',
+      grid: { col: 1, row: 0 },
+      panels: [makePanel({ namespace: 'ns2', pod: 'a-0' })],
+    }),
+  ])
+
+  it('finds the instance index for a Pod identity, the inverse of resolvePanel', () => {
+    const index = panelInstanceIndex(instances, 'ns1', 'a-1')
+    expect(index).toBe(1)
+    expect(resolvePanel(instances, index!)).toMatchObject({ namespace: 'ns1', pod: 'a-1' })
+  })
+
+  it('keys on the full (namespace, pod) pair, not the pod name alone', () => {
+    // Two Pods share the name "a-0" across namespaces; each resolves to its own
+    // instance, so a blink hits exactly the right one.
+    expect(panelInstanceIndex(instances, 'ns1', 'a-0')).toBe(0)
+    expect(panelInstanceIndex(instances, 'ns2', 'a-0')).toBe(2)
+  })
+
+  it('returns undefined for a Pod not in the scene', () => {
+    expect(panelInstanceIndex(instances, 'ns1', 'ghost')).toBeUndefined()
+    expect(panelInstanceIndex([], 'ns1', 'a-0')).toBeUndefined()
   })
 })
