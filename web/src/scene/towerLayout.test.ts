@@ -16,7 +16,11 @@ describe('towerPlacements', () => {
   it("is driven by a SceneState's towers", () => {
     // The app calls towerPlacements(sceneState.towers); thread a full SceneState
     // through once to pin that call path (the rest pass the Tower array directly).
-    const sceneState: SceneState = { viewMode: ViewModeNode, towers: [tower('only', 4, 4)] }
+    const sceneState: SceneState = {
+      viewMode: ViewModeNode,
+      towers: [tower('only', 4, 4)],
+      panels: [],
+    }
 
     expect(towerPlacements(sceneState.towers)).toEqual([
       { name: 'only', position: [0, TOWER_HEIGHT / 2, 0] },

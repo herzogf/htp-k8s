@@ -39,6 +39,7 @@ const tower = (name: string, col: number, row: number): Tower => ({ name, grid: 
 const sceneState = (viewMode: SceneState['viewMode'], towers: Tower[] = []): SceneState => ({
   viewMode,
   towers,
+  panels: [],
 })
 
 describe('Scene', () => {
