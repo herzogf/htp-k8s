@@ -1,6 +1,7 @@
 import { type ThreeEvent } from '@react-three/fiber'
 import { useLayoutEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
+import { useSelection } from '../detail/selectionContext'
 import { type Tower } from '../generated/scenestate'
 import { panelFocusPose } from './focus'
 import { useFocus } from './focusContext'
@@ -25,20 +26,22 @@ import { PANEL_SIZE, panelInstances, resolvePanel } from './panelLayout'
  * later click handler (#20) can turn a hit `instanceId` straight back into the
  * originating Pod via {@link resolvePanel}.
  *
- * Clicking a Panel triggers Focus (#21): the pointer event's `instanceId` is
- * resolved back to its {@link PanelInstance}, and that Pod's {@link
- * panelFocusPose} is handed to the shared {@link FocusController} for the camera
- * rig to fly to — close enough to read that specific Panel.
+ * Clicking a Panel does two things (#21, #24): the pointer event's `instanceId`
+ * is resolved back to its {@link PanelInstance}, that Pod's {@link panelFocusPose}
+ * is handed to the shared {@link FocusController} for the camera rig to fly to —
+ * close enough to read that specific Panel — and that Pod is selected, opening
+ * its in-world Detail Popup (pod detail + live log tail) anchored beside it.
  */
 export function Panels({ towers }: { towers: readonly Tower[] }) {
   const instances = useMemo(() => panelInstances(towers), [towers])
   const meshRef = useRef<THREE.InstancedMesh>(null)
   const focus = useFocus()
+  const { select } = useSelection()
 
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     // Instanced picking: R3F reports which instance the ray hit as `instanceId`;
     // resolve it back to the Pod it was built from (panelLayout stashes the same
-    // ordered list on userData). A miss (no instanceId) simply focuses nothing.
+    // ordered list on userData). A miss (no instanceId) simply does nothing.
     if (event.instanceId === undefined) {
       return
     }
@@ -48,6 +51,12 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
     }
     event.stopPropagation()
     focus?.requestFocus(panelFocusPose(instance.position))
+    select({
+      kind: 'pod',
+      namespace: instance.namespace,
+      pod: instance.pod,
+      anchor: instance.position,
+    })
   }
 
   useLayoutEffect(() => {

@@ -48,6 +48,14 @@ vi.mock('./scene/Panels', () => ({
   ),
 }))
 
+// DetailLayer (#24) renders the Detail Popup through drei's `Html`, which needs
+// R3F/WebGL context absent under jsdom. Its selection→popup wiring is unit-tested
+// in detail/ and end-to-end by the Playwright popup test; here it's a no-op
+// stand-in so Scene only mounts it inside the Canvas.
+vi.mock('./detail/DetailLayer', () => ({
+  DetailLayer: () => <div data-testid="detail-layer" />,
+}))
+
 const tower = (name: string, col: number, row: number): Tower =>
   makeTower({ name, grid: { col, row } })
 
