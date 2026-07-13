@@ -6,7 +6,11 @@ import { TOWER_HEIGHT, TOWER_SPACING, towerPlacements } from './towerLayout'
  * Builds a Tower at a grid slot. Argument order matches the sibling factory in
  * Scene.test.tsx so the two read the same way.
  */
-const tower = (name: string, col: number, row: number): Tower => ({ name, grid: { col, row } })
+const tower = (name: string, col: number, row: number): Tower => ({
+  name,
+  grid: { col, row },
+  panels: [],
+})
 
 describe('towerPlacements', () => {
   it('maps an empty scene to no placements', () => {
@@ -19,7 +23,6 @@ describe('towerPlacements', () => {
     const sceneState: SceneState = {
       viewMode: ViewModeNode,
       towers: [tower('only', 4, 4)],
-      panels: [],
     }
 
     expect(towerPlacements(sceneState.towers)).toEqual([

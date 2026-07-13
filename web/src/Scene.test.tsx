@@ -34,12 +34,15 @@ vi.mock('./scene/Tower', () => ({
   ),
 }))
 
-const tower = (name: string, col: number, row: number): Tower => ({ name, grid: { col, row } })
+const tower = (name: string, col: number, row: number): Tower => ({
+  name,
+  grid: { col, row },
+  panels: [],
+})
 
 const sceneState = (viewMode: SceneState['viewMode'], towers: Tower[] = []): SceneState => ({
   viewMode,
   towers,
-  panels: [],
 })
 
 describe('Scene', () => {

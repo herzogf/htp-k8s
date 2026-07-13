@@ -12,10 +12,11 @@ a Go/TS schema mismatch surfaces in the build instead of at runtime.
 
 The package holds no Kubernetes logic and imports no client-go packages: it
 is the pure vocabulary of the scene (see CONTEXT.md), produced by the kube
-package and consumed by the frontend. It carries the View Mode, the set of
-Towers, and the set of Panels (one per Pod, #14). Per ADR-0007 the wire
-protocol is a full SceneState snapshot on connect followed by incremental
-Scene Deltas; the deltas are a later ticket and are not defined here.
+package and consumed by the frontend. It carries the View Mode and the set
+of Towers, each Tower carrying its own Panels (one per Pod, #14). Per ADR-0007
+the wire protocol is a full SceneState snapshot on connect followed by
+incremental Scene Deltas; the deltas are a later ticket and are not defined
+here.
 */
 
 /**
@@ -70,6 +71,16 @@ export interface Tower {
    * Grid is the Tower's position in the deterministic grid-by-name layout.
    */
   grid: GridPosition;
+  /**
+   * Panels are the Tower's Panels — one per Pod belonging to this Tower under
+   * the active View Mode (the pods on this Node in Node-mode, or in this
+   * Namespace/Project in Namespace-mode) — in a deterministic order (by
+   * Namespace, then Pod). A Panel is always part of exactly one Tower (see
+   * CONTEXT.md: it sits "on a Tower's face"), so Panels are nested here rather
+   * than in a flat scene-level list. Sent non-nil over the wire: a Tower with
+   * no pods carries an empty array, not null.
+   */
+  panels: Panel[];
 }
 /**
  * PodPhase is the phase-like status a Panel's color encodes (see CONTEXT.md's
@@ -139,29 +150,25 @@ export const ColorCrashLoopBackOff = "#ff00d4";
 export const ColorUnknown = "#8a8a8a";
 /**
  * Panel is one glowing rectangle on a Tower's face, representing a single Pod
- * (see CONTEXT.md). Its color encodes the pod's phase; its Tower is the Tower
- * the pod belongs to under the active View Mode — the pod's Node in Node-mode
- * or its Namespace/Project in Namespace-mode. That scoping is derived from the
- * View Mode, so the same pod re-homes to a different Tower when the View Mode
- * changes rather than carrying a fixed Tower.
+ * (see CONTEXT.md). Its color encodes the pod's phase. A Panel belongs to
+ * exactly one Tower — the one it is nested under (Tower.Panels) — chosen by the
+ * active View Mode: the pod's Node in Node-mode, or its Namespace/Project in
+ * Namespace-mode. That scoping is derived from the View Mode, so the same pod
+ * re-homes to a different Tower when the View Mode changes; the Panel itself
+ * carries no Tower reference (its owning Tower is its container).
  */
 export interface Panel {
   /**
    * Namespace is the pod's Namespace/Project. Together with Pod it forms the
    * pod's cluster-unique identity (a pod name is only unique within its
-   * namespace), and it is the Tower name in Namespace-mode.
+   * namespace). It remains useful even nested under a Tower — e.g. in
+   * Node-mode, where the Tower is the Node, it names the pod's namespace.
    */
   namespace: string;
   /**
    * Pod is the pod's name.
    */
   pod: string;
-  /**
-   * Tower is the Name of the Tower this Panel sits on under the active View
-   * Mode: the pod's Node in Node-mode, or its Namespace/Project in
-   * Namespace-mode. It matches exactly one Tower.Name in the same SceneState.
-   */
-  tower: string;
   /**
    * Phase is the pod's phase-like status (see PodPhase), the value Color is
    * derived from.
@@ -187,15 +194,9 @@ export interface SceneState {
   /**
    * Towers is the set of Towers in the scene — one per Node in Node-mode or
    * one per Namespace/Project in Namespace-mode — in the deterministic
-   * grid-by-name layout (ordered by Tower.Name). Sent non-nil over the wire:
-   * an empty scene is an empty array, not null.
+   * grid-by-name layout (ordered by Tower.Name). Each Tower carries its own
+   * Panels (one per Pod on it). Sent non-nil over the wire: an empty scene is
+   * an empty array, not null.
    */
   towers: Tower[];
-  /**
-   * Panels is the set of Panels in the scene — one per Pod — each scoped to
-   * the Tower it belongs to under the active View Mode (Panel.Tower). In a
-   * deterministic order (by Tower, then Namespace, then Pod). Sent non-nil
-   * over the wire: a scene with no pods is an empty array, not null.
-   */
-  panels: Panel[];
 }

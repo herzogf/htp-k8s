@@ -8,17 +8,25 @@ import (
 	"github.com/herzogf/htp-k8s/internal/scene"
 )
 
-// TestSceneState_JSONWireShape pins the on-the-wire JSON of a SceneState. This
-// is the contract the generated TypeScript mirrors (see the root Taskfile's
-// `codegen` target): the field names, the View Mode string values, and the
-// Tower/GridPosition shape are what the frontend parses, so a change here is a
-// deliberate wire-contract change that must be regenerated.
+// TestSceneState_JSONWireShape pins the on-the-wire JSON of a SceneState,
+// including a Tower's nested Panels. This is the contract the generated
+// TypeScript mirrors (see the root Taskfile's `codegen` target): the field
+// names, the View Mode string values, and the Tower/GridPosition/Panel shape
+// are what the frontend parses, so a change here is a deliberate wire-contract
+// change that must be regenerated. Panels are nested under their Tower (a Panel
+// carries no Tower reference); a Tower with no pods carries an empty array.
 func TestSceneState_JSONWireShape(t *testing.T) {
 	state := scene.SceneState{
 		ViewMode: scene.ViewModeNode,
 		Towers: []scene.Tower{
-			{Name: "alpha", Grid: scene.GridPosition{Col: 0, Row: 0}},
-			{Name: "bravo", Grid: scene.GridPosition{Col: 1, Row: 0}},
+			{
+				Name: "alpha",
+				Grid: scene.GridPosition{Col: 0, Row: 0},
+				Panels: []scene.Panel{
+					{Namespace: "default", Pod: "web", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+				},
+			},
+			{Name: "bravo", Grid: scene.GridPosition{Col: 1, Row: 0}, Panels: []scene.Panel{}},
 		},
 	}
 
@@ -28,34 +36,9 @@ func TestSceneState_JSONWireShape(t *testing.T) {
 	}
 
 	const want = `{"viewMode":"node","towers":[` +
-		`{"name":"alpha","grid":{"col":0,"row":0}},` +
-		`{"name":"bravo","grid":{"col":1,"row":0}}],"panels":null}`
-	if string(got) != want {
-		t.Fatalf("SceneState JSON = %s, want %s", got, want)
-	}
-}
-
-// TestSceneState_PanelJSONWireShape pins the on-the-wire JSON of a Panel — the
-// field names and the phase/color values the frontend parses. Panels are an
-// additive part of the wire contract (#14); a change here is a deliberate
-// contract change that must be regenerated.
-func TestSceneState_PanelJSONWireShape(t *testing.T) {
-	state := scene.SceneState{
-		ViewMode: scene.ViewModeNode,
-		Towers:   []scene.Tower{{Name: "node-1", Grid: scene.GridPosition{Col: 0, Row: 0}}},
-		Panels: []scene.Panel{
-			{Namespace: "default", Pod: "web", Tower: "node-1", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
-		},
-	}
-
-	got, err := json.Marshal(state)
-	if err != nil {
-		t.Fatalf("marshal SceneState: %v", err)
-	}
-
-	const want = `{"viewMode":"node",` +
-		`"towers":[{"name":"node-1","grid":{"col":0,"row":0}}],` +
-		`"panels":[{"namespace":"default","pod":"web","tower":"node-1","phase":"Running","color":"#39ff14"}]}`
+		`{"name":"alpha","grid":{"col":0,"row":0},"panels":[` +
+		`{"namespace":"default","pod":"web","phase":"Running","color":"#39ff14"}]},` +
+		`{"name":"bravo","grid":{"col":1,"row":0},"panels":[]}]}`
 	if string(got) != want {
 		t.Fatalf("SceneState JSON = %s, want %s", got, want)
 	}
@@ -81,8 +64,14 @@ func TestSceneState_RoundTrip(t *testing.T) {
 		want := scene.SceneState{
 			ViewMode: mode,
 			Towers: []scene.Tower{
-				{Name: "one", Grid: scene.GridPosition{Col: 0, Row: 0}},
-				{Name: "two", Grid: scene.GridPosition{Col: 1, Row: 0}},
+				{
+					Name: "one",
+					Grid: scene.GridPosition{Col: 0, Row: 0},
+					Panels: []scene.Panel{
+						{Namespace: "default", Pod: "web", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+					},
+				},
+				{Name: "two", Grid: scene.GridPosition{Col: 1, Row: 0}, Panels: []scene.Panel{}},
 			},
 		}
 

@@ -107,9 +107,10 @@ func resolveViewMode(client kubernetes.Interface) (scene.ViewMode, error) {
 
 // snapshotProvider returns a server.Config.Snapshot function that builds a
 // fresh SceneState for each /ws connection: the detected View Mode plus the
-// current Towers and Panels listed from the cluster (see kube.BuildTowers and
-// kube.BuildPanels). Building per connection keeps the snapshot current without
-// a watch cache — deltas that push live changes are a later ticket (ADR-0007).
+// current Towers listed from the cluster (see kube.BuildTowers), each with its
+// Panels nested in (see kube.BuildPanels / kube.AttachPanels). Building per
+// connection keeps the snapshot current without a watch cache — deltas that
+// push live changes are a later ticket (ADR-0007).
 //
 // Neither a Tower- nor a Panel-listing error fails the connection (ADR-0002):
 // each is logged and the client still receives a valid SceneState carrying the
@@ -131,16 +132,14 @@ func snapshotProvider(client kubernetes.Interface, dyn dynamic.Interface, mode s
 			towers = []scene.Tower{}
 		}
 
-		panels, err := kube.BuildPanels(ctx, client, mode)
+		panelsByTower, err := kube.BuildPanels(ctx, client, mode)
 		if err != nil {
 			log.Printf("build panels: %v", err)
 		}
-		if panels == nil {
-			// Keep the wire's Panels a JSON array ([]), never null (see
-			// scene.SceneState.Panels).
-			panels = []scene.Panel{}
-		}
+		// Nest each Tower's Panels into it (empty array for a Tower with no
+		// pods); pods whose Tower wasn't built are dropped.
+		towers = kube.AttachPanels(towers, panelsByTower)
 
-		return scene.SceneState{ViewMode: mode, Towers: towers, Panels: panels}
+		return scene.SceneState{ViewMode: mode, Towers: towers}
 	}
 }

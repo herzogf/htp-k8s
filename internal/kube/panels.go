@@ -18,35 +18,39 @@ import (
 // Panel's color should surface (see CONTEXT.md's Panel definition).
 const crashLoopBackOff = "CrashLoopBackOff"
 
-// BuildPanels builds the scene's Panel list from live cluster state for the
-// given View Mode — one Panel per Pod (see CONTEXT.md). This is the k8s-input →
-// Panel seam, the analogue of BuildTowers, exercised by the same fake-clientset
-// unit tests and against a real cluster.
+// BuildPanels builds the scene's Panels from live cluster state for the given
+// View Mode — one Panel per Pod (see CONTEXT.md) — grouped by the name of the
+// Tower each pod belongs to. This is the k8s-input → Panel seam, the analogue
+// of BuildTowers, exercised by the same fake-clientset unit tests and against a
+// real cluster. Its output is bucketed (not flat) so AttachPanels can nest each
+// group under its owning Tower.
 //
-// Each Panel is scoped to the Tower the pod belongs to under mode: the pod's
-// Node in Node-mode, or its Namespace/Project in Namespace-mode (see
-// towerForPod). The scoping is derived from mode rather than stored on the pod,
-// so the same pods re-home onto different Towers when the View Mode changes.
-// A pod with no owning Tower under the active mode — an unscheduled pod in
-// Node-mode, which has no Node yet — is omitted: there is no Tower to place its
-// Panel on.
+// A pod's owning Tower under mode is its Node in Node-mode, or its
+// Namespace/Project in Namespace-mode (see towerForPod). The scoping is derived
+// from mode rather than stored on the pod, so the same pods re-home onto
+// different Towers when the View Mode changes. A pod with no owning Tower under
+// the active mode — an unscheduled pod in Node-mode, which has no Node yet — is
+// omitted: there is no Tower to place its Panel on.
 //
-// Panels are returned in a deterministic order (by Tower, then Namespace, then
-// Pod) so the same cluster state always yields the same Panel list. The slice
-// is always non-nil (empty when there are no pods, or when the pod listing
-// failed) so the wire always carries a Panel array rather than null.
+// Within each Tower's bucket, Panels are in a deterministic order (by Namespace,
+// then Pod) so the same cluster state always yields the same nesting. The
+// returned map is always non-nil (empty when there are no pods, or when the pod
+// listing failed).
 //
 // Listing pods is cluster-wide. If it fails — e.g. a restricted user who cannot
-// list pods at the cluster scope — BuildPanels degrades to an empty Panel set
-// with an informational error rather than hard-failing the scene (ADR-0002),
-// mirroring BuildTowers: the caller still gets a valid SceneState.
-func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.ViewMode) ([]scene.Panel, error) {
+// list pods at the cluster scope — BuildPanels degrades to an empty result with
+// an informational error rather than hard-failing the scene (ADR-0002),
+// mirroring BuildTowers: the caller still gets a valid SceneState. (The
+// OpenShift per-Project pod-listing fallback, the Panel analogue of
+// BuildTowers' Project fallback, is issue #55.)
+func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.ViewMode) (map[string][]scene.Panel, error) {
+	byTower := map[string][]scene.Panel{}
+
 	list, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return []scene.Panel{}, fmt.Errorf("list pods for panels: %w", err)
+		return byTower, fmt.Errorf("list pods for panels: %w", err)
 	}
 
-	panels := make([]scene.Panel, 0, len(list.Items))
 	for i := range list.Items {
 		pod := &list.Items[i]
 		tower := towerForPod(pod, mode)
@@ -56,17 +60,36 @@ func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.Vi
 			continue
 		}
 		phase := derivePhase(pod)
-		panels = append(panels, scene.Panel{
+		byTower[tower] = append(byTower[tower], scene.Panel{
 			Namespace: pod.Namespace,
 			Pod:       pod.Name,
-			Tower:     tower,
 			Phase:     phase,
 			Color:     scene.ColorForPhase(phase),
 		})
 	}
 
-	sortPanels(panels)
-	return panels, nil
+	for tower := range byTower {
+		sortPanels(byTower[tower])
+	}
+	return byTower, nil
+}
+
+// AttachPanels nests each Tower's Panels into it, returning the same towers with
+// Panels populated. byTower is the bucketed output of BuildPanels, keyed by
+// Tower name. Every Tower is given a non-nil Panels slice — its bucket, or an
+// empty slice when it has no pods — so the wire always carries a Panel array
+// rather than null. A bucket whose Tower name matches no Tower in towers is
+// dropped (its pods have no Tower to sit on), the nested-shape equivalent of
+// BuildPanels' skip of Tower-less pods.
+func AttachPanels(towers []scene.Tower, byTower map[string][]scene.Panel) []scene.Tower {
+	for i := range towers {
+		panels := byTower[towers[i].Name]
+		if panels == nil {
+			panels = []scene.Panel{}
+		}
+		towers[i].Panels = panels
+	}
+	return towers
 }
 
 // towerForPod returns the Name of the Tower a pod belongs to under the given
@@ -113,15 +136,12 @@ func derivePhase(pod *corev1.Pod) scene.PodPhase {
 	}
 }
 
-// sortPanels orders panels deterministically by Tower, then Namespace, then Pod
-// — a total order over the cluster-unique (Namespace, Pod) identity within each
-// Tower — so the same cluster state always serializes to the same Panel list.
+// sortPanels orders a Tower's Panels deterministically by Namespace, then Pod —
+// a total order over the cluster-unique (Namespace, Pod) pod identity — so the
+// same cluster state always serializes to the same nesting.
 func sortPanels(panels []scene.Panel) {
 	sort.Slice(panels, func(i, j int) bool {
 		a, b := panels[i], panels[j]
-		if a.Tower != b.Tower {
-			return a.Tower < b.Tower
-		}
 		if a.Namespace != b.Namespace {
 			return a.Namespace < b.Namespace
 		}

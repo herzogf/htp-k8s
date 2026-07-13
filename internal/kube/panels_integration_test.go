@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 
 	"github.com/herzogf/htp-k8s/internal/kube"
 	"github.com/herzogf/htp-k8s/internal/scene"
@@ -16,9 +17,9 @@ import (
 
 // TestBuildPanels_RealCluster verifies Panel generation against a real cluster
 // stood up by the kind+KWOK harness (ADR-0004, issue #5), rather than a fake
-// clientset — proving Panels reflect genuine cluster state at a modest scale,
-// scope correctly to their owning Tower in both View Modes, and re-scope when
-// the View Mode switches, all using KWOK-simulated pods.
+// clientset — proving Panels nest under the correct Tower in both View Modes,
+// re-nest when the View Mode switches, and reflect genuine cluster state at a
+// modest scale, all using KWOK-simulated pods.
 //
 // Gated behind the "integration" build tag: it spins up real Docker containers
 // and takes minutes. Run it explicitly with:
@@ -28,9 +29,14 @@ func TestBuildPanels_RealCluster(t *testing.T) {
 	c := testcluster.New(t, testcluster.Options{})
 	ctx := context.Background()
 
+	dyn, err := dynamic.NewForConfig(c.RESTConfig)
+	if err != nil {
+		t.Fatalf("build dynamic client: %v", err)
+	}
+
 	// A modest, PR-scale fleet: a handful of KWOK nodes carrying several
 	// pods each (round-robin bound by AddFakePods), enough to exercise
-	// multi-node/multi-pod scoping without real containers.
+	// multi-node/multi-pod nesting without real containers.
 	const (
 		fakeNodeCount = 5
 		fakePodCount  = 15
@@ -44,32 +50,46 @@ func TestBuildPanels_RealCluster(t *testing.T) {
 	}
 
 	// The real node→pod and namespace→pod bindings, read back from the
-	// cluster, are the source of truth the Panels must reflect.
+	// cluster, are the source of truth the nested Panels must reflect.
 	podsByNode, podsByNamespace := realPodTowerBindings(ctx, t, c)
 
-	t.Run("node mode panels scope to each pod's node", func(t *testing.T) {
-		panels, err := kube.BuildPanels(ctx, c.Clientset, scene.ViewModeNode)
+	// buildScene composes the full nested scene the way the server does:
+	// Towers, then bucketed Panels, then nested together.
+	buildScene := func(mode scene.ViewMode) []scene.Tower {
+		t.Helper()
+		towers, err := kube.BuildTowers(ctx, c.Clientset, dyn, mode)
 		if err != nil {
-			t.Fatalf("BuildPanels node mode: %v", err)
+			t.Fatalf("BuildTowers %s: %v", mode, err)
 		}
-		assertPanelsScopeToTower(t, panels, podsByNode)
-		assertFakePodsRunning(t, panels)
+		byTower, err := kube.BuildPanels(ctx, c.Clientset, mode)
+		if err != nil {
+			t.Fatalf("BuildPanels %s: %v", mode, err)
+		}
+		return kube.AttachPanels(towers, byTower)
+	}
+
+	t.Run("node mode panels nest under each pod's node", func(t *testing.T) {
+		towers := buildScene(scene.ViewModeNode)
+		assertPanelsNestUnderTower(t, towers, podsByNode)
+		assertFakePodsRunning(t, towers)
 	})
 
-	t.Run("namespace mode panels scope to each pod's namespace", func(t *testing.T) {
-		panels, err := kube.BuildPanels(ctx, c.Clientset, scene.ViewModeNamespace)
-		if err != nil {
-			t.Fatalf("BuildPanels namespace mode: %v", err)
-		}
-		assertPanelsScopeToTower(t, panels, podsByNamespace)
-		assertFakePodsRunning(t, panels)
+	t.Run("namespace mode panels nest under each pod's namespace", func(t *testing.T) {
+		towers := buildScene(scene.ViewModeNamespace)
+		assertPanelsNestUnderTower(t, towers, podsByNamespace)
+		assertFakePodsRunning(t, towers)
 
 		// All KWOK pods live in the "default" namespace (see testcluster), so
 		// in Namespace-mode they all re-home onto the "default" Tower — a
 		// different Tower than any of their Nodes carried in Node-mode.
-		for _, p := range panels {
-			if isFakePod(p.Pod) && p.Tower != "default" {
-				t.Errorf("namespace-mode panel for %q on tower %q, want default", p.Pod, p.Tower)
+		for _, tw := range towers {
+			if tw.Name == "default" {
+				continue
+			}
+			for _, p := range tw.Panels {
+				if isFakePod(p.Pod) {
+					t.Errorf("KWOK pod %q nested under tower %q, want default", p.Pod, tw.Name)
+				}
 			}
 		}
 	})
@@ -77,7 +97,7 @@ func TestBuildPanels_RealCluster(t *testing.T) {
 
 // realPodTowerBindings reads every pod from the cluster and returns, keyed by
 // pod name, the node it is bound to and the namespace it lives in — the two
-// Tower identities a Panel must carry under the two View Modes.
+// Tower identities a Panel must nest under across the two View Modes.
 func realPodTowerBindings(ctx context.Context, t *testing.T, c *testcluster.Cluster) (byNode, byNamespace map[string]string) {
 	t.Helper()
 	list, err := c.Clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
@@ -94,21 +114,26 @@ func realPodTowerBindings(ctx context.Context, t *testing.T, c *testcluster.Clus
 	return byNode, byNamespace
 }
 
-// assertPanelsScopeToTower checks every Panel's Tower matches the expected
-// Tower for its pod (from wantTower), and that every scheduled pod produced a
-// Panel. Pods with no owning Tower (an unscheduled pod in Node-mode, empty
-// wantTower) are expected to be absent.
-func assertPanelsScopeToTower(t *testing.T, panels []scene.Panel, wantTower map[string]string) {
+// assertPanelsNestUnderTower checks every Panel is nested under the Tower that
+// matches wantTower for its pod, that no pod appears twice, and that every
+// scheduled pod produced a Panel. Pods with no owning Tower (an unscheduled pod
+// in Node-mode, empty wantTower) are expected to be absent.
+func assertPanelsNestUnderTower(t *testing.T, towers []scene.Tower, wantTower map[string]string) {
 	t.Helper()
 
-	got := make(map[string]string, len(panels))
-	for _, p := range panels {
-		if prev, dup := got[p.Pod]; dup {
-			t.Errorf("pod %q has two panels (towers %q and %q)", p.Pod, prev, p.Tower)
+	gotTower := map[string]string{}
+	for _, tw := range towers {
+		if tw.Panels == nil {
+			t.Errorf("tower %q has nil Panels, want non-nil", tw.Name)
 		}
-		got[p.Pod] = p.Tower
-		if want, ok := wantTower[p.Pod]; ok && want != "" && p.Tower != want {
-			t.Errorf("panel for pod %q on tower %q, want %q", p.Pod, p.Tower, want)
+		for _, p := range tw.Panels {
+			if prev, dup := gotTower[p.Pod]; dup {
+				t.Errorf("pod %q nested under two towers (%q and %q)", p.Pod, prev, tw.Name)
+			}
+			gotTower[p.Pod] = tw.Name
+			if want, ok := wantTower[p.Pod]; ok && want != "" && tw.Name != want {
+				t.Errorf("pod %q nested under tower %q, want %q", p.Pod, tw.Name, want)
+			}
 		}
 	}
 
@@ -116,7 +141,7 @@ func assertPanelsScopeToTower(t *testing.T, panels []scene.Panel, wantTower map[
 		if want == "" {
 			continue // no owning Tower under this mode; a Panel is not expected
 		}
-		if _, ok := got[pod]; !ok {
+		if _, ok := gotTower[pod]; !ok {
 			t.Errorf("no panel for scheduled pod %q (want tower %q)", pod, want)
 		}
 	}
@@ -125,19 +150,21 @@ func assertPanelsScopeToTower(t *testing.T, panels []scene.Panel, wantTower map[
 // assertFakePodsRunning checks the KWOK-simulated pods, which AddFakePods waits
 // to reach Running, are colored as Running Panels — the phase→color mapping
 // holding against genuine cluster state, not just a fake clientset.
-func assertFakePodsRunning(t *testing.T, panels []scene.Panel) {
+func assertFakePodsRunning(t *testing.T, towers []scene.Tower) {
 	t.Helper()
 	seen := 0
-	for _, p := range panels {
-		if !isFakePod(p.Pod) {
-			continue
-		}
-		seen++
-		if p.Phase != scene.PodPhaseRunning {
-			t.Errorf("fake pod %q phase = %q, want Running", p.Pod, p.Phase)
-		}
-		if p.Color != scene.ColorRunning {
-			t.Errorf("fake pod %q color = %q, want %q", p.Pod, p.Color, scene.ColorRunning)
+	for _, tw := range towers {
+		for _, p := range tw.Panels {
+			if !isFakePod(p.Pod) {
+				continue
+			}
+			seen++
+			if p.Phase != scene.PodPhaseRunning {
+				t.Errorf("fake pod %q phase = %q, want Running", p.Pod, p.Phase)
+			}
+			if p.Color != scene.ColorRunning {
+				t.Errorf("fake pod %q color = %q, want %q", p.Pod, p.Color, scene.ColorRunning)
+			}
 		}
 	}
 	if seen == 0 {

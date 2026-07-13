@@ -48,13 +48,13 @@ describe('parseSceneState', () => {
 
 describe('viewModeLabel', () => {
   it('labels Node mode', () => {
-    const state: SceneState = { viewMode: ViewModeNode, towers: [], panels: [] }
+    const state: SceneState = { viewMode: ViewModeNode, towers: [] }
 
     expect(viewModeLabel(state.viewMode)).toBe('Node view')
   })
 
   it('labels Namespace/Project mode', () => {
-    const state: SceneState = { viewMode: ViewModeNamespace, towers: [], panels: [] }
+    const state: SceneState = { viewMode: ViewModeNamespace, towers: [] }
 
     expect(viewModeLabel(state.viewMode)).toBe('Namespace / Project view')
   })

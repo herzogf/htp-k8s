@@ -51,26 +51,56 @@ func forbiddenPodList() k8stesting.ReactionFunc {
 	}
 }
 
+// buildScene composes the full nested scene the way the server does: build the
+// Towers, build the bucketed Panels, then nest each Tower's Panels into it. It
+// returns the finished Towers so a test can assert on the nested shape end to
+// end.
+func buildScene(t *testing.T, objs []runtime.Object, mode scene.ViewMode) []scene.Tower {
+	t.Helper()
+	client := fake.NewSimpleClientset(objs...)
+	ctx := context.Background()
+
+	towers, err := kube.BuildTowers(ctx, client, nil, mode)
+	if err != nil {
+		t.Fatalf("BuildTowers %s: %v", mode, err)
+	}
+	byTower, err := kube.BuildPanels(ctx, client, mode)
+	if err != nil {
+		t.Fatalf("BuildPanels %s: %v", mode, err)
+	}
+	return kube.AttachPanels(towers, byTower)
+}
+
+// panelsOf returns the Panels nested under the named Tower, failing if there is
+// no such Tower.
+func panelsOf(t *testing.T, towers []scene.Tower, name string) []scene.Panel {
+	t.Helper()
+	for _, tw := range towers {
+		if tw.Name == name {
+			return tw.Panels
+		}
+	}
+	t.Fatalf("no tower named %q in %+v", name, towers)
+	return nil
+}
+
 // TestBuildPanels_PhaseToColor covers the phase→color mapping for every phase,
 // including the derived CrashLoopBackOff (a container waiting reason, not a pod
-// phase) and the Unknown fallback for an unrecognized phase.
+// phase) and the Unknown fallback for an unrecognized phase. All pods share one
+// node, so they nest under that single Tower.
 func TestBuildPanels_PhaseToColor(t *testing.T) {
-	client := fake.NewSimpleClientset(
+	objs := []runtime.Object{
+		node("node-a"),
 		pod("default", "runner", "node-a", corev1.PodRunning),
 		pod("default", "pender", "node-a", corev1.PodPending),
 		pod("default", "winner", "node-a", corev1.PodSucceeded),
 		pod("default", "loser", "node-a", corev1.PodFailed),
 		pod("default", "mystery", "node-a", corev1.PodUnknown),
 		crashLoopPod("default", "crasher", "node-a"),
-	)
-
-	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNode)
-	if err != nil {
-		t.Fatalf("BuildPanels: %v", err)
 	}
 
-	// Panels sort by (Tower, Namespace, Pod); all share tower node-a and
-	// namespace default, so the order here is pod name alphabetical.
+	panels := panelsOf(t, buildScene(t, objs, scene.ViewModeNode), "node-a")
+
 	want := map[string]struct {
 		phase scene.PodPhase
 		color string
@@ -83,10 +113,10 @@ func TestBuildPanels_PhaseToColor(t *testing.T) {
 		"winner":  {scene.PodPhaseSucceeded, scene.ColorSucceeded},
 	}
 
-	if len(got) != len(want) {
-		t.Fatalf("got %d panels, want %d", len(got), len(want))
+	if len(panels) != len(want) {
+		t.Fatalf("got %d panels, want %d", len(panels), len(want))
 	}
-	for _, p := range got {
+	for _, p := range panels {
 		w, ok := want[p.Pod]
 		if !ok {
 			t.Errorf("unexpected panel for pod %q", p.Pod)
@@ -126,126 +156,143 @@ func TestBuildPanels_DistinctColorsPerPhase(t *testing.T) {
 	}
 }
 
-// TestBuildPanels_NodeModeScoping covers Panel→Tower scoping in Node-mode: a
-// Panel's Tower is the pod's node, regardless of namespace.
-func TestBuildPanels_NodeModeScoping(t *testing.T) {
-	client := fake.NewSimpleClientset(
+// TestBuildPanels_NodeModeNesting covers Panel nesting in Node-mode: each Panel
+// nests under the Tower for its pod's node, regardless of namespace, ordered by
+// namespace then pod.
+func TestBuildPanels_NodeModeNesting(t *testing.T) {
+	objs := []runtime.Object{
+		node("node-1"), node("node-2"),
 		pod("team-a", "web", "node-1", corev1.PodRunning),
 		pod("team-b", "api", "node-2", corev1.PodRunning),
 		pod("team-a", "cache", "node-2", corev1.PodRunning),
-	)
-
-	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNode)
-	if err != nil {
-		t.Fatalf("BuildPanels: %v", err)
 	}
+	towers := buildScene(t, objs, scene.ViewModeNode)
 
-	want := []scene.Panel{
-		{Namespace: "team-a", Pod: "web", Tower: "node-1", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
-		{Namespace: "team-a", Pod: "cache", Tower: "node-2", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
-		{Namespace: "team-b", Pod: "api", Tower: "node-2", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+	if got := panelsOf(t, towers, "node-1"); !reflect.DeepEqual(got, []scene.Panel{
+		{Namespace: "team-a", Pod: "web", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+	}) {
+		t.Errorf("node-1 panels = %+v", got)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("panels = %+v, want %+v", got, want)
+	// node-2 holds two pods, ordered by (namespace, pod): team-a/cache then team-b/api.
+	if got := panelsOf(t, towers, "node-2"); !reflect.DeepEqual(got, []scene.Panel{
+		{Namespace: "team-a", Pod: "cache", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+		{Namespace: "team-b", Pod: "api", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+	}) {
+		t.Errorf("node-2 panels = %+v", got)
 	}
 }
 
-// TestBuildPanels_NamespaceModeScoping covers Panel→Tower scoping in
-// Namespace-mode: a Panel's Tower is the pod's namespace, regardless of node.
-func TestBuildPanels_NamespaceModeScoping(t *testing.T) {
-	client := fake.NewSimpleClientset(
+// TestBuildPanels_NamespaceModeNesting covers Panel nesting in Namespace-mode:
+// each Panel nests under the Tower for its pod's namespace, regardless of node.
+func TestBuildPanels_NamespaceModeNesting(t *testing.T) {
+	objs := []runtime.Object{
+		namespace("team-a"), namespace("team-b"),
 		pod("team-a", "web", "node-1", corev1.PodRunning),
 		pod("team-b", "api", "node-2", corev1.PodRunning),
 		pod("team-a", "cache", "node-2", corev1.PodRunning),
-	)
-
-	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNamespace)
-	if err != nil {
-		t.Fatalf("BuildPanels: %v", err)
 	}
+	towers := buildScene(t, objs, scene.ViewModeNamespace)
 
-	want := []scene.Panel{
-		{Namespace: "team-a", Pod: "cache", Tower: "team-a", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
-		{Namespace: "team-a", Pod: "web", Tower: "team-a", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
-		{Namespace: "team-b", Pod: "api", Tower: "team-b", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+	if got := panelsOf(t, towers, "team-a"); !reflect.DeepEqual(got, []scene.Panel{
+		{Namespace: "team-a", Pod: "cache", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+		{Namespace: "team-a", Pod: "web", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+	}) {
+		t.Errorf("team-a panels = %+v", got)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("panels = %+v, want %+v", got, want)
+	if got := panelsOf(t, towers, "team-b"); !reflect.DeepEqual(got, []scene.Panel{
+		{Namespace: "team-b", Pod: "api", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+	}) {
+		t.Errorf("team-b panels = %+v", got)
 	}
 }
 
-// TestBuildPanels_ReScopesOnViewModeSwitch is the re-scoping acceptance
-// criterion: the very same pods yield different Panel.Tower values under the
-// two View Modes, proving the owning-Tower context is derived from the View
-// Mode and not hard-coded onto the pod.
-func TestBuildPanels_ReScopesOnViewModeSwitch(t *testing.T) {
-	client := fake.NewSimpleClientset(
+// TestBuildPanels_ReNestsOnViewModeSwitch is the re-scoping acceptance
+// criterion: the very same pods nest under different Towers under the two View
+// Modes, proving the owning-Tower context is derived from the View Mode and not
+// hard-coded onto the pod.
+func TestBuildPanels_ReNestsOnViewModeSwitch(t *testing.T) {
+	objs := []runtime.Object{
+		node("node-1"), node("node-2"),
+		namespace("team-a"), namespace("team-b"),
 		pod("team-a", "web", "node-1", corev1.PodRunning),
 		pod("team-b", "api", "node-2", corev1.PodRunning),
-	)
-	ctx := context.Background()
-
-	nodeMode, err := kube.BuildPanels(ctx, client, scene.ViewModeNode)
-	if err != nil {
-		t.Fatalf("BuildPanels node mode: %v", err)
-	}
-	nsMode, err := kube.BuildPanels(ctx, client, scene.ViewModeNamespace)
-	if err != nil {
-		t.Fatalf("BuildPanels namespace mode: %v", err)
 	}
 
-	towerByPod := func(panels []scene.Panel) map[string]string {
-		m := make(map[string]string, len(panels))
-		for _, p := range panels {
-			m[p.Pod] = p.Tower
-		}
-		return m
+	// Node-mode: pods nest under their nodes.
+	nodeTowers := buildScene(t, objs, scene.ViewModeNode)
+	if got := panelsOf(t, nodeTowers, "node-1"); len(got) != 1 || got[0].Pod != "web" {
+		t.Errorf("node-mode node-1 panels = %+v, want [web]", got)
 	}
-	nodeTowers, nsTowers := towerByPod(nodeMode), towerByPod(nsMode)
+	if got := panelsOf(t, nodeTowers, "node-2"); len(got) != 1 || got[0].Pod != "api" {
+		t.Errorf("node-mode node-2 panels = %+v, want [api]", got)
+	}
 
-	if nodeTowers["web"] != "node-1" {
-		t.Errorf("node-mode tower for web = %q, want node-1", nodeTowers["web"])
+	// Namespace-mode: the same pods nest under their namespaces instead.
+	nsTowers := buildScene(t, objs, scene.ViewModeNamespace)
+	if got := panelsOf(t, nsTowers, "team-a"); len(got) != 1 || got[0].Pod != "web" {
+		t.Errorf("namespace-mode team-a panels = %+v, want [web]", got)
 	}
-	if nsTowers["web"] != "team-a" {
-		t.Errorf("namespace-mode tower for web = %q, want team-a", nsTowers["web"])
-	}
-	if nodeTowers["api"] != "node-2" {
-		t.Errorf("node-mode tower for api = %q, want node-2", nodeTowers["api"])
-	}
-	if nsTowers["api"] != "team-b" {
-		t.Errorf("namespace-mode tower for api = %q, want team-b", nsTowers["api"])
+	if got := panelsOf(t, nsTowers, "team-b"); len(got) != 1 || got[0].Pod != "api" {
+		t.Errorf("namespace-mode team-b panels = %+v, want [api]", got)
 	}
 }
 
 // TestBuildPanels_UnscheduledPodSkippedInNodeMode proves a pod with no node
-// (unscheduled) yields no Panel in Node-mode — there is no Tower to place it on
-// — yet still yields one in Namespace-mode, where its namespace is its Tower.
+// (unscheduled) contributes no Panel in Node-mode — there is no Tower to nest it
+// under — yet still nests under its namespace Tower in Namespace-mode.
 func TestBuildPanels_UnscheduledPodSkippedInNodeMode(t *testing.T) {
-	client := fake.NewSimpleClientset(
+	objs := []runtime.Object{
+		node("node-1"),
+		namespace("default"),
 		pod("default", "pending-unscheduled", "", corev1.PodPending),
 		pod("default", "scheduled", "node-1", corev1.PodRunning),
-	)
-	ctx := context.Background()
-
-	nodeMode, err := kube.BuildPanels(ctx, client, scene.ViewModeNode)
-	if err != nil {
-		t.Fatalf("BuildPanels node mode: %v", err)
-	}
-	if len(nodeMode) != 1 || nodeMode[0].Pod != "scheduled" {
-		t.Fatalf("node-mode panels = %+v, want only the scheduled pod", nodeMode)
 	}
 
-	nsMode, err := kube.BuildPanels(ctx, client, scene.ViewModeNamespace)
-	if err != nil {
-		t.Fatalf("BuildPanels namespace mode: %v", err)
+	nodeTowers := buildScene(t, objs, scene.ViewModeNode)
+	if got := panelsOf(t, nodeTowers, "node-1"); len(got) != 1 || got[0].Pod != "scheduled" {
+		t.Fatalf("node-1 panels = %+v, want only the scheduled pod", got)
 	}
-	if len(nsMode) != 2 {
-		t.Fatalf("namespace-mode panels = %+v, want both pods", nsMode)
+
+	nsTowers := buildScene(t, objs, scene.ViewModeNamespace)
+	if got := panelsOf(t, nsTowers, "default"); len(got) != 2 {
+		t.Fatalf("default namespace panels = %+v, want both pods", got)
 	}
 }
 
-// TestBuildPanels_Empty proves an empty cluster yields a non-nil empty Panel
-// slice (so the wire carries [] rather than null).
+// TestAttachPanels_EveryTowerNonNil proves AttachPanels gives every Tower a
+// non-nil Panels slice — its bucket, or an empty array when it has no pods — so
+// the wire never carries a null Panels array. It also proves a bucket with no
+// matching Tower is dropped.
+func TestAttachPanels_EveryTowerNonNil(t *testing.T) {
+	towers := []scene.Tower{
+		{Name: "busy", Grid: scene.GridPosition{Col: 0, Row: 0}},
+		{Name: "idle", Grid: scene.GridPosition{Col: 1, Row: 0}},
+	}
+	byTower := map[string][]scene.Panel{
+		"busy":  {{Namespace: "default", Pod: "p", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning}},
+		"ghost": {{Namespace: "default", Pod: "orphan", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning}},
+	}
+
+	got := kube.AttachPanels(towers, byTower)
+
+	for _, tw := range got {
+		if tw.Panels == nil {
+			t.Errorf("tower %q has nil Panels, want non-nil (empty array on the wire, not null)", tw.Name)
+		}
+		if tw.Name == "ghost" {
+			t.Error("AttachPanels invented a tower for a Tower-less bucket")
+		}
+	}
+	if n := len(panelsOf(t, got, "busy")); n != 1 {
+		t.Errorf("busy panels = %d, want 1", n)
+	}
+	if n := len(panelsOf(t, got, "idle")); n != 0 {
+		t.Errorf("idle panels = %d, want 0 (empty, not nil)", n)
+	}
+}
+
+// TestBuildPanels_Empty proves an empty cluster yields a non-nil (empty) map,
+// so nesting still gives every Tower an empty (non-nil) Panels slice.
 func TestBuildPanels_Empty(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
@@ -254,16 +301,16 @@ func TestBuildPanels_Empty(t *testing.T) {
 		t.Fatalf("BuildPanels: %v", err)
 	}
 	if got == nil {
-		t.Fatal("panels slice is nil, want non-nil empty")
+		t.Fatal("byTower map is nil, want non-nil empty")
 	}
 	if len(got) != 0 {
-		t.Fatalf("panels = %+v, want empty", got)
+		t.Fatalf("byTower = %+v, want empty", got)
 	}
 }
 
 // TestBuildPanels_ListForbiddenDegrades proves that when pods can't be listed
-// (a restricted user), BuildPanels degrades to a non-nil empty Panel set with
-// an informational error rather than hard-failing (ADR-0002), mirroring
+// (a restricted user), BuildPanels degrades to a non-nil empty map with an
+// informational error rather than hard-failing (ADR-0002), mirroring
 // BuildTowers.
 func TestBuildPanels_ListForbiddenDegrades(t *testing.T) {
 	client := fake.NewSimpleClientset()
@@ -274,9 +321,9 @@ func TestBuildPanels_ListForbiddenDegrades(t *testing.T) {
 		t.Fatal("expected an informational error when pods can't be listed, got nil")
 	}
 	if got == nil {
-		t.Fatal("panels slice is nil, want non-nil empty so the wire carries [] not null")
+		t.Fatal("byTower map is nil, want non-nil empty so nesting still yields [] not null")
 	}
 	if len(got) != 0 {
-		t.Fatalf("panels = %+v, want empty on degradation", got)
+		t.Fatalf("byTower = %+v, want empty on degradation", got)
 	}
 }
