@@ -51,6 +51,13 @@ export function Scene({ sceneState }: SceneProps) {
     () => ({ selection, select, clear }),
     [selection, select, clear],
   )
+
+  // Demo Mode (#22): an optional, user-toggleable automated cinematic camera
+  // flight (CONTEXT.md's Demo Mode) for unattended/showcase viewing. The HUD
+  // toggle just flips this boolean; FreeFlyControls owns the flight itself
+  // (and the smooth hand-off back to free-fly on toggle-off).
+  const [demoActive, setDemoActive] = useState(false)
+  const toggleDemoActive = useCallback(() => setDemoActive((active) => !active), [])
   // Publish a stable test handle so the e2e can open a Tower/Panel popup
   // deterministically, instead of relying on a headless canvas raycast landing
   // on a specific instance (the #20/#74 flakiness). It drives the same Focus
@@ -75,9 +82,10 @@ export function Scene({ sceneState }: SceneProps) {
             {/* Manual free-fly navigation (#20): WASD + pointer-lock mouse-look. It
               stays dormant on load — seeding its aim from the camera's initial
               orientation — so the default framed skyline is unchanged until the
-              user flies. A click-to-Focus fly-to (#21) coexists in the same rig.
-              Automated Demo Mode flight is a separate later ticket. */}
-            <FreeFlyControls />
+              user flies. A click-to-Focus fly-to (#21) and the automated Demo
+              Mode flight (#22, toggled by the HUD control below) coexist in the
+              same rig, which owns handing control between them smoothly. */}
+            <FreeFlyControls demoActive={demoActive} />
             <color attach="background" args={['#05050a']} />
             {/* Dim ambient plus a key light: enough to read the prisms' faces while
               keeping the dark, high-contrast data-center mood. The Towers are
@@ -124,6 +132,19 @@ export function Scene({ sceneState }: SceneProps) {
           <span className="view-mode-indicator__label">{label}</span>
         </div>
       )}
+      {/* Demo Mode's HUD toggle (#22), mirroring .view-mode-indicator's styling.
+        Always available (not gated on a scene snapshot) since it's a camera
+        behavior, not scene data. */}
+      <button
+        type="button"
+        className="demo-mode-toggle"
+        data-demo-active={demoActive}
+        aria-pressed={demoActive}
+        onClick={toggleDemoActive}
+      >
+        <span className="demo-mode-toggle__caption">Demo Mode</span>
+        <span className="demo-mode-toggle__label">{demoActive ? 'On' : 'Off'}</span>
+      </button>
     </div>
   )
 }
