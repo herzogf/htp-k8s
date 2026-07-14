@@ -10,6 +10,7 @@ import { useFocus } from './focusContext'
 import {
   PANEL_LOD_FAR_DISTANCE,
   PANEL_LOD_NEAR_DISTANCE,
+  PANEL_NAME_BAND,
   PANEL_TEXT_COLUMNS,
   PANEL_TEXT_DARKEN,
   PANEL_TEXT_ROWS,
@@ -17,6 +18,7 @@ import {
   panelTextPhase,
 } from './panelLOD'
 import { PANEL_SIZE, panelInstanceIndex, panelInstances, resolvePanel } from './panelLayout'
+import { buildPanelTextAtlas, type PanelTextAtlas } from './panelTextAtlas'
 
 /** The color a Panel flashes toward at a blink's peak — pure white, so even an
  * already-saturated phase color (neon green) still visibly brightens. */
@@ -32,13 +34,28 @@ function glslFloat(value: number): string {
   return Number.isInteger(value) ? value.toFixed(1) : `${value}`
 }
 
+/** The uniforms {@link patchPanelMaterial} adds, stashed on the material so the
+ * component can drive them without recompiling: the per-frame scroll clock and
+ * the live name-atlas sampler + grid dimensions (swapped when the scene's Pods
+ * change). Constructed as three's `THREE.Uniform` *class instances* (not plain
+ * `{ value }` literals) so writing `.value` reads to the React compiler as an
+ * external-object mutation — the same reason the blink loop may write
+ * `instanceColor.needsUpdate` — rather than a React-owned one. */
+interface PanelLodUniforms {
+  uPanelLodTime: THREE.Uniform<number>
+  uPanelNameAtlas: THREE.Uniform<THREE.Texture | null>
+  uPanelNameCols: THREE.Uniform<number>
+  uPanelNameRows: THREE.Uniform<number>
+}
+
 /**
  * Panel text LOD (#25): patches the InstancedMesh's `meshBasicMaterial` shader
  * (via `onBeforeCompile`, the supported way to extend a built-in three.js
- * material) to draw the "hinted, illegible scrolling text" look of the
- * *Hackers* reference stills at close/mid camera distance, fading to the plain
+ * material) so at close/mid camera distance each Panel shows the Pod's actual,
+ * readable name across the top plus the "hinted, illegible scrolling text" glyph
+ * fill of the *Hackers* reference stills below it, fading to the plain
  * flat-colored quad (today's baseline look, effectively zero extra cost) beyond
- * {@link PANEL_LOD_FAR_DISTANCE}.
+ * {@link PANEL_LOD_FAR_DISTANCE} — a name is unreadable from far anyway.
  *
  * This is deliberately GPU-only: the distance from camera is computed
  * per-fragment from `mvPosition` (already computed by the stock
@@ -48,9 +65,11 @@ function glslFloat(value: number): string {
  * and correctly instance-aware (each instance's own fragments fade
  * independently) however many Panels are on screen. The only thing JS updates
  * per frame is a single scalar time uniform (see the `uPanelLodTime` write in
- * {@link Panels}'s `useFrame`), and the only new per-instance CPU-side data is
- * a `phase` float written once per instance list change (not per frame) so
- * neighbouring Panels don't scroll their text in lockstep.
+ * {@link Panels}'s `useFrame`); the per-instance data — a scroll `phase` and a
+ * name-atlas `cell` index — is written once per instance-list change (not per
+ * frame). The names themselves live in one shared texture atlas (see
+ * {@link buildPanelTextAtlas}), so real per-Pod labels cost one extra texture
+ * and NO extra draw calls: the single InstancedMesh over all Panels is intact.
  *
  * Only the fragment shader's final color is touched (multiplying
  * `diffuseColor.rgb`, right after the stock `color_fragment` chunk applies the
@@ -64,8 +83,10 @@ function patchPanelMaterial(
 ): void {
   shader.vertexShader = `
 attribute float instancePhase;
+attribute float instanceNameCell;
 varying float vPanelLodDist;
 varying float vPanelLodPhase;
+varying float vPanelLodCell;
 varying vec2 vPanelLodUv;
 ${shader.vertexShader}`.replace(
     '#include <project_vertex>',
@@ -75,14 +96,27 @@ ${shader.vertexShader}`.replace(
 	// no extra camera-position uniform.
 	vPanelLodDist = length( mvPosition.xyz );
 	vPanelLodPhase = instancePhase;
+	// Constant across the four verts of an instance's quad, so plain varying
+	// interpolation carries the cell index intact — no flat qualifier needed.
+	vPanelLodCell = instanceNameCell;
 	vPanelLodUv = uv;`,
   )
+
+  const nameAtlas = (this.userData.nameAtlas ?? {}) as {
+    texture?: THREE.Texture | null
+    cols?: number
+    rows?: number
+  }
 
   shader.fragmentShader = `
 varying float vPanelLodDist;
 varying float vPanelLodPhase;
+varying float vPanelLodCell;
 varying vec2 vPanelLodUv;
 uniform float uPanelLodTime;
+uniform sampler2D uPanelNameAtlas;
+uniform float uPanelNameCols;
+uniform float uPanelNameRows;
 ${shader.fragmentShader}`.replace(
     '#include <color_fragment>',
     `#include <color_fragment>
@@ -92,27 +126,47 @@ ${shader.fragmentShader}`.replace(
 		// and is unit-tested against (panelLOD.ts is this shader's source of truth
 		// for the two threshold constants baked in below).
 		float lodBlend = 1.0 - smoothstep(${glslFloat(PANEL_LOD_NEAR_DISTANCE)}, ${glslFloat(PANEL_LOD_FAR_DISTANCE)}, vPanelLodDist);
-		// A small, per-instance-offset glyph grid: each cell is pseudo-randomly on
-		// or off, forming a blocky, illegible dot-matrix "text" texture (never
-		// resolving into real characters — CONTEXT.md's "hinted/illegible") that
-		// scrolls over time, out of phase between Panels via vPanelLodPhase.
-		vec2 cell = floor( vPanelLodUv * vec2( ${glslFloat(PANEL_TEXT_COLUMNS)}, ${glslFloat(PANEL_TEXT_ROWS)} ) );
-		float scrollRows = floor( uPanelLodTime * ${glslFloat(PANEL_TEXT_SCROLL_SPEED)} + vPanelLodPhase * ${glslFloat(PANEL_TEXT_ROWS)} );
-		float glyphSeed = cell.x + ( cell.y + scrollRows ) * 13.0 + vPanelLodPhase * 97.0;
-		float glyphNoise = fract( sin( glyphSeed * 12.9898 ) * 43758.5453 );
-		float glyphOn = step( 0.45, glyphNoise );
-		// Dim (not black) "off" cells so the Panel's phase color stays legible
-		// through the texture even at close range — texture on top of color, not
-		// a replacement for it — and fade the whole effect out toward the plain
-		// flat blob as lodBlend falls to 0.
-		float lit = mix( 1.0, mix( ${glslFloat(PANEL_TEXT_DARKEN)}, 1.0, glyphOn ), lodBlend );
+		float lit;
+		float nameBandBottom = 1.0 - ${glslFloat(PANEL_NAME_BAND)};
+		if ( vPanelLodUv.y > nameBandBottom && vPanelLodCell >= 0.0 && uPanelNameCols > 0.0 ) {
+			// Top band: sample this Pod's own cell in the shared name atlas. The
+			// cell index → (col,row) → atlas UV maths mirrors buildPanelTextAtlas's
+			// grid layout (flipY=false: cell row 0 at the top of the canvas).
+			float localU = vPanelLodUv.x;
+			float localV = ( vPanelLodUv.y - nameBandBottom ) / ${glslFloat(PANEL_NAME_BAND)};
+			float col = mod( vPanelLodCell, uPanelNameCols );
+			float row = floor( vPanelLodCell / uPanelNameCols );
+			float au = ( col + localU ) / uPanelNameCols;
+			float av = ( row + 1.0 - localV ) / uPanelNameRows;
+			float glyph = texture2D( uPanelNameAtlas, vec2( au, av ) ).r;
+			// Bright phase-color text on a dark version of the same color, so the
+			// name is legible AND still encodes the pod's phase by hue.
+			lit = mix( 0.14, 1.0, glyph );
+		} else {
+			// Below the name: the illegible scrolling glyph fill (the Hackers
+			// texture). A small, per-instance-offset grid of pseudo-random on/off
+			// cells that scrolls over time, out of phase between Panels.
+			vec2 cell = floor( vPanelLodUv * vec2( ${glslFloat(PANEL_TEXT_COLUMNS)}, ${glslFloat(PANEL_TEXT_ROWS)} ) );
+			float scrollRows = floor( uPanelLodTime * ${glslFloat(PANEL_TEXT_SCROLL_SPEED)} + vPanelLodPhase * ${glslFloat(PANEL_TEXT_ROWS)} );
+			float glyphSeed = cell.x + ( cell.y + scrollRows ) * 13.0 + vPanelLodPhase * 97.0;
+			float glyphNoise = fract( sin( glyphSeed * 12.9898 ) * 43758.5453 );
+			float glyphOn = step( 0.45, glyphNoise );
+			// Dim (not black) "off" cells so the phase color reads through.
+			lit = mix( ${glslFloat(PANEL_TEXT_DARKEN)}, 1.0, glyphOn );
+		}
+		// Fade the whole effect out toward the plain flat blob as lodBlend → 0.
+		lit = mix( 1.0, lit, lodBlend );
 		diffuseColor.rgb *= lit;
 	}`,
   )
 
-  shader.uniforms.uPanelLodTime = { value: 0 }
-  // Stash this compile's uniforms on the material so the component's `useFrame`
-  // can update the time uniform without re-deriving or re-compiling anything.
+  shader.uniforms.uPanelLodTime = new THREE.Uniform(0)
+  shader.uniforms.uPanelNameAtlas = new THREE.Uniform(nameAtlas.texture ?? null)
+  shader.uniforms.uPanelNameCols = new THREE.Uniform(nameAtlas.cols ?? 0)
+  shader.uniforms.uPanelNameRows = new THREE.Uniform(nameAtlas.rows ?? 0)
+  // Stash this compile's uniforms on the material so the component can update
+  // the time uniform per frame and swap in a rebuilt name atlas (on a scene
+  // change) without re-deriving or re-compiling anything.
   this.userData.panelLodUniforms = shader.uniforms
 }
 
@@ -206,13 +260,16 @@ declare global {
  * cheap fallback that stays legible at any camera distance.
  *
  * Text LOD (#25) is layered onto that same material via {@link
- * patchPanelMaterial}'s `onBeforeCompile`: close/mid Panels additionally show
- * "hinted, illegible scrolling text" detail, fading to the plain flat blob
- * above (this is the far LOD path — no separate code path or draw call) beyond
- * {@link PANEL_LOD_FAR_DISTANCE}. The near/far distance curve and the look's
- * tuning constants are the pure, unit-tested seam in `panelLOD.ts`; the
- * transition itself runs entirely on the GPU per-fragment (no per-instance or
- * per-frame JS loop), so it stays cheap and instance-aware however many Panels
+ * patchPanelMaterial}'s `onBeforeCompile`: close/mid Panels show the Pod's
+ * actual (truncated) name as readable text across the top plus a "hinted,
+ * illegible scrolling text" glyph fill below, fading to the plain flat blob
+ * (this is the far LOD path — no separate code path or draw call) beyond
+ * {@link PANEL_LOD_FAR_DISTANCE}. The near/far distance curve, the name
+ * truncation rule, and the look's tuning constants are the pure, unit-tested
+ * seam in `panelLOD.ts`; the names are rasterized once into a shared texture
+ * atlas ({@link buildPanelTextAtlas}) sampled per-instance, so the transition
+ * runs entirely on the GPU per-fragment (no per-instance or per-frame JS loop,
+ * no extra draw call) and stays cheap and instance-aware however many Panels
  * are in view.
  *
  * Picking is instance-aware from the start: the `panelInstances` list is stashed
@@ -238,9 +295,23 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
   const instances = useMemo(() => panelInstances(towers), [towers])
   const meshRef = useRef<THREE.InstancedMesh>(null)
   const materialRef = useRef<THREE.MeshBasicMaterial>(null)
+  // A TYPED handle onto the LOD shader uniforms (captured from the material once
+  // it compiles). The per-frame time write goes through this rather than the
+  // `any`-typed `material.userData`, so the compiler still sees a three
+  // `Uniform` (external) being mutated — the same shape the blink loop mutates
+  // through `meshRef` — rather than an opaque React-owned value.
+  const lodUniformsRef = useRef<PanelLodUniforms | null>(null)
   const camera = useThree((state) => state.camera)
   const focus = useFocus()
   const { select } = useSelection()
+  // The shared per-Pod name texture atlas (#25 follow-up), rebuilt only when the
+  // set of Pods changes — one texture for every Panel's label, keeping the whole
+  // scene one InstancedMesh. Disposed when replaced / on unmount (effect below).
+  const nameAtlas: PanelTextAtlas = useMemo(
+    () => buildPanelTextAtlas(instances.map((instance) => instance.pod)),
+    [instances],
+  )
+  useEffect(() => nameAtlas.dispose, [nameAtlas])
   // Whether the previous frame drew any blink. When a blink settles we need one
   // final frame that restores every base color and uploads it; this ref is how
   // that trailing frame is detected so the mesh doesn't stay stuck bright.
@@ -291,10 +362,32 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
     }
     mesh.count = instances.length
     mesh.geometry.setAttribute('instancePhase', new THREE.InstancedBufferAttribute(phases, 1))
+    // Panel LOD name atlas (#25 follow-up): the per-instance cell index into the
+    // shared name texture, in the same instance order as everything above, so
+    // the shader samples each Panel's own Pod name (or -1 → glyph fill for a Pod
+    // past atlas capacity). A copy so the geometry owns its own buffer.
+    mesh.geometry.setAttribute(
+      'instanceNameCell',
+      new THREE.InstancedBufferAttribute(nameAtlas.cells.slice(), 1),
+    )
+    // Hand the atlas to the material both for the first shader compile (read
+    // from userData in patchPanelMaterial) and, if it has already compiled, by
+    // swapping the live sampler/dimension uniforms in place — no recompile.
+    const material = materialRef.current
+    if (material) {
+      material.userData.nameAtlas = nameAtlas
+      const uniforms = (material.userData.panelLodUniforms as PanelLodUniforms | undefined) ?? null
+      lodUniformsRef.current = uniforms
+      if (uniforms) {
+        uniforms.uPanelNameAtlas.value = nameAtlas.texture
+        uniforms.uPanelNameCols.value = nameAtlas.cols
+        uniforms.uPanelNameRows.value = nameAtlas.rows
+      }
+    }
     // Stash the ordered instance list so instance-aware picking (#20) can
     // resolve a hit instanceId back to its Pod.
     mesh.userData.panelInstances = instances
-  }, [instances])
+  }, [instances, nameAtlas])
 
   // Panel LOD (#25): advance the shader's scroll clock every frame, regardless
   // of blink activity. This is the ONLY per-frame LOD cost — one scalar
@@ -302,9 +395,8 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
   // and the glyph pattern itself are evaluated per-fragment on the GPU (see
   // patchPanelMaterial), not looped over instances in JS.
   useFrame(() => {
-    const uniforms = materialRef.current?.userData.panelLodUniforms as
-      { uPanelLodTime?: { value: number } } | undefined
-    if (uniforms?.uPanelLodTime) {
+    const uniforms = lodUniformsRef.current
+    if (uniforms) {
       uniforms.uPanelLodTime.value = performance.now() / 1000
     }
   })

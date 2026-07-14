@@ -1,19 +1,22 @@
 import { expect, type Locator, type Page, test } from '@playwright/test'
 
-// Panel text LOD (#25): close/mid Panels show "hinted, illegible scrolling text"
-// detail; beyond a far threshold they fall back to a flat color blob for render
-// cost (CONTEXT.md's Panel, ADR-0004). The distance → detail curve and look
-// constants are unit-tested WebGL-free in src/scene/panelLOD.test.ts; this is the
-// end-to-end proof the *rendered pixels* actually change — the LOD swap happens
-// entirely inside a fragment shader (src/scene/Panels.tsx's `patchPanelMaterial`),
-// so nothing about it is observable from a `window` test hook the way the
+// Panel text LOD (#25): close/mid Panels show the Pod's actual (truncated) name
+// as readable text across the top plus a "hinted, illegible scrolling text"
+// glyph fill below; beyond a far threshold they fall back to a flat color blob
+// for render cost (CONTEXT.md's Panel, ADR-0004). The distance → detail curve,
+// the name truncation rule, and the look constants are unit-tested WebGL-free in
+// src/scene/panelLOD.test.ts; this is the end-to-end proof the *rendered pixels*
+// actually change — the LOD swap and the atlas-sampled names happen entirely
+// inside a fragment shader (src/scene/Panels.tsx's `patchPanelMaterial`), so
+// nothing about it is observable from a `window` test hook the way the
 // instance-color buffer is for blinks (see blink.spec.ts). Instead this samples
 // the real screenshot pixels, the way smoke.spec.ts already does for "did
 // anything render" — but cropped to exactly one Panel's own on-screen rect (via
 // `window.__htpPanelLodTest`, #25's Panels.tsx projection hook), so the sample
 // can never accidentally span a neighbouring Panel or Tower edge and confound
 // "this one Panel has internal texture" with "there are several different flat
-// colors near each other".
+// colors near each other". The close screenshot is the readable-name proof
+// artifact; the name-band variance check is the automated assertion.
 //
 // Both camera distances are driven deterministically, without relying on a
 // headless canvas raycast landing on a specific instance (the #20/#74
@@ -99,8 +102,9 @@ async function panelLuminanceVariance(
   page: Page,
   canvas: Locator,
   pod: { namespace: string; pod: string },
-  inset = 0.2,
+  opts: { band?: 'full' | 'name'; inset?: number } = {},
 ): Promise<number> {
+  const { band = 'full', inset = 0.2 } = opts
   const rect = await page.evaluate(
     (p) => window.__htpPanelLodTest!.getPanelScreenRect(p.namespace, p.pod),
     pod,
@@ -111,7 +115,7 @@ async function panelLuminanceVariance(
 
   const png = await canvas.screenshot()
   return page.evaluate(
-    async ({ dataUrl, rect, inset }) => {
+    async ({ dataUrl, rect, inset, band }) => {
       const img = new Image()
       img.src = dataUrl
       await img.decode()
@@ -121,12 +125,21 @@ async function panelLuminanceVariance(
       const ctx = off.getContext('2d')
       if (!ctx) return 0
 
+      // For the 'name' band, restrict sampling to the top strip of the Panel
+      // where the readable Pod name is drawn (PANEL_NAME_BAND = 0.28 of the
+      // Panel height, from the top), so the measurement is specifically "is
+      // there legible text here" and not the glyph fill below it. `y` grows
+      // downward, so the top strip is the low-`y` portion of the rect.
+      const NAME_BAND = 0.28
+      const top = rect.y
+      const height = band === 'name' ? rect.height * NAME_BAND : rect.height
+
       const insetX = rect.width * inset
-      const insetY = rect.height * inset
+      const insetY = height * inset
       const x = Math.round((rect.x + insetX) * img.width)
-      const y = Math.round((rect.y + insetY) * img.height)
+      const y = Math.round((top + insetY) * img.height)
       const w = Math.max(1, Math.round((rect.width - 2 * insetX) * img.width))
-      const h = Math.max(1, Math.round((rect.height - 2 * insetY) * img.height))
+      const h = Math.max(1, Math.round((height - 2 * insetY) * img.height))
       ctx.drawImage(img, 0, 0)
       const { data } = ctx.getImageData(x, y, w, h)
 
@@ -141,7 +154,7 @@ async function panelLuminanceVariance(
       const mean = sum / n
       return sumSq / n - mean * mean
     },
-    { dataUrl: `data:image/png;base64,${png.toString('base64')}`, rect, inset },
+    { dataUrl: `data:image/png;base64,${png.toString('base64')}`, rect, inset, band },
   )
 }
 
@@ -169,6 +182,10 @@ test('panel LOD: close/mid Panels show scrolling text detail, far Panels are fla
   await page.waitForTimeout(500)
 
   const closeVariance = await panelLuminanceVariance(page, canvas, pod)
+  // The readable-name proof (#25 follow-up): the top strip of the Panel carries
+  // the Pod's actual name as text, so it must have real structure (bright glyph
+  // strokes on a dark background) — clearly non-flat luminance variance.
+  const closeNameVariance = await panelLuminanceVariance(page, canvas, pod, { band: 'name' })
   await page.screenshot({ path: testInfo.outputPath('panel-lod-close.png') })
 
   // Retreat straight back along the same view axis the Focus settled on (S =
@@ -185,12 +202,17 @@ test('panel LOD: close/mid Panels show scrolling text detail, far Panels are fla
   await page.waitForTimeout(500)
 
   const farVariance = await panelLuminanceVariance(page, canvas, pod)
+  const farNameVariance = await panelLuminanceVariance(page, canvas, pod, { band: 'name' })
   await page.screenshot({ path: testInfo.outputPath('panel-lod-far.png') })
 
-  // Close range: a real glyph texture is actually drawn inside the Panel —
+  // Close range: a real glyph/name texture is actually drawn inside the Panel —
   // meaningfully more local luminance variance than a flat color's noise floor.
   expect(closeVariance).toBeGreaterThan(50)
+  // Close range: the top name strip specifically shows legible text structure.
+  expect(closeNameVariance).toBeGreaterThan(50)
   // Far range: the flat blob path — variance collapses back down, and by a
   // clear margin versus the close/mid detail view (not just "a bit less").
   expect(farVariance).toBeLessThan(closeVariance / 3)
+  // Far range: the name strip flattens too — the label is gone, not just dimmer.
+  expect(farNameVariance).toBeLessThan(closeNameVariance / 3)
 })

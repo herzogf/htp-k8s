@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   PANEL_LOD_FAR_DISTANCE,
   PANEL_LOD_NEAR_DISTANCE,
+  PANEL_NAME_MAX_CHARS,
   panelDetailBlend,
   panelTextPhase,
+  truncatePanelName,
 } from './panelLOD'
 
 describe('panel LOD thresholds', () => {
@@ -56,6 +58,54 @@ describe('panelDetailBlend', () => {
     expect(panelDetailBlend(5, 10, 20)).toBe(1)
     expect(panelDetailBlend(20, 10, 20)).toBeCloseTo(0)
     expect(panelDetailBlend(15, 10, 20)).toBeCloseTo(0.5)
+  })
+})
+
+describe('truncatePanelName', () => {
+  it('leaves a name within the budget unchanged', () => {
+    expect(truncatePanelName('web-1', 13)).toBe('web-1')
+  })
+
+  it('leaves a name exactly at the budget unchanged (no needless ..)', () => {
+    expect('exactly-13-ch').toHaveLength(13)
+    expect(truncatePanelName('exactly-13-ch', 13)).toBe('exactly-13-ch')
+  })
+
+  it('truncates a too-long name to first (maxChars-2) chars plus a trailing ..', () => {
+    // The coordinator's worked example — a real long pod name at the default budget.
+    expect(truncatePanelName('coredns-7d764666f9-ltwd5', 13)).toBe('coredns-7d7..')
+  })
+
+  it('produces a result of exactly maxChars for any over-budget name', () => {
+    const result = truncatePanelName('a-very-long-pod-name-indeed', 13)
+    expect(result).toHaveLength(13)
+    expect(result.endsWith('..')).toBe(true)
+  })
+
+  it('handles the empty string and a zero/negative budget', () => {
+    expect(truncatePanelName('', 13)).toBe('')
+    expect(truncatePanelName('anything', 0)).toBe('')
+    expect(truncatePanelName('anything', -5)).toBe('')
+  })
+
+  it('hard-cuts (no .. marker) when the budget is too small to hold one', () => {
+    // maxChars <= 2 leaves no room for content + the two-char marker.
+    expect(truncatePanelName('anything', 2)).toBe('an')
+    expect(truncatePanelName('anything', 1)).toBe('a')
+  })
+
+  it('never exceeds the default budget for a realistic set of pod names', () => {
+    const names = [
+      'coredns-7d764666f9-ltwd5',
+      'kube-proxy-abc12',
+      'nginx',
+      'my-app-deployment-6c9f7b8d5c-qh2xz',
+    ]
+    for (const name of names) {
+      expect(truncatePanelName(name, PANEL_NAME_MAX_CHARS).length).toBeLessThanOrEqual(
+        PANEL_NAME_MAX_CHARS,
+      )
+    }
   })
 })
 

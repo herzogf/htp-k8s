@@ -59,6 +59,53 @@ export const PANEL_TEXT_SCROLL_SPEED = 1.4
 export const PANEL_TEXT_DARKEN = 0.32
 
 /**
+ * PANEL_NAME_BAND is the fraction of a Panel's height, measured from its top,
+ * given over to the Pod's actual (truncated) name as legible text — a readable
+ * label strip across the top of the Panel at close/mid range (#25 follow-up).
+ * The rest of the Panel below it keeps the "hinted, illegible scrolling text"
+ * glyph fill for the *Hackers* texture. Kept in step with the text atlas's cell
+ * aspect ratio (see panelTextAtlas.ts) so the name isn't stretched.
+ */
+export const PANEL_NAME_BAND = 0.28
+
+/**
+ * PANEL_NAME_MAX_CHARS is how many characters of a Pod's name fit across a
+ * Panel before it is truncated (see {@link truncatePanelName}). Pod names are
+ * often long (`coredns-7d764666f9-ltwd5`); this is the budget that keeps the
+ * label readable at the Panel's on-screen width rather than an unreadable smear.
+ * Tuned to the atlas cell's width/font (panelTextAtlas.ts) so the truncated
+ * string never overflows its cell.
+ */
+export const PANEL_NAME_MAX_CHARS = 13
+
+/**
+ * Shortens a Pod's `name` to at most `maxChars` characters for display on a
+ * Panel, appending a trailing `..` when it had to cut (e.g.
+ * `coredns-7d764666f9-ltwd5` → `coredns-7d7..` at 13). This is the pure,
+ * unit-tested seam for the truncation rule — the user chose simple trailing
+ * truncation over horizontally-scrolling text — kept out of the renderer so the
+ * exact cut is asserted without a canvas.
+ *
+ * A name already within budget is returned unchanged. The `..` marker costs two
+ * of the budgeted characters, so a truncated result keeps the first
+ * `maxChars - 2` characters plus `..`, landing at exactly `maxChars` wide. For a
+ * pathologically tiny budget (`maxChars <= 2`) there's no room for both the
+ * marker and any content, so the name is hard-cut to `maxChars` with no marker.
+ */
+export function truncatePanelName(name: string, maxChars: number): string {
+  if (maxChars <= 0) {
+    return ''
+  }
+  if (name.length <= maxChars) {
+    return name
+  }
+  if (maxChars <= 2) {
+    return name.slice(0, maxChars)
+  }
+  return `${name.slice(0, maxChars - 2)}..`
+}
+
+/**
  * smoothstep is GLSL's classic cubic Hermite interpolation: 0 at/below `edge0`,
  * 1 at/above `edge1`, and a smooth (zero-derivative-at-both-ends) ease between.
  * Reimplemented here (rather than depending on three.js's MathUtils) so this
