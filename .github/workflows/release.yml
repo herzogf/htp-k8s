@@ -201,6 +201,12 @@ jobs:
       # workflow default is only contents: read, so the upload would 403 without
       # this (see docs/agents/findings.md).
       security-events: write
+    env:
+      # Job-level so it's one literal value shared by the build step (ko reads
+      # this env var directly to know where to push) and the attestation step
+      # below (subject-name) — no reconstructing/parsing it from ko's stdout
+      # (issue #92).
+      KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/htp-k8s
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -246,12 +252,18 @@ jobs:
       # release — a prerelease tag (contains `-` per SemVer, e.g. v1.2.3-rc.1)
       # must not move `latest`.
       #
-      # Capture ko's published, digest-pinned reference (its stdout) so the next
-      # step can attest the image BY DIGEST and Trivy can scan that exact image.
+      # Capture the published, digest-pinned reference via `--image-refs=<file>`
+      # instead of parsing ko's stdout (issue #92: ko printed a bare `repo:tag`
+      # ref in one run instead of the expected `repo@sha256:...`, so a
+      # stdout-strip parse silently no-opped and handed the image-attestation
+      # step a TAGGED subject-name, which it rejects). `--image-refs` always
+      # writes real reference(s) to the file: for this multi-platform `--bare`
+      # build the first line is the top-level (multi-arch index) ref that the
+      # pushed tags point at — the one to attest and scan — and any further
+      # lines are the per-platform child manifests, which we don't need.
       - name: Build and push image (ko)
         id: build
         env:
-          KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/htp-k8s
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REGISTRY_USER: ${{ github.actor }}
           RELEASE_TAG: ${{ github.ref_name }}
@@ -269,26 +281,31 @@ jobs:
           export VERSION="$RELEASE_TAG"
           export DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          # ko prints the fully-qualified, digest-pinned ref (repo@sha256:...)
-          # to stdout; --bare makes the repo exactly KO_DOCKER_REPO. Take the
-          # last stdout line to be robust, then split name@digest.
-          image_ref="$(ko build --bare \
+          ko build --bare \
             --platform=linux/amd64,linux/arm64 \
             --tags "$tags" \
-            ./cmd/htp-k8s | tail -n1)"
+            --image-refs=ko-image-refs.txt \
+            ./cmd/htp-k8s
+
+          image_ref="$(head -n1 ko-image-refs.txt)"
+          if [ -z "$image_ref" ]; then
+            echo "ko did not write an image reference to ko-image-refs.txt" >&2
+            exit 1
+          fi
 
           echo "Published image: ${image_ref}"
           echo "image=${image_ref}" >> "$GITHUB_OUTPUT"
-          echo "name=${image_ref%@*}" >> "$GITHUB_OUTPUT"
           echo "digest=${image_ref##*@}" >> "$GITHUB_OUTPUT"
 
       # Keyless build-provenance for the pushed image, keyed to its digest and
       # attached to the image in GHCR (push-to-registry) so `gh attestation
-      # verify oci://<image>` works for end users (issue #31).
+      # verify oci://<image>` works for end users (issue #31). subject-name is
+      # the job-level KO_DOCKER_REPO literal (always the bare repo, never a
+      # tag/digest) rather than anything derived from ko's output (issue #92).
       - name: Attest build provenance (container image)
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-name: ${{ steps.build.outputs.name }}
+          subject-name: ${{ env.KO_DOCKER_REPO }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
