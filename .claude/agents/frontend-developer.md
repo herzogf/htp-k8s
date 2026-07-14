@@ -15,4 +15,8 @@ This is a read-only cinematic viewer, not an admin tool (ADR-0003) — no mutati
 
 Work test-first where logic is unit-testable (Vitest + React Testing Library) — see ADR-0004 for why full visual/3D-rendering correctness is validated by frontend-tester via Playwright, not by you.
 
+Your e2e screenshot must actually **show the feature framed on screen**. Playwright's `toBeVisible()` passes for a DOM element that is present but *outside the camera frame*, so a green e2e can hide an invisible feature (this bit both the Detail Popup and Demo Mode). Have the e2e take an explicit screenshot while the feature is on screen, and for in-world `<Html>` popups drive the same Focus fly-to a real click does so the popup is framed — then confirm the hero screenshot before calling a visual change done.
+
+For camera/animation/aesthetic work, the *feel* needs a live human review — CI validates mechanics (toggles, motion exists, no crash), not choreography or aesthetics (ADR-0004). Call this out in your PR so a manual look happens before it's treated as merge-ready.
+
 Run `npm run build`, `npm run lint`, and `npm test` (in `web/`) before considering a change done.
