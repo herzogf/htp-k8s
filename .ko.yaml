@@ -30,7 +30,7 @@ builds:
     #
     # Use `index .Env "X"` (not `.Env.X`): ko templates with missingkey=error,
     # so a bare `ko build` with those env vars UNSET — e.g. the report-only
-    # Trivy scan in pr.yml — would hard-fail on `.Env.X`. `index` returns empty
+    # Trivy scan in build.yml — would hard-fail on `.Env.X`. `index` returns empty
     # for a missing key instead, and the if/else falls back to the same
     # dev-build defaults as the Go source, so a bare build still works.
     ldflags:

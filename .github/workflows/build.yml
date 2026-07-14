@@ -1,6 +1,11 @@
-name: PR
+name: CI
 
-# PR-blocking CI posture (issue #1 / ADR-0005). Two tiers (ADR-0004):
+# CI posture for both PRs and push-to-main (issue #1 / ADR-0005, extended by
+# issue #95). Renamed from pr.yml -> build.yml when the push-to-main trigger
+# was added (issue #95): every commit that lands on `main` now gets its own
+# check-runs, which is what makes the release.yml green-commit guard possible
+# (a tag can only be cut off a `main` commit that itself has a real, checked
+# status — see release.yml). Two tiers (ADR-0004):
 #   * Fast, source-level checks — Backend (Go), Frontend (Node) — give quick
 #     feedback and are the required status checks on `main`.
 #   * Slower, heavier checks added by issue #8 — the kind + KWOK backend
@@ -8,14 +13,23 @@ name: PR
 #     ko-built container image (CVE findings non-blocking, but a scan
 #     *operational* failure fails the check — see #69/#70) — run as their own
 #     separate jobs so the fast tier stays fast.
-# NOTE (governance): making the three #8 jobs *required* status checks is a
-# change to the `main` branch-protection ruleset and is left to the repo owner.
+#
+# IMPORTANT: the job `name:` fields below are the branch-protection
+# required-status-check CONTEXTS (ruleset 18831212 on `main`, see
+# docs/agents/findings.md). Never rename a job — a renamed job makes its
+# required check permanently pending, which makes every PR unmergeable.
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 concurrency:
-  group: pr-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  # Keyed so PR runs and push-to-main runs never share a group (a main push
+  # must not cancel — or be cancelled by — an unrelated PR's run), while
+  # multiple runs for the SAME PR, or successive pushes to `main`, still
+  # cancel their predecessor (only the latest result matters either way).
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -23,21 +37,26 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Docs-only fast path (issue #76). A cheap gate job that reports whether any
-  # NON-docs path changed. The three heavy jobs below (integration / e2e /
-  # container-scan) are gated on its output so a docs-only PR skips ~10-15 min
+  # Docs-only fast path (issue #76, extended to push-to-main by issue #95). A
+  # cheap gate job that reports whether any NON-docs path changed. The three
+  # heavy jobs below (integration / e2e / container-scan) are gated on its
+  # output so a docs-only PR *or* a docs-only push to `main` skips ~10-15 min
   # of cluster-spinning.
   #
-  # DO NOT "simplify" this into `on.pull_request.paths-ignore`. `main` has
-  # STRICT required status checks (ruleset 18831212): Backend (Go),
+  # DO NOT "simplify" this into `on.pull_request.paths-ignore` / `on.push.paths`.
+  # `main` has STRICT required status checks (ruleset 18831212): Backend (Go),
   # Frontend (Node), Backend integration (kind + KWOK), E2E (Playwright),
-  # Container scan (Trivy). If a docs PR skipped the *workflow* via
-  # paths-ignore, those required checks would NEVER report and stay "pending"
-  # forever -> the docs PR becomes permanently UN-mergeable (worse than the
-  # status quo). So the workflow MUST still trigger on every PR; we skip only
-  # the heavy *jobs* at the job level. A job-level-skipped required check is
-  # treated as passing by branch protection (verified on a docs-only test PR
-  # for #76), unlike a skipped workflow.
+  # Container scan (Trivy). If a docs change skipped the *workflow* via a
+  # paths filter, those required checks would NEVER report and stay "pending"
+  # forever -> the PR becomes permanently UN-mergeable (worse than the status
+  # quo). So the workflow MUST still trigger on every PR and every push to
+  # `main`; we skip only the heavy *jobs* at the job level. A job-level-skipped
+  # required check is treated as passing by branch protection (verified on a
+  # docs-only test PR for #76), unlike a skipped workflow. On push, this is
+  # also what lets a docs-only main commit still resolve as a "green commit"
+  # for the release.yml guard (issue #95) — its required checks report
+  # `skipped`, and the guard treats that as passing too, matching branch
+  # protection's own semantics.
   #
   # "Docs-only" = every changed path is under **/*.md, docs/**, or LICENSE.
   # ANYTHING else runs the full suite: code, web/, config, and especially
@@ -58,11 +77,31 @@ jobs:
     outputs:
       nondocs: ${{ steps.filter.outputs.nondocs }}
     steps:
+      # dorny/paths-filter needs the repo checked out ONLY for its push-event
+      # path (it diffs via local git commands there); the pull_request path
+      # uses the GitHub REST API instead and needs no checkout. fetch-depth: 0
+      # (full history) so the "base: main" comparison below always has the
+      # pre-push commit available to diff against, regardless of how many
+      # commits the push/merge introduced.
+      - name: Checkout (push-to-main only; PR path uses the GitHub API)
+        if: github.event_name == 'push'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
       - name: Detect non-docs changes
         id: filter
         uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         with:
           predicate-quantifier: 'every'
+          # Ignored on pull_request events (that path always compares against
+          # the PR base branch via the API — see dorny/paths-filter's README).
+          # On push, 'main' *is* the branch that was just pushed to, which
+          # puts the action in its "long-lived branch" mode: changes are
+          # detected against the most recent commit on main *before* this
+          # push, i.e. exactly the files the merge/squash commit introduced —
+          # the same file set a PR check would have seen for that change.
+          base: main
           filters: |
             nondocs:
               - '**'

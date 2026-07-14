@@ -6,17 +6,26 @@ name: Release
 # does not run on the PR that introduces it.
 #
 # What it produces (ADR-0005 supply-chain posture):
+#   * `verify-green-commit` (issue #95) -> asserts the TAGGED commit's own
+#     `main` CI (build.yml, which now also runs on push-to-main) is all green
+#     before anything else runs — every other job `needs:` this one. Fails
+#     fast on a real failure; polls with a bounded timeout for in-progress
+#     checks (the tag can be pushed moments after the merge).
 #   * GoReleaser -> a GitHub Release (draft) with cross-platform binaries, a
 #     checksums.txt, an auto-generated changelog, and a Syft CycloneDX SBOM per
 #     archive.
-#   * ko -> the container image, pushed to GHCR (no Dockerfile).
-#   * GitHub-native artifact attestations (issue #31) -> keyless, Sigstore-backed
-#     build-provenance for the release binaries (via checksums.txt) and the
-#     container image (by digest), plus an SBOM attestation for each archive's
-#     GoReleaser CycloneDX SBOM. All verifiable with `gh attestation verify`, no
-#     key management (GitHub OIDC).
-#   * Trivy (issue #31) -> a CVE scan of the released image; SARIF is uploaded to
-#     the Security tab. FINDINGS never block the release (ADR-0005): a
+#   * ko -> the multi-arch (amd64+arm64) container image, pushed to GHCR (no
+#     Dockerfile).
+#   * GitHub-native artifact attestations (issue #31, extended to per-arch by
+#     issue #95) -> keyless, Sigstore-backed build-provenance for the release
+#     binaries (via checksums.txt), the container image's multi-arch INDEX
+#     digest AND each per-platform CHILD digest, plus an SBOM attestation for
+#     each archive's GoReleaser CycloneDX SBOM. All verifiable with
+#     `gh attestation verify`, no key management (GitHub OIDC).
+#   * Trivy (issue #31, extended to both arches by issue #95) -> a CVE scan of
+#     EACH per-platform child image (not just the index, which only resolves
+#     to one arch); SARIF for each is uploaded to the Security tab under a
+#     distinct category. FINDINGS never block the release (ADR-0005): a
 #     Critical/fixable CVE surfaces but does not fail the build. A scan/upload
 #     OPERATIONAL failure, however, DOES fail the release — if Trivy can't run
 #     (auth, image pull, DB download, hang) or the SARIF can't reach the Security
@@ -35,8 +44,118 @@ permissions:
   contents: read
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Release-integrity gate (issue #95). The whole release model rests on the
+  # invariant "the tagged commit already passed CI" (tests run in build.yml on
+  # PRs/push-to-main; this workflow only builds+publishes, trusting that). This
+  # job is the first thing that asserts it, rather than trusting it silently —
+  # tagging an arbitrary off-`main` commit (or a `main` commit pushed with
+  # branch protection bypassed) now fails loudly here instead of building and
+  # publishing untested code.
+  verify-green-commit:
+    name: Verify tagged commit is green
+    runs-on: ubuntu-latest
+    # Bounded poll (20 min, see the step) plus overhead margin.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      # Read the tagged commit's check-runs via the GitHub REST API. Reading
+      # branch-protection *settings* would need a higher-privileged token than
+      # the default GITHUB_TOKEN should be granted — we don't need that, only
+      # the commit's own check-run results.
+      checks: read
+    steps:
+      - name: Wait for and verify main CI is green
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # Must match the job `name:` fields in build.yml exactly (they are
+          # the same required-status-check contexts branch protection
+          # enforces on `main` — see docs/agents/findings.md). Including
+          # "Detect changed paths" is a harmless superset even though it isn't
+          # itself a required check: unlike the three heavy jobs it never
+          # skips, so it always resolves to a real success/failure and can
+          # never cause a false failure here.
+          required=(
+            "Detect changed paths"
+            "Backend (Go)"
+            "Frontend (Node)"
+            "Backend integration (kind + KWOK)"
+            "E2E (Playwright)"
+            "Container scan (Trivy)"
+          )
+
+          # The tag can be pushed moments after the merge, before main's
+          # push-CI run has even started (or while it's still running) — poll
+          # with a bounded timeout instead of a single read. A genuine
+          # failure/cancellation is reported immediately without waiting out
+          # the rest of the timeout.
+          deadline=$(( $(date +%s) + 20 * 60 ))
+          interval=30
+
+          echo "Verifying required checks for ${REPO}@${SHA}:"
+          printf '  - %s\n' "${required[@]}"
+
+          while true; do
+            runs="$(gh api --paginate "repos/${REPO}/commits/${SHA}/check-runs" -q '.check_runs[] | {name, status, conclusion, id}' | jq -s '.')"
+
+            # A check name can appear more than once (re-runs); keep only the
+            # most recent (highest id) run per name — the same "latest run
+            # wins" rule GitHub's own merge-state evaluation applies.
+            latest="$(jq 'group_by(.name) | map(max_by(.id))' <<<"$runs")"
+
+            failed=()
+            pending=()
+            missing=()
+
+            for name in "${required[@]}"; do
+              entry="$(jq -c --arg n "$name" '.[] | select(.name == $n)' <<<"$latest")"
+              if [ -z "$entry" ]; then
+                missing+=("$name")
+                continue
+              fi
+              status="$(jq -r '.status' <<<"$entry")"
+              conclusion="$(jq -r '.conclusion' <<<"$entry")"
+              if [ "$status" != "completed" ]; then
+                pending+=("$name ($status)")
+                continue
+              fi
+              # A job-level skip (docs-only push to main) counts as passing —
+              # mirrors how branch protection itself treats a skipped required
+              # check (docs/agents/findings.md, issue #76).
+              case "$conclusion" in
+                success|skipped) ;;
+                *) failed+=("$name ($conclusion)") ;;
+              esac
+            done
+
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "::error::Required check(s) not green for ${SHA}: ${failed[*]}"
+              exit 1
+            fi
+
+            if [ "${#missing[@]}" -eq 0 ] && [ "${#pending[@]}" -eq 0 ]; then
+              echo "All required checks are green (success or skipped) for ${SHA}."
+              exit 0
+            fi
+
+            now="$(date +%s)"
+            if [ "$now" -ge "$deadline" ]; then
+              echo "::error::Timed out waiting for required checks on ${SHA}. Missing: ${missing[*]:-none}. Still pending: ${pending[*]:-none}."
+              exit 1
+            fi
+
+            echo "Not all required checks completed yet (missing: ${missing[*]:-none}; pending: ${pending[*]:-none}); retrying in ${interval}s..."
+            sleep "$interval"
+          done
+
   goreleaser:
     name: GoReleaser (binaries, checksums, changelog, SBOM)
+    needs: verify-green-commit
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -59,7 +178,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           # Pin the Go MINOR + check-latest to build against the newest patched
-          # 1.26.x (see docs/agents/findings.md and pr.yml for the full why).
+          # 1.26.x (see docs/agents/findings.md and build.yml for the full why).
           # Bump this when the project moves to a new Go minor.
           go-version: "1.26"
           check-latest: true
@@ -122,7 +241,7 @@ jobs:
 
   attest-sboms:
     name: Attest SBOMs (per archive)
-    needs: goreleaser
+    needs: [verify-green-commit, goreleaser]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -186,6 +305,7 @@ jobs:
 
   image:
     name: Container image (ko -> GHCR)
+    needs: verify-green-commit
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -197,10 +317,16 @@ jobs:
       # packages: write to attach the attestation to the image in GHCR.
       id-token: write
       attestations: write
-      # Upload the report-only Trivy SARIF to the Security tab (issue #31); the
-      # workflow default is only contents: read, so the upload would 403 without
-      # this (see docs/agents/findings.md).
-      security-events: write
+    # `repo`/`digest` describe the multi-arch INDEX (attested right below).
+    # `children` is a JSON array of the per-platform CHILD digests (issue #95)
+    # — consumed by the trivy-scan and attest-image-children fan-out jobs so
+    # neither one hardcodes a platform list; both stay correct if the
+    # `--platform` list in the build step below ever changes.
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+      repo: ${{ steps.build.outputs.repo }}
+      children: ${{ steps.build.outputs.children }}
     env:
       # Job-level so it's one literal value shared by the build step (ko reads
       # this env var directly to know where to push) and the attestation step
@@ -259,8 +385,12 @@ jobs:
       # step a TAGGED subject-name, which it rejects). `--image-refs` always
       # writes real reference(s) to the file: for this multi-platform `--bare`
       # build the first line is the top-level (multi-arch index) ref that the
-      # pushed tags point at — the one to attest and scan — and any further
-      # lines are the per-platform child manifests, which we don't need.
+      # pushed tags point at — the one the index attestation/verify-by-tag
+      # path uses — and any further lines are the per-platform child
+      # manifests. Issue #95: those child refs are now ALSO needed (scanned +
+      # attested individually), so parse them into a JSON array of bare
+      # digests (`children`) for the fan-out jobs below — never a hardcoded
+      # platform list, so it tracks whatever `--platform` is set to here.
       - name: Build and push image (ko)
         id: build
         env:
@@ -296,12 +426,28 @@ jobs:
           echo "Published image: ${image_ref}"
           echo "image=${image_ref}" >> "$GITHUB_OUTPUT"
           echo "digest=${image_ref##*@}" >> "$GITHUB_OUTPUT"
+          echo "repo=${KO_DOCKER_REPO}" >> "$GITHUB_OUTPUT"
+
+          # Every line after the first is a per-platform child ref
+          # (repo@sha256:...); strip the repo prefix down to the bare digest
+          # and emit a compact JSON array for the trivy-scan / image-children
+          # attestation matrix jobs. An empty array (no child lines) degrades
+          # to a no-op matrix in both consumers rather than an error.
+          children_json="$(tail -n +2 ko-image-refs.txt | sed -E 's/^.*@//' | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          echo "Per-platform child digests: ${children_json}"
+          echo "children=${children_json}" >> "$GITHUB_OUTPUT"
 
       # Keyless build-provenance for the pushed image, keyed to its digest and
       # attached to the image in GHCR (push-to-registry) so `gh attestation
       # verify oci://<image>` works for end users (issue #31). subject-name is
       # the job-level KO_DOCKER_REPO literal (always the bare repo, never a
       # tag/digest) rather than anything derived from ko's output (issue #92).
+      # This attests the multi-arch INDEX digest — what the pushed tag(s)
+      # actually resolve to, and what `gh attestation verify
+      # oci://<image>:<tag>` verifies. Per-platform child digests are attested
+      # separately by the attest-image-children matrix job below (issue #95) —
+      # a specific platform's child digest is a DIFFERENT subject than the
+      # index, so it needs its own attestation to be individually verifiable.
       - name: Attest build provenance (container image)
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -309,23 +455,47 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
-      # Scan the RELEASED image (by digest). FINDINGS are non-blocking but a scan
-      # OPERATIONAL failure fails the release. The two settings encode exactly
-      # that: exit-code "0" makes Trivy exit 0 when it *finds* vulnerabilities
-      # (Criticals included) so CVEs never fail the build; and with NO
-      # continue-on-error, a genuine scan *error* — auth/401, image-pull, DB
-      # download, hang — exits non-zero and fails the step (and thus the
-      # release), rather than passing off a silently-empty security report.
-      # The step-level timeout-minutes (#70) bounds a setup hang so it fails fast
-      # instead of stalling to the job timeout; with continue-on-error gone, that
-      # timeout then correctly fails the release too.
-      #
-      # Mirrors the PR-time scan in pr.yml, except that one scans a `--local`
-      # image (no registry) while this pulls the just-pushed GHCR image — private
-      # by default. trivy-action runs Trivy in its own context and does NOT
-      # inherit the host `ko login` docker config, so give Trivy explicit GHCR
-      # pull creds via its native TRIVY_USERNAME/TRIVY_PASSWORD env (the
-      # GITHUB_TOKEN packages:read is covered by this job's packages: write).
+      # Trivy scanning of the released image moved to the dedicated
+      # `trivy-scan` matrix job below (issue #95): scanning only this INDEX
+      # digest resolves to a single arch (whatever the scanning runner
+      # defaults to), silently leaving the other platform(s) unscanned. See
+      # the `trivy-scan` job for the per-child scan + SARIF upload.
+
+  trivy-scan:
+    name: Trivy scan (per-arch release image)
+    needs: [verify-green-commit, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Pull the private, just-pushed GHCR image for scanning.
+      packages: read
+      # Upload the report-only SARIF to the Security tab.
+      security-events: write
+    # Scan EVERY per-platform child image the release actually shipped (issue
+    # #95) — scanning only the multi-arch index (the pre-#95 behavior) always
+    # resolves to whichever platform the scanning runner defaults to (amd64),
+    # so arm64 was built and shipped but never vuln-scanned. fail-fast: false
+    # so one platform's scan failure doesn't cancel the other's independent
+    # result. The platform list is NEVER hardcoded here: the matrix comes from
+    # `needs.image.outputs.children`, parsed in the `image` job from ko's
+    # `--image-refs` output, so this automatically tracks whatever
+    # `ko build --platform=...` list is configured there.
+    strategy:
+      fail-fast: false
+      matrix:
+        digest: ${{ fromJson(needs.image.outputs.children) }}
+    steps:
+      # FINDINGS are non-blocking but a scan OPERATIONAL failure fails the
+      # release — the same semantics the single-arch scan used before #95
+      # (see docs/agents/findings.md): exit-code "0" makes Trivy exit 0 on CVE
+      # findings so they never fail the build; no continue-on-error means a
+      # genuine scan error (auth/401, image-pull, DB download, hang) fails
+      # this job (and thus the release). The step-level timeout-minutes
+      # bounds a setup hang so it fails fast instead of stalling to the job
+      # timeout. trivy-action runs its own registry client — it does NOT
+      # inherit the host `ko login` docker config — so it needs its own GHCR
+      # pull creds via the native TRIVY_USERNAME/TRIVY_PASSWORD env.
       - name: Trivy scan (findings non-blocking)
         uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
         timeout-minutes: 5
@@ -333,17 +503,70 @@ jobs:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         with:
-          image-ref: ${{ steps.build.outputs.image }}
+          image-ref: ${{ needs.image.outputs.repo }}@${{ matrix.digest }}
           format: sarif
           output: trivy-results.sarif
           exit-code: "0"
           ignore-unfixed: false
 
-      # No continue-on-error and no if: always() — this runs only after the scan
-      # above succeeds, and a failed upload fails the release. The invariant: a
-      # real SARIF lands in the Security tab, or the build fails.
+      # Distinct SARIF category per child digest so the per-arch scans land as
+      # SEPARATE entries in the Security tab instead of one overwriting the
+      # other. Keyed off the digest itself (not an assumed arch label) — the
+      # image-refs line order is not guaranteed to map to a specific platform,
+      # so don't infer one; the digest alone is enough to make it unique and
+      # traceable.
+      - name: Compute SARIF category
+        id: category
+        env:
+          DIGEST: ${{ matrix.digest }}
+        run: |
+          short="${DIGEST#sha256:}"
+          echo "value=trivy-release-image-${short:0:12}" >> "$GITHUB_OUTPUT"
+
+      # No continue-on-error and no if: always() — a failed upload fails the
+      # release. The invariant: a real SARIF lands in the Security tab for
+      # EVERY scanned platform, or the build fails.
       - name: Upload Trivy SARIF to Security tab
         uses: github/codeql-action/upload-sarif@641a925cfafe92d0fdf8b239ba4053e3f8d99d6d # v3
         with:
           sarif_file: trivy-results.sarif
-          category: trivy-release-image
+          category: ${{ steps.category.outputs.value }}
+
+  attest-image-children:
+    name: Attest build provenance (per-arch image)
+    needs: [verify-green-commit, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # push-to-registry attaches the attestation to the image in GHCR.
+      packages: write
+      # Keyless build-provenance attestation (issue #31/#95): id-token mints
+      # the OIDC token, attestations writes it to the repo's attestation
+      # store.
+      id-token: write
+      attestations: write
+    # Attests EACH per-platform child digest (issue #95), alongside the
+    # index-level attestation already done in the `image` job.
+    # `gh attestation verify oci://<image>:<tag>` already worked before this
+    # job existed (the tag resolves to the attested index); verifying a
+    # SPECIFIC platform by its own child digest did not, because that child
+    # digest is a DIFFERENT subject than the index. Mirrors the `attest-sboms`
+    # fan-out pattern above. fail-fast: false so one platform's failure
+    # doesn't cancel the other's independent attestation. The platform list is
+    # NEVER hardcoded: the matrix comes from `needs.image.outputs.children`
+    # (parsed from ko's `--image-refs` output in the `image` job), so it
+    # automatically tracks whatever `--platform` list is configured there.
+    # This stays GitHub-native attestation (no cosign `--recursive`), per
+    # ADR-0005.
+    strategy:
+      fail-fast: false
+      matrix:
+        digest: ${{ fromJson(needs.image.outputs.children) }}
+    steps:
+      - name: Attest build provenance (child image)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-name: ${{ needs.image.outputs.repo }}
+          subject-digest: ${{ matrix.digest }}
+          push-to-registry: true
