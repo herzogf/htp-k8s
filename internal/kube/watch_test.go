@@ -1,7 +1,10 @@
 package kube_test
 
 import (
+	"bytes"
 	"context"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
@@ -239,6 +242,66 @@ func TestSceneWatcher_UnscheduledPodInNodeMode(t *testing.T) {
 		t.Fatalf("create pod: %v", err)
 	}
 	expectNoDelta(t, ch)
+}
+
+// TestSceneWatcher_TowerCount proves TowerCount reflects the live SceneState —
+// the current Tower count it backs the "demo seed: <n> (tower count: <n>)"
+// startup log line with (issue #91, ADR-0010) — both at seed time and after a
+// Tower is added.
+func TestSceneWatcher_TowerCount(t *testing.T) {
+	w, client := startWatcher(t, scene.ViewModeNode, node("node-a"))
+	ctx := context.Background()
+
+	if got := w.TowerCount(); got != 1 {
+		t.Fatalf("TowerCount() = %d, want 1", got)
+	}
+
+	_, ch, unsub := w.SnapshotAndSubscribe()
+	t.Cleanup(unsub)
+	if _, err := client.CoreV1().Nodes().Create(ctx, node("node-b"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	recvDelta(t, ch) // wait for the TowerAdded delta so the rebuild has landed
+
+	if got := w.TowerCount(); got != 2 {
+		t.Fatalf("TowerCount() = %d, want 2 after adding a node", got)
+	}
+}
+
+// TestSceneWatcher_LogsTowerCountChange proves a Tower add/remove logs the
+// count change (issue #91): Demo Mode's Canyon graph (ADR-0010) is derived
+// from the Tower arrangement, so this is the "why did the same seed fly
+// differently" answer the design calls for. A Panel-only change (no Tower
+// count change) must NOT log a spurious line.
+func TestSceneWatcher_LogsTowerCountChange(t *testing.T) {
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+
+	w, client := startWatcher(t, scene.ViewModeNode, node("node-a"))
+	ctx := context.Background()
+	_, ch, unsub := w.SnapshotAndSubscribe()
+	t.Cleanup(unsub)
+
+	// A pod add changes Panels, not the Tower count: must not log a tower
+	// count change line.
+	if _, err := client.CoreV1().Pods("team").Create(ctx, pod("team", "web-1", "node-a", corev1.PodRunning), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pod: %v", err)
+	}
+	recvDelta(t, ch)
+	if strings.Contains(buf.String(), "tower count changed") {
+		t.Fatalf("log unexpectedly contains a tower count change line after a Panel-only change: %q", buf.String())
+	}
+
+	// A node add changes the Tower count: must log the change.
+	if _, err := client.CoreV1().Nodes().Create(ctx, node("node-b"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create node: %v", err)
+	}
+	recvDelta(t, ch)
+	if !strings.Contains(buf.String(), "tower count changed: 1 -> 2") {
+		t.Fatalf("log = %q, want it to contain %q", buf.String(), "tower count changed: 1 -> 2")
+	}
 }
 
 // TestSceneWatcher_LateSubscriberGetsCurrentSnapshot proves a subscriber that

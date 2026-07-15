@@ -323,6 +323,16 @@ func (w *SceneWatcher) SnapshotAndSubscribe() (scene.SceneState, <-chan scene.Sc
 	return w.current, ch, unsubscribe
 }
 
+// TowerCount returns the number of Towers in the current SceneState. It backs
+// the startup "demo seed: <n> (tower count: <n>)" log line (see cmd/htp-k8s):
+// Demo Mode's Canyon tour (ADR-0010) is a function of the seed and the Tower
+// arrangement, so the count at startup is half of the tour's reproduction key.
+func (w *SceneWatcher) TowerCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.current.Towers)
+}
+
 // notify pokes the coalescing trigger without blocking: if a rebuild is already
 // pending the poke is dropped, so bursts of events cost at most one extra rebuild.
 func (w *SceneWatcher) notify() {
@@ -361,6 +371,13 @@ func (w *SceneWatcher) rebuildAndBroadcast(ctx context.Context) {
 	deltas := scene.Diff(w.current, next)
 	if len(deltas) == 0 {
 		return
+	}
+	if before, after := len(w.current.Towers), len(next.Towers); before != after {
+		// Demo Mode's Canyon graph (ADR-0010) is derived from the Tower
+		// arrangement, so a count change is exactly what can diverge a seed's
+		// reproduction after the fact — logged as the "why did the same seed
+		// fly differently later" answer, alongside the seed+count startup line.
+		log.Printf("tower count changed: %d -> %d", before, after)
 	}
 	w.current = next
 	// Refresh the blink homing index so later blinks resolve against the new

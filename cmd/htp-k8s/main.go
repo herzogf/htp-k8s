@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -82,6 +83,15 @@ type options struct {
 	addr string
 	// filter is the startup Namespace Filter preset applied to every scene.
 	filter kube.NamespaceFilter
+	// demoSeed is the seed for Demo Mode's canyon-tour PRNG (ADR-0010),
+	// resolved by resolveDemoSeed: the -demo-seed/HTP_K8S_DEMO_SEED value if
+	// set, otherwise a random seed chosen at startup. Always logged (see run)
+	// since seed + Tower count is the tour's reproduction key.
+	demoSeed int64
+	// demoAutostart reports whether Demo Mode should start automatically at
+	// launch (-demo/HTP_K8S_DEMO). Orthogonal to demoSeed — a seed can be
+	// preset without auto-starting the flight.
+	demoAutostart bool
 }
 
 // parseFlags parses the CLI flags into runtime options, applying environment
@@ -95,6 +105,14 @@ func parseFlags(args []string, env func(string) string) (options, error) {
 	if v := env("HTP_K8S_ADDR"); v != "" {
 		addrDefault = v
 	}
+	demoDefault := false
+	if v := env("HTP_K8S_DEMO"); v != "" {
+		parsed, err := strconv.ParseBool(v)
+		if err != nil {
+			return options{}, fmt.Errorf("invalid HTP_K8S_DEMO value %q: %w", v, err)
+		}
+		demoDefault = parsed
+	}
 
 	fs := flag.NewFlagSet("htp-k8s", flag.ContinueOnError)
 	addr := fs.String("addr", addrDefault,
@@ -103,6 +121,10 @@ func parseFlags(args []string, env func(string) string) (options, error) {
 		"preset Namespace/Project name filter with shell wildcards (e.g. 'openshift-*'); the default filter mode. Overrides HTP_K8S_NAMESPACE_FILTER")
 	labelSelector := fs.String("namespace-label-filter", env("HTP_K8S_NAMESPACE_LABEL_FILTER"),
 		"preset advanced Namespace/Project label selector (e.g. 'team=platform'); mutually exclusive with -namespace-filter. Overrides HTP_K8S_NAMESPACE_LABEL_FILTER")
+	demoSeedRaw := fs.String("demo-seed", env("HTP_K8S_DEMO_SEED"),
+		"seed for Demo Mode's canyon-tour PRNG (ADR-0010); a random seed is chosen at startup if unset. Overrides HTP_K8S_DEMO_SEED")
+	demo := fs.Bool("demo", demoDefault,
+		"auto-start Demo Mode at launch; independent of -demo-seed. Overrides HTP_K8S_DEMO")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -111,7 +133,27 @@ func parseFlags(args []string, env func(string) string) (options, error) {
 	if err != nil {
 		return options{}, err
 	}
-	return options{addr: *addr, filter: filter}, nil
+	demoSeed, err := resolveDemoSeed(*demoSeedRaw)
+	if err != nil {
+		return options{}, err
+	}
+	return options{addr: *addr, filter: filter, demoSeed: demoSeed, demoAutostart: *demo}, nil
+}
+
+// resolveDemoSeed parses the -demo-seed/HTP_K8S_DEMO_SEED value into the seed
+// Demo Mode's canyon-tour PRNG uses (ADR-0010), resolving a random seed when
+// raw is empty (neither flag nor env set). Demo Mode always has a seed either
+// way — an operator who never sets one still gets a reproducible tour, since
+// the resolved seed is logged (see run) and served at GET /api/config.
+func resolveDemoSeed(raw string) (int64, error) {
+	if raw == "" {
+		return time.Now().UnixNano(), nil
+	}
+	seed, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid demo seed %q: %w", raw, err)
+	}
+	return seed, nil
 }
 
 // buildFilter turns the two mutually-exclusive filter flags into a single
@@ -158,9 +200,18 @@ func run(args []string, env func(string) string) error {
 	watcher := kube.NewSceneWatcher(client, dyn, mode, opts.filter)
 	watcher.Start(ctx)
 
+	// Demo Mode's Canyon tour (ADR-0010) is a deterministic function of
+	// (seed, Tower arrangement, entry waypoint): log the seed plus the current
+	// Tower count together, on one line, as the reproduction key — a Tower
+	// count change later (logged by the watcher as it occurs) is what would
+	// legitimately diverge a "same seed" replay.
+	log.Printf("demo seed: %d (tower count: %d)", opts.demoSeed, watcher.TowerCount())
+
 	httpServer := &http.Server{
 		Addr: opts.addr,
 		Handler: server.NewHandler(server.Config{
+			DemoSeed:      opts.demoSeed,
+			DemoAutostart: opts.demoAutostart,
 			Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
 				return watcher.SnapshotAndSubscribe()
 			},

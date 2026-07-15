@@ -72,6 +72,15 @@ type Config struct {
 	// tail, never a full log viewer or exec (ADR-0003). Nil disables the endpoint
 	// (503).
 	PodLogTail func(ctx context.Context, namespace, name string, emit func(scene.LogTail)) error
+
+	// DemoSeed and DemoAutostart carry the backend-resolved Demo Mode startup
+	// config (issue #91, ADR-0010), served verbatim at GET /api/config as
+	// AppConfig (see config.go). DemoSeed is the seed for the frontend's
+	// canyon-tour PRNG; DemoAutostart reports whether Demo Mode should start
+	// automatically at launch. Both default to their zero values (seed 0,
+	// autostart false) when unset, which is itself a well-formed response.
+	DemoSeed      int64
+	DemoAutostart bool
 }
 
 // StaticSnapshot adapts a fixed SceneState into a Config.Snapshot function,
@@ -105,6 +114,9 @@ func NewHandler(cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/towers/{name}", handleTowerDetail(cfg))
 	mux.HandleFunc("GET /api/pods/{namespace}/{name}", handlePodDetail(cfg))
 	mux.HandleFunc("GET /api/pods/{namespace}/{name}/logtail", handlePodLogTail(cfg))
+	// The frontend's startup-config channel (issue #91) — deliberately not on
+	// SceneState (ADR-0008); see config.go.
+	mux.HandleFunc("GET /api/config", handleAppConfig(cfg))
 	mux.Handle("GET /", http.FileServerFS(frontendFS()))
 	return mux
 }
