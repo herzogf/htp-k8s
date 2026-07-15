@@ -89,9 +89,17 @@ const TOWER_ROOFLINE_Y = TOWER_HEIGHT
 export const CANYON_ALTITUDE_MIN = TOWER_HEIGHT * 0.15
 export const CANYON_ALTITUDE_MAX = TOWER_HEIGHT * 0.75
 
-/** The "over the rooftops" overview altitude band (world Y), above the Towers. */
-export const OVERVIEW_ALTITUDE_MIN = TOWER_HEIGHT * 1.5
-export const OVERVIEW_ALTITUDE_MAX = TOWER_HEIGHT * 2.4
+/**
+ * The "over the rooftops" overview altitude band (world Y), above the
+ * Towers. Lowered by the #91 climb-rate tuning pass (was `TOWER_HEIGHT *
+ * 1.5` / `* 2.4`): still clears the `y = TOWER_HEIGHT` roofline comfortably,
+ * but sits close enough above it that the climb out of the canyon (now
+ * additionally rate-limited — see {@link MAX_VERTICAL_RATE}) stays gentle
+ * and the Towers stay large in frame during an overview pass, rather than
+ * shrinking under a soaring wide-orbit camera.
+ */
+export const OVERVIEW_ALTITUDE_MIN = TOWER_HEIGHT * 1.1
+export const OVERVIEW_ALTITUDE_MAX = TOWER_HEIGHT * 1.6
 
 /**
  * OVERVIEW_PROBABILITY is the chance each newly drawn waypoint is assigned an
@@ -104,6 +112,40 @@ export const OVERVIEW_PROBABILITY = 0.15
 
 /** CANYON_TRAVEL_SPEED is the flight's speed along the spline, world units/second. */
 export const CANYON_TRAVEL_SPEED = TOWER_SPACING * 1.1
+
+/**
+ * MAX_CLIMB_GRADIENT caps how fast the tour's altitude is ever allowed to
+ * change *relative to its horizontal travel speed* — expressed as a
+ * dimensionless ratio (`tan` of the climb angle) rather than a bare
+ * units/second number, so it reads as what it is: a shallow glide slope, the
+ * gentle climb/descent of a small plane, never an elevator. Two adjacent
+ * waypoints can land in very different altitude bands (a canyon-low hop
+ * followed by an overview draw) regardless of how far apart they are
+ * horizontally or how the horizontal path between them bends — this is what
+ * keeps that transition from ever reading as "the plane turns straight up".
+ * `0.65` ⇒ roughly a 33° climb angle: clearly, readably gentler than a
+ * straight-up "elevator" ascent, while still comfortably reaching the
+ * overview band's altitude within a normal viewing session — a shallower
+ * gradient reads even gentler but, chained with the walk's independent
+ * per-waypoint altitude draws, can spend most of a tour never actually
+ * catching up to a genuine overview pass before the target changes again.
+ * Tune this (not the spline or the altitude bands) to make climbs feel
+ * shallower or brisker.
+ */
+export const MAX_CLIMB_GRADIENT = 0.65
+
+/**
+ * MAX_VERTICAL_RATE is {@link MAX_CLIMB_GRADIENT} converted to world
+ * units/second at the tour's cruise speed — the actual per-frame cap {@link
+ * stepDemoTour}'s altitude pursuit (see {@link approach}) enforces on the
+ * camera's own altitude: how fast the camera's world-space Y is allowed to
+ * change, independent of how steeply the underlying waypoint-to-waypoint
+ * altitude draws differ or how the horizontal spline between them bends. The
+ * demand-driven look-at (the aim, as opposed to the camera's own position) is
+ * intentionally untouched by this — see {@link LOOKAT_FORWARD_ALTITUDE_CAP}'s
+ * doc comment.
+ */
+export const MAX_VERTICAL_RATE = CANYON_TRAVEL_SPEED * MAX_CLIMB_GRADIENT
 
 /**
  * MIN_SEGMENT_SECONDS floors how short a spline segment's travel time can be,
@@ -172,6 +214,15 @@ const LOOKAT_BLEND_RATE = 0.8
  * mechanism. Ordinary canyon flying's forward point sits comfortably below
  * this ceiling, so it only ever engages during a climb-out or an overview
  * pass, and never on canyon-altitude passes.
+ *
+ * Deliberately left unchanged by the #91 climb-rate tuning pass — the
+ * demand-driven look-at (this constant included) was judged good as-is; only
+ * the camera's own altitude *motion* (see {@link MAX_VERTICAL_RATE}) and the
+ * overview altitude band changed. `position` passed into {@link
+ * forwardLookAheadPoint} is still the camera's actual (now glide-slope-
+ * limited) altitude, so this absolute ceiling engages less often with the
+ * lowered band — expected, not a regression: a gentler, lower climb needs
+ * less correction from this backstop to begin with.
  */
 const LOOKAT_FORWARD_ALTITUDE_CAP = TOWER_ROOFLINE_Y + TOWER_HEIGHT * 0.5
 
@@ -706,6 +757,22 @@ interface CanyonTourState {
   /** Progress through the current segment, in `[0, 1)`. */
   segmentT: number
   segmentSeconds: number
+  /**
+   * The camera's actual world-space altitude (world Y) — #91's climb-rate
+   * tuning pass: **not** read directly off the spline's own Y (that follows
+   * the waypoints' independently-drawn altitudes exactly, which can differ
+   * steeply between two adjacent waypoints and produce the "elevator"
+   * climb/dive this field exists to prevent). Instead this is a standalone
+   * value {@link stepDemoTour} eases toward the current segment's destination
+   * altitude (`window[2].y`) at {@link MAX_VERTICAL_RATE} — a rate-limited
+   * pursuit, not a snap — so the camera's height only ever changes at a
+   * shallow, constant-ish glide-slope rate regardless of how steep the
+   * underlying waypoint-to-waypoint altitude change is. `window`'s Y
+   * coordinates remain the *target* altitudes the walk actually drew; only
+   * the horizontal (x, z) components of the spline drive the camera's
+   * horizontal position and weave.
+   */
+  altitude: number
   /** The look-at's current Tower-pull weight, eased toward the geometric target at {@link LOOKAT_BLEND_RATE}/s. */
   lookAtBlend: number
   glance: GlanceState
@@ -797,6 +864,10 @@ export function createDemoTour(params: {
     window: [p0, p1, p2, p3],
     segmentT: 0,
     segmentSeconds: segmentDuration(p1, p2),
+    // Start exactly at the entry waypoint's own altitude — p1.y — so there is
+    // no lag/jump the instant the tour begins; the glide-slope pursuit only
+    // ever engages from here on, chasing each *next* segment's target.
+    altitude: p1.y,
     lookAtBlend: 0,
     glance: glanceRoll.glance,
   }
@@ -832,17 +903,37 @@ export function stepDemoTour(
     state.window,
     Math.min(segmentT, 1),
   )
+  // The camera's actual altitude (#91 climb-rate tuning pass): a rate-limited
+  // pursuit of the *current segment's* destination altitude (`window[2].y`,
+  // the waypoint this segment is flying toward), capped at
+  // MAX_VERTICAL_RATE — never the spline's own (possibly steep) Y directly.
+  // This is what turns a big waypoint-to-waypoint altitude jump into a
+  // gradual, shallow climb/descent that can span several segments rather
+  // than snapping to the waypoint's altitude within the one segment that
+  // happens to lead to it.
+  const altitude = approach(state.altitude, state.window[2].y, MAX_VERTICAL_RATE * delta)
+  const actualPosition = new Vector3(currentPosition.x, altitude, currentPosition.z)
   // The blend must ease toward the deficiency of the *forward look-ahead
   // point* (what the camera is about to aim at), not the camera's own
   // position — the root cause of the climb/dive "aims at the void" bug (#91
   // follow-up 2): the aim can shoot past nearby Towers well before the
-  // camera's own altitude/position would suggest anything's amiss.
-  const forward = forwardLookAheadPoint(currentPosition, currentTangent)
+  // camera's own altitude/position would suggest anything's amiss. Built off
+  // `actualPosition` (not the raw spline position) purely so the look-at
+  // pipeline — otherwise unchanged by this tuning pass — is anchored to
+  // where the camera actually now is, since that's what a look-at is
+  // relative *to*; forwardLookAheadPoint's own cap/formula are untouched.
+  const forward = forwardLookAheadPoint(actualPosition, currentTangent)
   const targetBlend = nearestTowerPull(forward, placements).strength
   const lookAtBlend = approach(state.lookAtBlend, targetBlend, LOOKAT_BLEND_RATE * delta)
 
   if (segmentT < 1) {
-    return { ...state, segmentT, lookAtBlend, glance: stepGlance(state.glance, delta) }
+    return {
+      ...state,
+      segmentT,
+      altitude,
+      lookAtBlend,
+      glance: stepGlance(state.glance, delta),
+    }
   }
 
   // Segment complete: the just-finished segment played out on `state.graph`
@@ -873,6 +964,7 @@ export function stepDemoTour(
     window,
     segmentT: segmentT - 1,
     segmentSeconds: segmentDuration(window[1], window[2]),
+    altitude,
     lookAtBlend,
     glance: glanceRoll.glance,
   }
@@ -910,10 +1002,22 @@ export function sampleDemoTourPose(
     return sampleOrbitPose(state)
   }
   const { position, tangent } = sampleSpline(state.window, state.segmentT)
-  const target = demandDrivenLookAt(position, tangent, state.lookAtBlend, placements, state.glance)
+  // Horizontal (x, z) comes straight off the spline (unaffected); the actual
+  // camera altitude is `state.altitude` — the glide-slope-limited pursuit
+  // {@link stepDemoTour} maintains — never the spline's own (possibly steep)
+  // Y. Banking (below) is still derived from the raw spline tangent: it only
+  // reads the tangent's horizontal turn rate, so it's unaffected by this.
+  const actualPosition = new Vector3(position.x, state.altitude, position.z)
+  const target = demandDrivenLookAt(
+    actualPosition,
+    tangent,
+    state.lookAtBlend,
+    placements,
+    state.glance,
+  )
   const roll = tourBankAngle(state.window, state.segmentSeconds, state.segmentT)
   return {
-    position: position.toArray() as [number, number, number],
+    position: actualPosition.toArray() as [number, number, number],
     target: target.toArray() as [number, number, number],
     roll,
   }

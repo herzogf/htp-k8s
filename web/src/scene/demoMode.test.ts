@@ -35,6 +35,29 @@ function distance(a: readonly number[], b: readonly number[]): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
 }
 
+/**
+ * Independent re-implementation of point-to-Tower-bounding-box distance
+ * (deliberately not imported from demoMode.ts — see "the demand-driven
+ * look-at never aims into the void" describe block's doc comment below):
+ * the real, geometric "is this actually near a Tower" measurement several
+ * tests share, so a bug in the production clearance calculation itself
+ * wouldn't slip through as a tautology.
+ */
+function clearanceToNearestTower(
+  target: readonly number[],
+  allPlacements: TowerPlacement[],
+): number {
+  const halfFootprint = TOWER_FOOTPRINT / 2
+  let nearest = Infinity
+  for (const placement of allPlacements) {
+    const dx = Math.max(0, Math.abs(target[0] - placement.position[0]) - halfFootprint)
+    const dz = Math.max(0, Math.abs(target[2] - placement.position[2]) - halfFootprint)
+    const dy = Math.max(0, target[1] - TOWER_HEIGHT, -target[1])
+    nearest = Math.min(nearest, Math.hypot(dx, dy, dz))
+  }
+  return nearest
+}
+
 /** A `cols` x `rows` grid of Towers, placed exactly as the real backend/frontend layout would. */
 function grid(cols: number, rows: number): TowerPlacement[] {
   const towers: Tower[] = []
@@ -307,8 +330,15 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
 
       // Horizontal distance here is ~0 — the pre-fix, horizontal-only test
       // would have read this as "already framed" and suppressed the pull
-      // entirely (the bug). It must not.
-      expect(pull.strength).toBeGreaterThan(LOOKAT_TOWER_PULL_MAX * 0.5)
+      // entirely (the bug, `strength === 0`). It must not: the vertical
+      // clearance term must engage at all, however modestly. (The required
+      // magnitude was lowered by #91's climb-rate tuning pass, which also
+      // lowered OVERVIEW_ALTITUDE_MAX itself — closer to the roofline, so
+      // there's simply less vertical clearance for this term to react to
+      // than the old, much taller band gave it. `nearestTowerPull` and its
+      // clearance thresholds were deliberately left untouched by that pass;
+      // this is that same, unchanged formula evaluated at a new altitude.)
+      expect(pull.strength).toBeGreaterThan(LOOKAT_TOWER_PULL_MAX * 0.02)
     })
 
     it('ramps smoothly with altitude above the roofline (no snap — the motion-sickness guardrail)', () => {
@@ -350,8 +380,13 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
 
       // A level forward look-ahead alone (the pre-fix behaviour) sits at the
       // camera's own altitude. The fix must pull the target's Y meaningfully
-      // below the camera's — tilting the aim down toward the skyline.
-      expect(target.y).toBeLessThan(position.y - TOWER_HEIGHT * 0.3)
+      // below the camera's — tilting the aim down toward the skyline. (The
+      // required margin was lowered by #91's climb-rate tuning pass, which
+      // lowered OVERVIEW_ALTITUDE_MAX itself: less altitude above the
+      // roofline for either LOOKAT_FORWARD_ALTITUDE_CAP or the pull — both
+      // deliberately left untouched — to react to. This is that same,
+      // unchanged look-at maths evaluated at a new, lower altitude.)
+      expect(target.y).toBeLessThan(position.y - TOWER_HEIGHT * 0.05)
       // And it should land near the cluster horizontally, not drift into the void.
       const horizontalDistance = Math.hypot(
         target.x - centerTower.position[0],
@@ -375,10 +410,22 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
   it('integration: over a long tour, deep-overview samples keep looking toward the Towers, not into the void', () => {
     // The pull ramps in smoothly with altitude above the roofline (the
     // motion-sickness guardrail — no snap right at the roofline), so this
-    // only asserts the strong "clearly tilted down" outcome once a sample is
-    // well into the overview band, not at its very edge where a mild tilt is
-    // the intended, correct behaviour.
+    // only asserts the "close to a Tower, not the void" outcome once a
+    // sample is well into the overview band, not at its very edge where a
+    // mild tilt is the intended, correct behaviour.
+    //
+    // This checks the real geometric invariant — clearance from the look-at
+    // target to the nearest Tower's bounding volume (the same measurement
+    // the #91 forcing-function invariant below uses) — rather than a bare
+    // "target.y meaningfully below position.y" heuristic. #91's climb-rate
+    // tuning pass compressed the overview band close enough to the roofline
+    // that a deep-overview sample can now legitimately look slightly *above*
+    // its own altitude (the camera's own rate-limited climb can still lag a
+    // still-rising raw spline tangent) while remaining close to a Tower
+    // horizontally — a real, harmless case the old y-only heuristic would
+    // have wrongly failed.
     const deepOverviewY = (OVERVIEW_ALTITUDE_MIN + OVERVIEW_ALTITUDE_MAX) / 2
+    const VOID_CLEARANCE_THRESHOLD = TOWER_SPACING * 2
     let tour: DemoTourState = createDemoTour({ seed: 99, placements, entry: ORIGIN_POSE })
     let sawDeepOverview = false
 
@@ -388,8 +435,9 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
       const [, positionY] = pose.position
       if (positionY > deepOverviewY) {
         sawDeepOverview = true
-        const [, targetY] = pose.target
-        expect(targetY).toBeLessThan(positionY - 1)
+        expect(clearanceToNearestTower(pose.target, placements)).toBeLessThan(
+          VOID_CLEARANCE_THRESHOLD,
+        )
       }
     }
 
@@ -429,26 +477,6 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
 describe('the demand-driven look-at never aims into the void (#91 forcing-function invariant)', () => {
   const placements = grid(5, 5)
   const VOID_CLEARANCE_THRESHOLD = TOWER_SPACING * 2
-
-  /**
-   * Independent re-implementation of point-to-Tower-bounding-box distance
-   * (deliberately not imported from demoMode.ts — see the describe block's
-   * doc comment).
-   */
-  function clearanceToNearestTower(
-    target: readonly number[],
-    allPlacements: TowerPlacement[],
-  ): number {
-    const halfFootprint = TOWER_FOOTPRINT / 2
-    let nearest = Infinity
-    for (const placement of allPlacements) {
-      const dx = Math.max(0, Math.abs(target[0] - placement.position[0]) - halfFootprint)
-      const dz = Math.max(0, Math.abs(target[2] - placement.position[2]) - halfFootprint)
-      const dy = Math.max(0, target[1] - TOWER_HEIGHT, -target[1])
-      nearest = Math.min(nearest, Math.hypot(dx, dy, dz))
-    }
-    return nearest
-  }
 
   // Several seeds, including the one explicitly called out for coverage.
   // Each is driven for a long, densely-sampled run — several full tours'

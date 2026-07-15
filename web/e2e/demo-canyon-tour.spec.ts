@@ -64,7 +64,9 @@ const TOWER_SPACING = 4
 const TOWER_HEIGHT = 6
 const PERIMETER_OFFSET = TOWER_SPACING * 1.5
 const CANYON_ALTITUDE_MAX = TOWER_HEIGHT * 0.75
-const OVERVIEW_ALTITUDE_MIN = TOWER_HEIGHT * 1.5
+// Lowered by #91's climb-rate tuning pass (was `TOWER_HEIGHT * 1.5`) — see
+// OVERVIEW_ALTITUDE_MIN's doc comment in demoMode.ts.
+const OVERVIEW_ALTITUDE_MIN = TOWER_HEIGHT * 1.1
 
 /** How long to fly and record: long enough for several canyon passes, an overview rise, and at least one turn (#91). */
 const FLIGHT_DURATION_MS = 65_000
