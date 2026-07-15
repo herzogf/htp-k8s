@@ -83,6 +83,14 @@ const TOWER_SPACING = 4
 test('demo mode: the HUD toggle flies the camera on its own with a visible bank, then hands back smoothly', async ({
   page,
 }, testInfo) => {
+  // This test drives a real, unattended 3D flight and polls the live camera
+  // dozens of times over a generous bank-detection window (up to ~15s, since
+  // #91's flight cruises straight-and-level before its first banked turn). On a
+  // slow/loaded CI runner the cumulative waits + CDP round-trips run right up
+  // against Playwright's 30s per-test limit (observed 32s), so give it the 3x
+  // budget test.slow() provides — the assertions themselves are unchanged.
+  test.slow()
+
   await page.goto('/')
   await waitForScene(page)
 
