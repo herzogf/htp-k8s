@@ -76,6 +76,15 @@ export const DEMO_BANK_MAX = Math.PI / 6
  */
 export const PERIMETER_OFFSET = TOWER_SPACING * 1.5
 
+/**
+ * World-space Y of a Tower's roofline (its prism top) — `TOWER_HEIGHT`, since
+ * a Tower's centre sits at `TOWER_HEIGHT / 2` (towerLayout.ts) resting on the
+ * floor at y = 0. The one fixed reference the altitude program and the
+ * look-at's vertical pull ({@link nearestTowerPull}) are both measured
+ * against.
+ */
+const TOWER_ROOFLINE_Y = TOWER_HEIGHT
+
 /** The canyon-low altitude band (world Y), mostly below the Tower roofline. */
 export const CANYON_ALTITUDE_MIN = TOWER_HEIGHT * 0.15
 export const CANYON_ALTITUDE_MAX = TOWER_HEIGHT * 0.75
@@ -145,6 +154,36 @@ export const LOOKAT_TOWER_PULL_MAX = 0.6
 const LOOKAT_NEAR_CLEARANCE = TOWER_SPACING * 0.6
 const LOOKAT_FAR_CLEARANCE = TOWER_SPACING * 3
 const LOOKAT_BLEND_RATE = 0.8
+
+/**
+ * The vertical counterpart to {@link LOOKAT_NEAR_CLEARANCE}/{@link
+ * LOOKAT_FAR_CLEARANCE}: how far above the Tower roofline ({@link
+ * TOWER_ROOFLINE_Y}) the camera must climb before the look-at pull toward the
+ * nearest Tower engages/fully engages, *regardless* of horizontal distance.
+ * Overview passes fly directly above the cluster, where the horizontal test
+ * alone reads as "already framed" — this is what actually tilts an overview
+ * pass down to keep the skyline in frame instead of aiming into empty sky (see
+ * {@link nearestTowerPull}). `NEAR` sits at the bottom of the overview
+ * altitude band so the pull starts easing in the moment a waypoint lifts
+ * above canyon altitude; `FAR` sits below the top of the band so the pull is
+ * essentially maxed out for the highest overview passes.
+ */
+const LOOKAT_OVERVIEW_NEAR_CLEARANCE = TOWER_HEIGHT * 0.3
+const LOOKAT_OVERVIEW_FAR_CLEARANCE = TOWER_HEIGHT * 1.3
+
+/**
+ * A hard ceiling on the forward look-ahead point's own altitude (#91
+ * follow-up), applied unconditionally rather than blended: a steep climb
+ * toward an overview waypoint can point the spline tangent steeply upward,
+ * shooting the look-ahead point far above the camera *before* {@link
+ * LOOKAT_BLEND_RATE}'s eased pull has had time to catch up — the "aims at the
+ * void" bug via a different path than the suppressed-pull one {@link
+ * nearestTowerPull} fixes. Reacting instantly (rather than waiting on the
+ * ease) is what closes that gap; ordinary canyon flying's forward point sits
+ * comfortably below this ceiling, so it only ever engages during a climb-out
+ * or an overview pass, and never on canyon-altitude passes.
+ */
+const LOOKAT_FORWARD_ALTITUDE_CAP = TOWER_ROOFLINE_Y + TOWER_HEIGHT * 0.5
 
 /** Catmull-Rom tension for the sliding-window spline (three.js's 'catmullrom' type). */
 const CATMULL_ROM_TENSION = 0.5
@@ -426,7 +465,8 @@ interface GlanceState {
   angle: number
 }
 
-const NO_GLANCE: GlanceState = { active: false, elapsed: 0, durationSeconds: 0, angle: 0 }
+/** The idle glance — no excursion applied. Exported so tests can pass a "no glance" state into {@link demandDrivenLookAt} without hand-rolling the (otherwise-internal) {@link GlanceState} shape. */
+export const NO_GLANCE: GlanceState = { active: false, elapsed: 0, durationSeconds: 0, angle: 0 }
 
 /** Rolls whether a new segment starts a glance, threading the PRNG state. */
 function rollGlance(rngState: number): { glance: GlanceState; nextState: number } {
@@ -544,11 +584,24 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 /**
  * The blend weight (`[0, LOOKAT_TOWER_PULL_MAX]`) the look-at should currently
  * pull toward the nearest Tower, and that Tower's position — ADR-0010's
- * demand-driven blend: near-zero when a Tower is already close (inside a
- * canyon, flanking the frame) and ramping up as the nearest one gets farther
- * (an overview hop, a turn into open space, the cluster edge).
+ * demand-driven blend, engaged by *either* of two "Towers would otherwise
+ * leave frame" cases, combined with `max` (whichever more urgently needs the
+ * pull):
+ *
+ *  - **Horizontally far** from the nearest Tower (an overview hop's
+ *    horizontal travel, a turn into open space, the cluster edge) — the
+ *    original signal.
+ *  - **High above the Tower roofline**, regardless of horizontal distance.
+ *    Without this, a camera hovering directly over a Tower at overview
+ *    altitude reads as "already framed" by the horizontal test alone (it
+ *    *is* horizontally right on top of one), so the pull stayed ≈0 and the
+ *    level forward look-ahead floated into empty sky above the skyline — the
+ *    original "aims at the void" bug resurfacing at overview height. Ordinary
+ *    canyon flying stays untouched: canyon altitude never reaches the
+ *    roofline (`CANYON_ALTITUDE_MAX` < `TOWER_HEIGHT`), so this component is
+ *    always exactly 0 there.
  */
-function nearestTowerPull(
+export function nearestTowerPull(
   position: Vector3,
   placements: readonly TowerPlacement[],
 ): { point: Vector3; strength: number } {
@@ -566,9 +619,19 @@ function nearestTowerPull(
       nearest = placement
     }
   }
-  const distance = Math.sqrt(nearestDistanceSq)
-  const strength =
-    LOOKAT_TOWER_PULL_MAX * smoothstep(LOOKAT_NEAR_CLEARANCE, LOOKAT_FAR_CLEARANCE, distance)
+  const horizontalDistance = Math.sqrt(nearestDistanceSq)
+  const horizontalStrength = smoothstep(
+    LOOKAT_NEAR_CLEARANCE,
+    LOOKAT_FAR_CLEARANCE,
+    horizontalDistance,
+  )
+  const heightAboveRoofline = Math.max(0, position.y - TOWER_ROOFLINE_Y)
+  const verticalStrength = smoothstep(
+    LOOKAT_OVERVIEW_NEAR_CLEARANCE,
+    LOOKAT_OVERVIEW_FAR_CLEARANCE,
+    heightAboveRoofline,
+  )
+  const strength = LOOKAT_TOWER_PULL_MAX * Math.max(horizontalStrength, verticalStrength)
   return { point: new Vector3(...nearest.position), strength }
 }
 
@@ -582,12 +645,13 @@ function approach(current: number, target: number, maxDelta: number): number {
 
 /**
  * The demand-driven look-at target: forward down the canyon by default (the
- * spline tangent, {@link LOOKAT_LOOKAHEAD_DISTANCE} ahead), blended toward the
- * nearest Tower by `lookAtBlend` (already eased — see {@link stepDemoTour} —
- * so this function itself never snaps), then a seeded {@link applyGlance} on
- * top.
+ * spline tangent, {@link LOOKAT_LOOKAHEAD_DISTANCE} ahead, its altitude capped
+ * at {@link LOOKAT_FORWARD_ALTITUDE_CAP} so a steep climb can't shoot it into
+ * empty sky before the blend below catches up), blended toward the nearest
+ * Tower by `lookAtBlend` (already eased — see {@link stepDemoTour} — so this
+ * function itself never snaps), then a seeded {@link applyGlance} on top.
  */
-function demandDrivenLookAt(
+export function demandDrivenLookAt(
   position: Vector3,
   tangent: Vector3,
   lookAtBlend: number,
@@ -595,6 +659,7 @@ function demandDrivenLookAt(
   glance: GlanceState,
 ): Vector3 {
   const forward = position.clone().addScaledVector(tangent, LOOKAT_LOOKAHEAD_DISTANCE)
+  forward.y = Math.min(forward.y, LOOKAT_FORWARD_ALTITUDE_CAP)
   const pull = nearestTowerPull(position, placements)
   const blended = forward.lerp(pull.point, lookAtBlend)
   return applyGlance(position, blended, glance)

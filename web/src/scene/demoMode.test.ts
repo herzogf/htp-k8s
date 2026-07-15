@@ -1,10 +1,18 @@
+import { Vector3 } from 'three'
 import { describe, expect, it } from 'vitest'
 import {
   buildCanyonGraph,
+  CANYON_ALTITUDE_MAX,
   createDemoTour,
+  demandDrivenLookAt,
   DEMO_BANK_MAX,
   DEMO_TRANSITION_SECONDS,
   type DemoTourState,
+  LOOKAT_TOWER_PULL_MAX,
+  nearestTowerPull,
+  NO_GLANCE,
+  OVERVIEW_ALTITUDE_MAX,
+  OVERVIEW_ALTITUDE_MIN,
   PERIMETER_OFFSET,
   sampleDemoIntro,
   sampleDemoTourPose,
@@ -13,7 +21,7 @@ import {
   type RollRecovery,
 } from './demoMode'
 import { type Pose } from './focus'
-import { TOWER_SPACING, towerPlacements, type TowerPlacement } from './towerLayout'
+import { TOWER_HEIGHT, TOWER_SPACING, towerPlacements, type TowerPlacement } from './towerLayout'
 import { type Tower } from '../generated/scenestate'
 import { makeTower } from '../test-support/sceneFixtures'
 
@@ -256,6 +264,134 @@ describe('the seeded Canyon tour', () => {
     if (tour.kind === 'canyon') {
       expect(tour.graph).toEqual(buildCanyonGraph(after))
     }
+  })
+})
+
+// Regression coverage for the "aims at the void" bug resurfacing at overview
+// altitude: nearestTowerPull originally judged "are Towers already framed?"
+// on horizontal distance alone, which reads a camera hovering directly above
+// a Tower as framed — so the pull stayed ~0 and a level forward look-ahead
+// floated into empty sky above the roofline. The fix adds a vertical
+// (height-above-roofline) signal that engages regardless of horizontal
+// distance, while leaving canyon-altitude flying (always below the roofline)
+// untouched.
+describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () => {
+  const placements = grid(3, 3)
+  const centerTower = placements[4] // the middle Tower of the 3x3 grid
+
+  describe('nearestTowerPull', () => {
+    it('stays ~0 for a canyon-altitude camera flanked by Towers (unchanged canyon behaviour)', () => {
+      // A point mid-canyon, aligned with a Tower row so it's genuinely flanked
+      // by the two nearest Towers (not a lattice corner, equidistant from four
+      // Towers diagonally — a different, farther-clearance case).
+      const graph = buildCanyonGraph(placements)!
+      const canyonPosition = new Vector3(graph.xs[1], CANYON_ALTITUDE_MAX, centerTower.position[2])
+
+      expect(nearestTowerPull(canyonPosition, placements).strength).toBeCloseTo(0, 5)
+    })
+
+    it('engages even when horizontally right above a Tower, once high above the roofline', () => {
+      const overviewPosition = new Vector3(
+        centerTower.position[0],
+        OVERVIEW_ALTITUDE_MAX,
+        centerTower.position[2],
+      )
+
+      const pull = nearestTowerPull(overviewPosition, placements)
+
+      // Horizontal distance here is ~0 — the pre-fix, horizontal-only test
+      // would have read this as "already framed" and suppressed the pull
+      // entirely (the bug). It must not.
+      expect(pull.strength).toBeGreaterThan(LOOKAT_TOWER_PULL_MAX * 0.5)
+    })
+
+    it('ramps smoothly with altitude above the roofline (no snap — the motion-sickness guardrail)', () => {
+      const altitudes = [
+        TOWER_HEIGHT * 0.9, // still below the roofline (canyon-band top)
+        TOWER_HEIGHT * 1.1,
+        TOWER_HEIGHT * 1.6,
+        OVERVIEW_ALTITUDE_MAX,
+      ]
+      const strengths = altitudes.map(
+        (y) =>
+          nearestTowerPull(
+            new Vector3(centerTower.position[0], y, centerTower.position[2]),
+            placements,
+          ).strength,
+      )
+
+      // Monotonically non-decreasing with altitude — a smoothstep ramp, not a
+      // step function.
+      for (let i = 1; i < strengths.length; i++) {
+        expect(strengths[i]).toBeGreaterThanOrEqual(strengths[i - 1] - 1e-9)
+      }
+      expect(strengths[0]).toBeCloseTo(0, 5)
+      expect(strengths[strengths.length - 1]).toBeGreaterThan(0)
+    })
+  })
+
+  describe('demandDrivenLookAt', () => {
+    it('tilts the look-at down toward the Towers during an overview pass, instead of aiming into empty sky', () => {
+      const position = new Vector3(
+        centerTower.position[0],
+        OVERVIEW_ALTITUDE_MAX,
+        centerTower.position[2],
+      )
+      const tangent = new Vector3(1, 0, 0) // level forward travel
+      const pull = nearestTowerPull(position, placements)
+
+      const target = demandDrivenLookAt(position, tangent, pull.strength, placements, NO_GLANCE)
+
+      // A level forward look-ahead alone (the pre-fix behaviour) sits at the
+      // camera's own altitude. The fix must pull the target's Y meaningfully
+      // below the camera's — tilting the aim down toward the skyline.
+      expect(target.y).toBeLessThan(position.y - TOWER_HEIGHT * 0.3)
+      // And it should land near the cluster horizontally, not drift into the void.
+      const horizontalDistance = Math.hypot(
+        target.x - centerTower.position[0],
+        target.z - centerTower.position[2],
+      )
+      expect(horizontalDistance).toBeLessThan(TOWER_SPACING * 4)
+    })
+
+    it('leaves the look-at level inside a canyon (unchanged canyon behaviour)', () => {
+      const graph = buildCanyonGraph(placements)!
+      const position = new Vector3(graph.xs[1], CANYON_ALTITUDE_MAX, centerTower.position[2])
+      const tangent = new Vector3(0, 0, 1)
+      const pull = nearestTowerPull(position, placements)
+
+      const target = demandDrivenLookAt(position, tangent, pull.strength, placements, NO_GLANCE)
+
+      expect(target.y).toBeCloseTo(position.y, 5)
+    })
+  })
+
+  it('integration: over a long tour, deep-overview samples keep looking toward the Towers, not into the void', () => {
+    // The pull ramps in smoothly with altitude above the roofline (the
+    // motion-sickness guardrail — no snap right at the roofline), so this
+    // only asserts the strong "clearly tilted down" outcome once a sample is
+    // well into the overview band, not at its very edge where a mild tilt is
+    // the intended, correct behaviour.
+    const deepOverviewY = (OVERVIEW_ALTITUDE_MIN + OVERVIEW_ALTITUDE_MAX) / 2
+    let tour: DemoTourState = createDemoTour({ seed: 99, placements, entry: ORIGIN_POSE })
+    let sawDeepOverview = false
+
+    for (let i = 0; i < 600; i++) {
+      tour = stepDemoTour(tour, 0.15, placements)
+      const pose = sampleDemoTourPose(tour, placements)
+      const [, positionY] = pose.position
+      if (positionY > deepOverviewY) {
+        sawDeepOverview = true
+        const [, targetY] = pose.target
+        expect(targetY).toBeLessThan(positionY - 1)
+      }
+    }
+
+    // A seed run this long should hit at least one overview waypoint deep
+    // enough into the band (OVERVIEW_PROBABILITY=0.15 per waypoint, and
+    // altitude is jittered across the whole band) — otherwise this test isn't
+    // actually exercising the regression.
+    expect(sawDeepOverview).toBe(true)
   })
 })
 
