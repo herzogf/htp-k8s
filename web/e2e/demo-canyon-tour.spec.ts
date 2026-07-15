@@ -245,9 +245,11 @@ test('demo mode canyon tour: a long flight through a multi-Tower cluster, captur
   // demo.spec.ts uses for the pre-existing banking mechanic.
   expect(Math.max(...rolls)).toBeGreaterThan(0.02)
 
-  // Canyon-low and overview-high passes are near-certain within
-  // FLIGHT_DURATION_MS (many spline segments fly by; OVERVIEW_PROBABILITY
-  // alone makes missing an overview waypoint entirely vanishingly unlikely) —
+  // Canyon-low and overview-high passes are guaranteed within
+  // FLIGHT_DURATION_MS: overview passes are *paced episodes* (#91's
+  // climb-choreography pass — one begins within every
+  // OVERVIEW_GAP_WAYPOINTS_MAX-waypoint stretch and is sustained long enough
+  // for the shallow glide-slope climb to genuinely reach the overview band) —
   // assert them. The perimeter pass depends on where the seeded random walk
   // wanders and isn't guaranteed within any bounded window, so it's captured
   // best-effort (see the console note below) rather than hard-asserted, to

@@ -102,13 +102,39 @@ export const OVERVIEW_ALTITUDE_MIN = TOWER_HEIGHT * 1.1
 export const OVERVIEW_ALTITUDE_MAX = TOWER_HEIGHT * 1.6
 
 /**
- * OVERVIEW_PROBABILITY is the chance each newly drawn waypoint is assigned an
- * overview (rather than canyon-low) altitude. Altitude is a per-waypoint draw
- * fully decoupled from the horizontal walk (ADR-0010's "overview is delivered
- * by altitude, not horizontal distance") — this is the canyon-vs-overview
- * ratio the design calls out for tuning.
+ * Overview passes are *episodes*, not per-waypoint coin flips (#91 feel pass).
+ *
+ * The original design drew every waypoint's altitude independently
+ * (`OVERVIEW_PROBABILITY = 0.15` per waypoint), so an overview target usually
+ * lived on a *single* waypoint: all of the climb had to happen within the one
+ * short segment leading to it, and the moment that segment ended the target
+ * reset — a quick vertical pop-up, never the long, sweeping climb-out of a
+ * small plane. The maintainer's diagnosis (and the fix here): the low canyon
+ * waypoint and the high overview waypoint were too close together
+ * horizontally, so all the altitude was gained over a short run.
+ *
+ * Now the altitude program commits to an overview *intent* that persists
+ * across {@link OVERVIEW_EPISODE_WAYPOINTS} consecutive waypoints: one apex
+ * altitude is drawn for the whole episode, every waypoint in it carries that
+ * apex, and the glide-slope pursuit ({@link MAX_CLIMB_GRADIENT}) therefore
+ * has several segments' worth of horizontal run to climb over — a gradual
+ * ascent, a genuine rooftop cruise once the apex is reached, then (when the
+ * episode ends and waypoints return to canyon draws) an equally gradual
+ * descent back into the canyons.
+ *
+ * Episodes are *paced*, not Bernoulli-rolled: after each episode (and at tour
+ * start) the program draws a canyon-flying gap of
+ * {@link OVERVIEW_GAP_WAYPOINTS_MIN}..{@link OVERVIEW_GAP_WAYPOINTS_MAX}
+ * waypoints before the next one begins. That keeps the "every so often it
+ * rises to peek over the rooftops" rhythm — episodes can never chain
+ * back-to-back into a yo-yo, and one is *guaranteed* within a bounded stretch
+ * of flight (which the e2e capture window and the overview-reached unit
+ * invariant both rely on, where a per-waypoint probability only made it
+ * likely).
  */
-export const OVERVIEW_PROBABILITY = 0.15
+export const OVERVIEW_EPISODE_WAYPOINTS = 6
+export const OVERVIEW_GAP_WAYPOINTS_MIN = 12
+export const OVERVIEW_GAP_WAYPOINTS_MAX = 24
 
 /** CANYON_TRAVEL_SPEED is the flight's speed along the spline, world units/second. */
 export const CANYON_TRAVEL_SPEED = TOWER_SPACING * 1.1
@@ -138,21 +164,37 @@ export const CANYON_TRAVEL_SPEED = TOWER_SPACING * 1.1
  * is correct: there's nothing to compute a glide angle against.
  *
  * Two adjacent waypoints can land in very different altitude bands (a
- * canyon-low hop followed by an overview draw) regardless of how far apart
- * they are horizontally or how the horizontal path between them bends — this
- * is what keeps that transition from ever reading as "the plane turns
- * straight up". `0.65` ⇒ roughly a 33° climb angle: clearly, readably gentler
- * than a straight-up "elevator" ascent, while still comfortably reaching the
- * overview band's altitude within a normal viewing session — a shallower
- * gradient reads even gentler but, chained with the walk's independent
- * per-waypoint altitude draws, can spend most of a tour never actually
- * catching up to a genuine overview pass before the target changes again.
+ * canyon-low hop followed by an overview episode's apex) regardless of how
+ * far apart they are horizontally or how the horizontal path between them
+ * bends — this is what keeps that transition from ever reading as "the plane
+ * turns straight up". `0.42` ⇒ roughly a 23° climb angle — the gentle,
+ * gradual climb-out of a small plane. An earlier attempt at a slope this
+ * shallow failed only because the overview target reset every waypoint before
+ * the climb could catch up to it; now that an overview intent persists for a
+ * whole {@link OVERVIEW_EPISODE_WAYPOINTS}-waypoint episode, the pursuit has
+ * several segments of horizontal run to complete the climb, so the shallow
+ * angle actually reaches the rooftops instead of being forever cut short.
  * Tune this (not the spline or the altitude bands) to make climbs feel
- * shallower or brisker. The demand-driven look-at (the aim, as opposed to the
- * camera's own position) is intentionally untouched by this — see {@link
- * LOOKAT_FORWARD_ALTITUDE_CAP}'s doc comment.
+ * shallower or brisker.
  */
-export const MAX_CLIMB_GRADIENT = 0.65
+export const MAX_CLIMB_GRADIENT = 0.42
+
+/**
+ * The level-off ease at the top (and bottom) of a climb/descent (#91 feel
+ * pass): within {@link CLIMB_LEVELOFF_DISTANCE} world units of the target
+ * altitude, the allowed glide slope tapers linearly with the remaining
+ * altitude difference (floored at {@link CLIMB_LEVELOFF_MIN_FACTOR} of
+ * {@link MAX_CLIMB_GRADIENT} so the pursuit still *reaches* the target
+ * exactly rather than approaching it asymptotically forever). Without this,
+ * the vertical profile has a hard corner where a 23° climb snaps to level in
+ * a single frame — a real plane eases off the climb as it reaches its
+ * ceiling, and that gentle level-off is a large part of what makes an ascent
+ * read as flown rather than driven. The taper only ever *reduces* the
+ * per-frame altitude change, so the {@link MAX_CLIMB_GRADIENT} per-frame
+ * invariant is untouched.
+ */
+export const CLIMB_LEVELOFF_DISTANCE = TOWER_HEIGHT * 0.2
+export const CLIMB_LEVELOFF_MIN_FACTOR = 0.35
 
 /**
  * MIN_SEGMENT_SECONDS floors how short a spline segment's travel time can be,
@@ -211,27 +253,66 @@ const LOOKAT_FAR_CLEARANCE = TOWER_SPACING * 3
 const LOOKAT_BLEND_RATE = 0.8
 
 /**
- * A cheap, unconditional backstop (#91 follow-up) on the forward look-ahead
- * point's own altitude, applied *before* the deficiency-driven pull below
- * ({@link nearestTowerPull}) ever sees it: a steep climb toward an overview
- * waypoint can point the spline tangent steeply upward, shooting the raw
- * forward point far above the camera. Capping its Y keeps the deficiency
- * measurement itself in a sane range (rather than relying on the blend to claw
- * back an extreme point) — a cheap, always-on clamp, not the primary
- * mechanism. Ordinary canyon flying's forward point sits comfortably below
- * this ceiling, so it only ever engages during a climb-out or an overview
- * pass, and never on canyon-altitude passes.
- *
- * Deliberately left unchanged by the #91 climb-rate tuning pass — the
- * demand-driven look-at (this constant included) was judged good as-is; only
- * the camera's own altitude *motion* (see {@link MAX_CLIMB_GRADIENT}) and the
- * overview altitude band changed. `position` passed into {@link
- * forwardLookAheadPoint} is still the camera's actual (now glide-slope-
- * limited) altitude, so this absolute ceiling engages less often with the
- * lowered band — expected, not a regression: a gentler, lower climb needs
- * less correction from this backstop to begin with.
+ * How fast (world units/second) the demand-driven pull's *anchor point* — the
+ * nearest Tower's roofline point the blend aims toward — is allowed to move
+ * (#91 feel pass). The geometric nearest Tower switches identity
+ * *discontinuously* as the forward point sweeps across a Voronoi boundary
+ * between two Towers; with any nonzero blend weight that used to snap the aim
+ * sideways by several degrees in a single frame (instrumented at up to
+ * ~2260°/s of aim pitch on the pre-fix code) even though the blend *weight*
+ * itself was eased. Easing the point through those switches at a bounded rate
+ * pans the aim smoothly from one Tower to the next — the motion-sickness
+ * guardrail applied to the last remaining un-eased input of the look-at
+ * pipeline. Twice the travel speed: fast enough to track the flight, slow
+ * enough that a neighbouring-Tower handover reads as a deliberate pan
+ * (~half a second), not a flick.
  */
-const LOOKAT_FORWARD_ALTITUDE_CAP = TOWER_ROOFLINE_Y + TOWER_HEIGHT * 0.5
+const LOOKAT_PULL_POINT_EASE_RATE = CANYON_TRAVEL_SPEED * 2
+
+/**
+ * The aim's minimum horizontal reach (#91 feel pass): after the demand-driven
+ * blend, the final look-at target is pushed back out along its own horizontal
+ * direction from the camera if it has collapsed closer than this to the
+ * camera's vertical axis. Flying over/past a Tower at overview altitude
+ * (typically a perimeter pass), the pull anchor can slide almost directly
+ * underfoot or just behind — dragging the blended aim point in beside the
+ * camera, which both plunged the view to ~55° below the horizon and, with the
+ * aim point so close to the camera's own axis, made its angular motion
+ * hypersensitive (instrumented at hundreds of °/s of aim pitch). Re-projecting
+ * the collapsed point back out to at least this horizontal reach preserves
+ * the aim *direction* — the same Tower stays in frame, and the void-clearance
+ * invariant keeps holding because the point stays near the Tower it frames —
+ * while capping the down-stare at a gentle "ahead and down into the canyon"
+ * pitch and restoring the slow, eased sweep the motion-sickness guardrail
+ * requires. Ordinary aims sit a full {@link LOOKAT_LOOKAHEAD_DISTANCE} out
+ * (farther than this), so the clamp only engages in exactly the near-overhead
+ * collapse it exists for.
+ */
+const LOOKAT_MIN_HORIZONTAL_DISTANCE = TOWER_SPACING
+
+/**
+ * The forward aim's altitude window (#91 feel pass, replacing the old
+ * `LOOKAT_FORWARD_ALTITUDE_CAP = 1.5 × TOWER_HEIGHT`): the camera is the
+ * pilot's eye, and even while climbing it should look *ahead and down* into
+ * the canyon and at the Towers — never crane up to stare into the empty black
+ * sky. The old cap sat half a Tower *above* the roofline, so a climb-out
+ * could legally aim at open sky for a second or more (~32% of climb-out
+ * frames read as dark in the maintainer's review — a Tower technically near
+ * the aim point, but only a sliver at frame edge).
+ *
+ * {@link LOOKAT_AIM_CEILING} pins the aim's highest possible altitude just
+ * *below* the roofline, so the frame is always filled by Tower bodies or
+ * rooftops: while the camera is below it (ordinary canyon flying) the aim is
+ * level and unaffected; as the camera climbs past it, the aim stays put and
+ * the view pitches gradually, smoothly downward — which is also what makes a
+ * climb stop reading as "turning up" at all. {@link LOOKAT_AIM_FLOOR} is the
+ * symmetric guard for dives: never aim below the canyon floor. Both bounds
+ * are applied to the raw forward point *before* {@link nearestTowerPull}
+ * measures its Tower deficiency, so the demand-driven blend only ever refines
+ * an already-sane aim.
+ */
+export const LOOKAT_AIM_CEILING = TOWER_HEIGHT * 0.9
+export const LOOKAT_AIM_FLOOR = TOWER_HEIGHT * 0.1
 
 /** Catmull-Rom tension for the sliding-window spline (three.js's 'catmullrom' type). */
 const CATMULL_ROM_TENSION = 0.5
@@ -456,21 +537,91 @@ function nearestIndex(values: readonly number[], target: number): number {
   return best
 }
 
-/** Draws a per-waypoint altitude + overview flag (ADR-0010: decoupled from the horizontal walk). */
-function drawAltitude(rngState: number): {
+/**
+ * The altitude program's persistent intent (#91 feel pass — see {@link
+ * OVERVIEW_EPISODE_WAYPOINTS}'s doc comment for the why): plain serializable
+ * state threaded through {@link DemoTourState} like every other piece of the
+ * walk. In `'canyon'` mode, `waypointsLeft` counts down the paced gap until
+ * the next overview episode begins; in `'overview'` mode it counts down the
+ * remaining waypoints that sustain `apexAltitude`.
+ */
+interface AltitudeProgram {
+  mode: 'canyon' | 'overview'
+  /** Waypoints remaining in the current mode, *after* the most recent draw. */
+  waypointsLeft: number
+  /** The sustained overview apex altitude (world Y); meaningful only in `'overview'` mode. */
+  apexAltitude: number
+}
+
+/** Draws the canyon-flying gap (in waypoints) before the next overview episode, threading the PRNG state. */
+function drawOverviewGap(rngState: number): { gap: number; nextState: number } {
+  const roll = mulberry32Step(rngState)
+  const span = OVERVIEW_GAP_WAYPOINTS_MAX - OVERVIEW_GAP_WAYPOINTS_MIN + 1
+  return {
+    gap: OVERVIEW_GAP_WAYPOINTS_MIN + Math.min(span - 1, Math.floor(roll.value * span)),
+    nextState: roll.nextState,
+  }
+}
+
+/** A fresh program at tour start: a full canyon gap first, so every tour opens with canyon threading. */
+function initialAltitudeProgram(rngState: number): { program: AltitudeProgram; nextState: number } {
+  const { gap, nextState } = drawOverviewGap(rngState)
+  return { program: { mode: 'canyon', waypointsLeft: gap, apexAltitude: 0 }, nextState }
+}
+
+/**
+ * Draws a per-waypoint altitude by advancing the {@link AltitudeProgram} one
+ * waypoint: a canyon-band jitter while the gap runs down, then one apex drawn
+ * for the *whole* overview episode and sustained across all of its waypoints
+ * (never re-rolled mid-episode — the "overview intent" that gives the
+ * glide-slope pursuit a long horizontal run to climb over), then back to
+ * canyon draws with a freshly drawn gap.
+ */
+function drawAltitude(
+  rngState: number,
+  program: AltitudeProgram,
+): {
   altitude: number
   isOverview: boolean
+  program: AltitudeProgram
   nextState: number
 } {
-  const overviewRoll = mulberry32Step(rngState)
-  const isOverview = overviewRoll.value < OVERVIEW_PROBABILITY
-  const jitterRoll = mulberry32Step(overviewRoll.nextState)
-  const [min, max] = isOverview
-    ? [OVERVIEW_ALTITUDE_MIN, OVERVIEW_ALTITUDE_MAX]
-    : [CANYON_ALTITUDE_MIN, CANYON_ALTITUDE_MAX]
+  if (program.mode === 'overview') {
+    const waypointsLeft = program.waypointsLeft - 1
+    if (waypointsLeft > 0) {
+      return {
+        altitude: program.apexAltitude,
+        isOverview: true,
+        program: { ...program, waypointsLeft },
+        nextState: rngState,
+      }
+    }
+    // Episode complete: this is its final apex waypoint; pace out the next one.
+    const { gap, nextState } = drawOverviewGap(rngState)
+    return {
+      altitude: program.apexAltitude,
+      isOverview: true,
+      program: { mode: 'canyon', waypointsLeft: gap, apexAltitude: 0 },
+      nextState,
+    }
+  }
+  if (program.waypointsLeft <= 0) {
+    // Gap exhausted: this waypoint begins a new overview episode.
+    const apexRoll = mulberry32Step(rngState)
+    const apexAltitude =
+      OVERVIEW_ALTITUDE_MIN + apexRoll.value * (OVERVIEW_ALTITUDE_MAX - OVERVIEW_ALTITUDE_MIN)
+    return {
+      altitude: apexAltitude,
+      isOverview: true,
+      program: { mode: 'overview', waypointsLeft: OVERVIEW_EPISODE_WAYPOINTS - 1, apexAltitude },
+      nextState: apexRoll.nextState,
+    }
+  }
+  const jitterRoll = mulberry32Step(rngState)
   return {
-    altitude: min + jitterRoll.value * (max - min),
-    isOverview,
+    altitude: CANYON_ALTITUDE_MIN + jitterRoll.value * (CANYON_ALTITUDE_MAX - CANYON_ALTITUDE_MIN),
+    isOverview: false,
+    program: { mode: 'canyon', waypointsLeft: program.waypointsLeft - 1, apexAltitude: 0 },
     nextState: jitterRoll.nextState,
   }
 }
@@ -482,20 +633,22 @@ interface DrawnWaypoint {
   isOverview: boolean
 }
 
-/** Draws the next waypoint from `coord`/`prevMove`: a lattice move plus an independent altitude draw. */
+/** Draws the next waypoint from `coord`/`prevMove`: a lattice move plus the altitude program's next step. */
 function drawNextWaypoint(
   graph: CanyonGraph,
   coord: LatticeCoord,
   prevMove: LatticeMove | null,
+  program: AltitudeProgram,
   rngState: number,
-): { waypoint: DrawnWaypoint; move: LatticeMove; nextState: number } {
+): { waypoint: DrawnWaypoint; move: LatticeMove; program: AltitudeProgram; nextState: number } {
   const picked = pickNextMove(graph, coord, prevMove, rngState)
   const nextCoord: LatticeCoord = { i: coord.i + picked.move.di, j: coord.j + picked.move.dj }
-  const altitude = drawAltitude(picked.nextState)
+  const altitude = drawAltitude(picked.nextState, program)
   const position = new Vector3(graph.xs[nextCoord.i], altitude.altitude, graph.zs[nextCoord.j])
   return {
     waypoint: { coord: nextCoord, position, isOverview: altitude.isOverview },
     move: picked.move,
+    program: altitude.program,
     nextState: altitude.nextState,
   }
 }
@@ -705,42 +858,108 @@ function approach(current: number, target: number, maxDelta: number): number {
   return current + Math.sign(diff) * maxDelta
 }
 
+/** {@link approach} in 3D: moves `current` straight toward `target`, at most `maxDelta` world units. */
+function approachPoint(
+  current: readonly [number, number, number],
+  target: Vector3,
+  maxDelta: number,
+): [number, number, number] {
+  const from = new Vector3(...current)
+  const distance = from.distanceTo(target)
+  if (distance <= maxDelta) {
+    return target.toArray() as [number, number, number]
+  }
+  return from.addScaledVector(target.clone().sub(from).normalize(), maxDelta).toArray() as [
+    number,
+    number,
+    number,
+  ]
+}
+
 /**
- * The raw forward look-at point: the spline tangent, {@link
- * LOOKAT_LOOKAHEAD_DISTANCE} ahead of `position`, with its altitude capped at
- * {@link LOOKAT_FORWARD_ALTITUDE_CAP} (a cheap backstop — see that constant's
- * doc comment) before {@link nearestTowerPull} ever measures its Tower
- * deficiency. Shared by {@link demandDrivenLookAt} and {@link stepDemoTour}
- * (which needs the same point to know what deficiency to ease the blend
- * toward) so the two can never disagree about what "forward" means.
+ * The raw forward look-at point (#91 feel pass — the pilot's eye): projected
+ * a full {@link LOOKAT_LOOKAHEAD_DISTANCE} ahead along the tangent's
+ * *horizontal* direction (never foreshortened by a steep spline section, so
+ * the aim always reaches well down the canyon), at an altitude that follows
+ * the *flyable* pitch, not the raw spline's:
+ *
+ * - The vertical component follows the tangent's gradient clamped to
+ *   ±{@link MAX_CLIMB_GRADIENT} — the pitch the camera's own glide-slope-
+ *   limited motion can actually fly. The raw spline slope between a canyon
+ *   waypoint and an episode apex can exceed 2.0 (~64°); aiming along *that*
+ *   is exactly the old "crane up into black sky on a climb-out / stare at the
+ *   floor on a dive" bug. Aiming along the real flight path instead keeps the
+ *   view on where the plane is genuinely going.
+ * - The result is then clamped into [{@link LOOKAT_AIM_FLOOR},
+ *   {@link LOOKAT_AIM_CEILING}] — into the canyon, onto the Towers, never
+ *   above the roofline (see those constants' doc comment).
+ *
+ * Both stages are continuous in the camera's position and tangent, so the aim
+ * pitches gradually with the (already eased) climb — no snap, the
+ * motion-sickness guardrail. Shared by {@link demandDrivenLookAt} and
+ * {@link stepDemoTour} (which needs the same point to know what deficiency to
+ * ease the blend toward) so the two can never disagree about what "forward"
+ * means.
  */
 function forwardLookAheadPoint(position: Vector3, tangent: Vector3): Vector3 {
-  const forward = position.clone().addScaledVector(tangent, LOOKAT_LOOKAHEAD_DISTANCE)
-  forward.y = Math.min(forward.y, LOOKAT_FORWARD_ALTITUDE_CAP)
-  return forward
+  const horizontalLength = Math.hypot(tangent.x, tangent.z)
+  if (horizontalLength < 1e-9) {
+    // Degenerate (never produced by the walk: adjacent waypoints always
+    // differ horizontally) — fall back to the raw tangent rather than a
+    // zero-length look direction.
+    const fallback = position.clone().addScaledVector(tangent, LOOKAT_LOOKAHEAD_DISTANCE)
+    fallback.y = clamp(fallback.y, LOOKAT_AIM_FLOOR, LOOKAT_AIM_CEILING)
+    return fallback
+  }
+  const flyableGradient = clamp(
+    tangent.y / horizontalLength,
+    -MAX_CLIMB_GRADIENT,
+    MAX_CLIMB_GRADIENT,
+  )
+  return new Vector3(
+    position.x + (tangent.x / horizontalLength) * LOOKAT_LOOKAHEAD_DISTANCE,
+    clamp(
+      position.y + flyableGradient * LOOKAT_LOOKAHEAD_DISTANCE,
+      LOOKAT_AIM_FLOOR,
+      LOOKAT_AIM_CEILING,
+    ),
+    position.z + (tangent.z / horizontalLength) * LOOKAT_LOOKAHEAD_DISTANCE,
+  )
 }
 
 /**
  * The demand-driven look-at target: the forward look-ahead point ({@link
- * forwardLookAheadPoint}), blended toward the nearest Tower's roofline by
- * `lookAtBlend` (already eased — see {@link stepDemoTour} — so this function
- * itself never snaps), then a seeded {@link applyGlance} on top. `lookAtBlend`
- * is threaded in rather than recomputed here so the *rate* of change stays
- * governed by {@link stepDemoTour}'s per-frame ease; the *direction* it blends
- * toward (`pull.point`) is still read fresh off the current forward point on
- * every call, so a moving forward point drags the target smoothly along with
- * it even while the blend weight itself is mid-ease.
+ * forwardLookAheadPoint}), blended toward `pullPoint` by `lookAtBlend`, then
+ * a seeded {@link applyGlance} on top. Both blend inputs are threaded in
+ * *already eased* — see {@link stepDemoTour} — so this function itself never
+ * snaps: `lookAtBlend`'s rate of change is capped at {@link
+ * LOOKAT_BLEND_RATE}/s, and `pullPoint` (the roofline anchor the blend aims
+ * toward) is rate-limited at {@link LOOKAT_PULL_POINT_EASE_RATE} through
+ * nearest-Tower switches rather than read raw off {@link nearestTowerPull}
+ * (whose point jumps discontinuously at Voronoi boundaries between Towers).
+ * The forward point itself is still read fresh off the current position/
+ * tangent on every call, so the target tracks the flight 1:1 while the two
+ * blend inputs ease.
  */
 export function demandDrivenLookAt(
   position: Vector3,
   tangent: Vector3,
   lookAtBlend: number,
-  placements: readonly TowerPlacement[],
+  pullPoint: Vector3,
   glance: GlanceState,
 ): Vector3 {
   const forward = forwardLookAheadPoint(position, tangent)
-  const pull = nearestTowerPull(forward, placements)
-  const blended = forward.lerp(pull.point, lookAtBlend)
+  const blended = forward.lerp(pullPoint, lookAtBlend)
+  // Never let the blend collapse the aim in toward the camera's own vertical
+  // axis (the near-overhead down-stare) — see LOOKAT_MIN_HORIZONTAL_DISTANCE.
+  const dx = blended.x - position.x
+  const dz = blended.z - position.z
+  const horizontal = Math.hypot(dx, dz)
+  if (horizontal > 1e-9 && horizontal < LOOKAT_MIN_HORIZONTAL_DISTANCE) {
+    const scale = LOOKAT_MIN_HORIZONTAL_DISTANCE / horizontal
+    blended.x = position.x + dx * scale
+    blended.z = position.z + dz * scale
+  }
   return applyGlance(position, blended, glance)
 }
 
@@ -782,8 +1001,16 @@ interface CanyonTourState {
    * horizontal position and weave.
    */
   altitude: number
+  /** The paced canyon/overview altitude intent the next waypoint draw advances — see {@link AltitudeProgram}. */
+  altitudeProgram: AltitudeProgram
   /** The look-at's current Tower-pull weight, eased toward the geometric target at {@link LOOKAT_BLEND_RATE}/s. */
   lookAtBlend: number
+  /**
+   * The pull's current roofline anchor point, eased toward the geometric
+   * nearest-Tower point at {@link LOOKAT_PULL_POINT_EASE_RATE} so a
+   * nearest-Tower switch pans the aim instead of snapping it.
+   */
+  lookAtPullPoint: [number, number, number]
   glance: GlanceState
 }
 
@@ -843,7 +1070,12 @@ export function createDemoTour(params: {
 
   let rngState = params.seed | 0
   const entryCoord = nearestLatticeCoord(graph, params.entry.position[0], params.entry.position[2])
-  const entryAltitude = drawAltitude(rngState)
+  // The paced altitude program starts with a full canyon gap, so every tour
+  // opens threading the canyons and the first climb-out arrives "every so
+  // often" later, never in the activation transition itself.
+  const initialProgram = initialAltitudeProgram(rngState)
+  rngState = initialProgram.nextState
+  const entryAltitude = drawAltitude(rngState, initialProgram.program)
   rngState = entryAltitude.nextState
   const entryPosition = new Vector3(
     graph.xs[entryCoord.i],
@@ -851,8 +1083,14 @@ export function createDemoTour(params: {
     graph.zs[entryCoord.j],
   )
 
-  const step1 = drawNextWaypoint(graph, entryCoord, null, rngState)
-  const step2 = drawNextWaypoint(graph, step1.waypoint.coord, step1.move, step1.nextState)
+  const step1 = drawNextWaypoint(graph, entryCoord, null, entryAltitude.program, rngState)
+  const step2 = drawNextWaypoint(
+    graph,
+    step1.waypoint.coord,
+    step1.move,
+    step1.program,
+    step1.nextState,
+  )
 
   const p1 = entryPosition
   const p2 = step1.waypoint.position
@@ -863,6 +1101,15 @@ export function createDemoTour(params: {
   const p0 = p1.clone().multiplyScalar(2).sub(p2)
 
   const glanceRoll = rollGlance(step2.nextState)
+
+  // Seed the eased pull anchor at its geometric target for the entry pose, so
+  // there's nothing to pan from on the very first frame (the blend weight
+  // starts at 0 anyway, so this only fixes the ease's starting point).
+  const entrySample = sampleSpline([p0, p1, p2, p3], 0)
+  const entryPull = nearestTowerPull(
+    forwardLookAheadPoint(entrySample.position, entrySample.tangent),
+    params.placements,
+  )
 
   return {
     kind: 'canyon',
@@ -877,7 +1124,9 @@ export function createDemoTour(params: {
     // no lag/jump the instant the tour begins; the glide-slope pursuit only
     // ever engages from here on, chasing each *next* segment's target.
     altitude: p1.y,
+    altitudeProgram: step2.program,
     lookAtBlend: 0,
+    lookAtPullPoint: entryPull.point.toArray() as [number, number, number],
     glance: glanceRoll.glance,
   }
 }
@@ -934,25 +1183,41 @@ export function stepDemoTour(
   // This is what turns a big waypoint-to-waypoint altitude jump into a
   // gradual, shallow climb/descent that can span several segments rather
   // than snapping to the waypoint's altitude within the one segment that
-  // happens to lead to it.
+  // happens to lead to it. Near the target altitude the slope additionally
+  // tapers off ({@link CLIMB_LEVELOFF_DISTANCE}) so the climb *levels off*
+  // like a real plane easing onto its ceiling instead of snapping from a 23°
+  // slope to flat in one frame; the taper only ever reduces the per-frame
+  // change, so the gradient invariant is untouched.
   const horizontalDelta = Math.hypot(
     currentPosition.x - previousPosition.x,
     currentPosition.z - previousPosition.z,
   )
-  const altitude = approach(state.altitude, state.window[2].y, MAX_CLIMB_GRADIENT * horizontalDelta)
+  const altitudeRemaining = Math.abs(state.window[2].y - state.altitude)
+  const levelOff = clamp(altitudeRemaining / CLIMB_LEVELOFF_DISTANCE, CLIMB_LEVELOFF_MIN_FACTOR, 1)
+  const altitude = approach(
+    state.altitude,
+    state.window[2].y,
+    MAX_CLIMB_GRADIENT * horizontalDelta * levelOff,
+  )
   const actualPosition = new Vector3(currentPosition.x, altitude, currentPosition.z)
   // The blend must ease toward the deficiency of the *forward look-ahead
   // point* (what the camera is about to aim at), not the camera's own
   // position — the root cause of the climb/dive "aims at the void" bug (#91
   // follow-up 2): the aim can shoot past nearby Towers well before the
   // camera's own altitude/position would suggest anything's amiss. Built off
-  // `actualPosition` (not the raw spline position) purely so the look-at
-  // pipeline — otherwise unchanged by this tuning pass — is anchored to
-  // where the camera actually now is, since that's what a look-at is
-  // relative *to*; forwardLookAheadPoint's own cap/formula are untouched.
+  // `actualPosition` (not the raw spline position) so the look-at pipeline is
+  // anchored to where the camera actually now is, since that's what a
+  // look-at is relative *to*.
   const forward = forwardLookAheadPoint(actualPosition, currentTangent)
-  const targetBlend = nearestTowerPull(forward, placements).strength
-  const lookAtBlend = approach(state.lookAtBlend, targetBlend, LOOKAT_BLEND_RATE * delta)
+  const pull = nearestTowerPull(forward, placements)
+  const lookAtBlend = approach(state.lookAtBlend, pull.strength, LOOKAT_BLEND_RATE * delta)
+  // The pull's anchor point eases too (never snaps on a nearest-Tower
+  // switch) — see LOOKAT_PULL_POINT_EASE_RATE's doc comment.
+  const lookAtPullPoint = approachPoint(
+    state.lookAtPullPoint,
+    pull.point,
+    LOOKAT_PULL_POINT_EASE_RATE * delta,
+  )
 
   if (segmentT < 1) {
     return {
@@ -960,6 +1225,7 @@ export function stepDemoTour(
       segmentT,
       altitude,
       lookAtBlend,
+      lookAtPullPoint,
       glance: stepGlance(state.glance, delta),
     }
   }
@@ -974,7 +1240,13 @@ export function stepDemoTour(
     return orbitTourState(state.rngState, fallbackCenter(placements))
   }
 
-  const picked = drawNextWaypoint(graph, state.headCoord, state.headMove, state.rngState)
+  const picked = drawNextWaypoint(
+    graph,
+    state.headCoord,
+    state.headMove,
+    state.altitudeProgram,
+    state.rngState,
+  )
   const window: SplineWindow = [
     state.window[1],
     state.window[2],
@@ -993,7 +1265,9 @@ export function stepDemoTour(
     segmentT: segmentT - 1,
     segmentSeconds: segmentDuration(window[1], window[2]),
     altitude,
+    altitudeProgram: picked.program,
     lookAtBlend,
+    lookAtPullPoint,
     glance: glanceRoll.glance,
   }
 }
@@ -1020,12 +1294,12 @@ function sampleOrbitPose(state: OrbitTourState): DemoPose {
  * position, the demand-driven look-at target, and the velocity-derived bank —
  * without advancing it (advancing is {@link stepDemoTour}'s job, so a caller
  * can sample the same instant repeatedly, e.g. once for {@link
- * sampleDemoIntro}'s moving target and once to detect "done").
+ * sampleDemoIntro}'s moving target and once to detect "done"). A pure
+ * function of the state alone since #91's feel pass: every placements-derived
+ * input the look-at needs (the pull anchor and blend weight) is eased through
+ * {@link stepDemoTour} into the state, so sampling needs no fresh geometry.
  */
-export function sampleDemoTourPose(
-  state: DemoTourState,
-  placements: readonly TowerPlacement[],
-): DemoPose {
+export function sampleDemoTourPose(state: DemoTourState): DemoPose {
   if (state.kind === 'orbit') {
     return sampleOrbitPose(state)
   }
@@ -1040,7 +1314,7 @@ export function sampleDemoTourPose(
     actualPosition,
     tangent,
     state.lookAtBlend,
-    placements,
+    new Vector3(...state.lookAtPullPoint),
     state.glance,
   )
   const roll = tourBankAngle(state.window, state.segmentSeconds, state.segmentT)

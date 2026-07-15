@@ -308,7 +308,7 @@ export function FreeFlyControls({
       // Sampled every frame regardless of the intro, so the tour keeps
       // advancing during the intro rather than waiting for it (matching
       // #84's original "the path doesn't wait for it" behaviour).
-      const flight = sampleDemoTourPose(demoTour.current, placements)
+      const flight = sampleDemoTourPose(demoTour.current)
 
       let flightPose: DemoPose
       if (demoIntro.current) {

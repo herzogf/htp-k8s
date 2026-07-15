@@ -8,12 +8,15 @@ import {
   DEMO_BANK_MAX,
   DEMO_TRANSITION_SECONDS,
   type DemoTourState,
+  LOOKAT_AIM_CEILING,
   LOOKAT_TOWER_PULL_MAX,
   MAX_CLIMB_GRADIENT,
   nearestTowerPull,
   NO_GLANCE,
   OVERVIEW_ALTITUDE_MAX,
   OVERVIEW_ALTITUDE_MIN,
+  OVERVIEW_EPISODE_WAYPOINTS,
+  OVERVIEW_GAP_WAYPOINTS_MIN,
   PERIMETER_OFFSET,
   sampleDemoIntro,
   sampleDemoTourPose,
@@ -155,7 +158,7 @@ describe('the seeded Canyon tour', () => {
       const delta = 0.05 + (i % 3) * 0.01
       a = stepDemoTour(a, delta, placements)
       b = stepDemoTour(b, delta, placements)
-      expect(sampleDemoTourPose(a, placements)).toEqual(sampleDemoTourPose(b, placements))
+      expect(sampleDemoTourPose(a)).toEqual(sampleDemoTourPose(b))
     }
   })
 
@@ -169,20 +172,17 @@ describe('the seeded Canyon tour', () => {
     }
 
     expect(
-      distance(
-        sampleDemoTourPose(a, placements).position,
-        sampleDemoTourPose(b, placements).position,
-      ),
+      distance(sampleDemoTourPose(a).position, sampleDemoTourPose(b).position),
     ).toBeGreaterThan(0.1)
   })
 
   it('moves over time — Demo Mode flies the camera on its own', () => {
     let tour: DemoTourState = createDemoTour({ seed: 7, placements, entry: ORIGIN_POSE })
-    const start = sampleDemoTourPose(tour, placements).position
+    const start = sampleDemoTourPose(tour).position
     for (let i = 0; i < 20; i++) {
       tour = stepDemoTour(tour, 0.1, placements)
     }
-    const later = sampleDemoTourPose(tour, placements).position
+    const later = sampleDemoTourPose(tour).position
 
     expect(distance(start, later)).toBeGreaterThan(0.5)
   })
@@ -190,12 +190,12 @@ describe('the seeded Canyon tour', () => {
   it('never jumps: consecutive frames stay within a small, speed-bounded step (C1 continuity)', () => {
     let tour: DemoTourState = createDemoTour({ seed: 3, placements, entry: ORIGIN_POSE })
     const delta = 0.05
-    let previous = sampleDemoTourPose(tour, placements).position
+    let previous = sampleDemoTourPose(tour).position
     // Enough steps to cross several segment boundaries (rollovers), where a
     // stitching bug would show up as a jump.
     for (let i = 0; i < 600; i++) {
       tour = stepDemoTour(tour, delta, placements)
-      const current = sampleDemoTourPose(tour, placements).position
+      const current = sampleDemoTourPose(tour).position
       // Generous bound: a few times the nominal per-frame travel distance,
       // covering the transient right after a rollover.
       expect(distance(previous, current)).toBeLessThan(TOWER_SPACING)
@@ -210,7 +210,7 @@ describe('the seeded Canyon tour', () => {
 
     for (let i = 0; i < 800; i++) {
       tour = stepDemoTour(tour, 0.07, placements)
-      const [x, y, z] = sampleDemoTourPose(tour, placements).position
+      const [x, y, z] = sampleDemoTourPose(tour).position
       expect(x).toBeGreaterThanOrEqual(graph.xs[0] - margin)
       expect(x).toBeLessThanOrEqual(graph.xs[graph.xs.length - 1] + margin)
       expect(z).toBeGreaterThanOrEqual(graph.zs[0] - margin)
@@ -223,9 +223,7 @@ describe('the seeded Canyon tour', () => {
     let tour: DemoTourState = createDemoTour({ seed: 5, placements, entry: ORIGIN_POSE })
     for (let i = 0; i < 400; i++) {
       tour = stepDemoTour(tour, 0.05, placements)
-      expect(Math.abs(sampleDemoTourPose(tour, placements).roll)).toBeLessThanOrEqual(
-        DEMO_BANK_MAX + 1e-9,
-      )
+      expect(Math.abs(sampleDemoTourPose(tour).roll)).toBeLessThanOrEqual(DEMO_BANK_MAX + 1e-9)
     }
   })
 
@@ -234,7 +232,7 @@ describe('the seeded Canyon tour', () => {
     let maxRoll = 0
     for (let i = 0; i < 400; i++) {
       tour = stepDemoTour(tour, 0.05, placements)
-      maxRoll = Math.max(maxRoll, Math.abs(sampleDemoTourPose(tour, placements).roll))
+      maxRoll = Math.max(maxRoll, Math.abs(sampleDemoTourPose(tour).roll))
     }
     expect(maxRoll).toBeGreaterThan(0.02)
   })
@@ -242,7 +240,7 @@ describe('the seeded Canyon tour', () => {
   it('looks somewhere ahead of its own position (a nonzero look-at direction)', () => {
     let tour: DemoTourState = createDemoTour({ seed: 9, placements, entry: ORIGIN_POSE })
     tour = stepDemoTour(tour, 0.2, placements)
-    const pose = sampleDemoTourPose(tour, placements)
+    const pose = sampleDemoTourPose(tour)
 
     expect(distance(pose.position, pose.target)).toBeGreaterThan(0)
   })
@@ -329,12 +327,12 @@ describe('the Canyon tour altitude never climbs/descends steeper than the glide-
     'seed %i: every frame’s altitude change stays within MAX_CLIMB_GRADIENT × that frame’s horizontal travel',
     (seed) => {
       let tour: DemoTourState = createDemoTour({ seed, placements, entry: ORIGIN_POSE })
-      let previousPosition = sampleDemoTourPose(tour, placements).position
+      let previousPosition = sampleDemoTourPose(tour).position
       let sawNontrivialHorizontalMove = false
 
       for (let i = 0; i < STEPS; i++) {
         tour = stepDemoTour(tour, delta, placements)
-        const position = sampleDemoTourPose(tour, placements).position
+        const position = sampleDemoTourPose(tour).position
 
         const horizontalDelta = Math.hypot(
           position[0] - previousPosition[0],
@@ -375,6 +373,176 @@ describe('the Canyon tour altitude never climbs/descends steeper than the glide-
     }
 
     expect(reachedATargetAltitude).toBe(true)
+  })
+})
+
+/**
+ * The forcing-function tests for #91's climb-choreography feel pass. The
+ * maintainer's diagnosis of the remaining "sharp turn up" was that the low
+ * canyon waypoint and the high overview waypoint sat too close together
+ * horizontally — all the altitude gained over one short run. The fix makes
+ * the overview an *intent sustained across consecutive waypoints* (see
+ * OVERVIEW_EPISODE_WAYPOINTS's doc comment): one apex is drawn per episode
+ * and held for the whole episode, so the (now shallower, ~23°) glide-slope
+ * pursuit has several segments of horizontal distance to climb over, cruise
+ * at, and descend from. These tests lock that structure — a per-frame slope
+ * cap alone (the previous describe block) cannot distinguish a long graceful
+ * arc from a maximal-slope pop-up-and-back spike.
+ */
+describe('overview passes are sustained, paced episodes (#91 climb-choreography feel pass)', () => {
+  const placements = grid(5, 5)
+
+  it('sustains one apex altitude across a whole episode of consecutive waypoints (a climb-out is a long arc, not a one-waypoint spike)', () => {
+    let tour: DemoTourState = createDemoTour({ seed: 42424242, placements, entry: ORIGIN_POSE })
+    // Large delta: force exactly one segment rollover per step (the same
+    // trick the no-backtrack test uses), so this records the sequence of
+    // waypoint target altitudes (window[2].y) in walk order.
+    const targetAltitudes: number[] = []
+    for (let i = 0; i < 300; i++) {
+      tour = stepDemoTour(tour, 5, placements)
+      if (tour.kind === 'canyon') {
+        targetAltitudes.push(tour.window[2].y)
+      }
+    }
+
+    // Split the sequence into runs of identical target altitude and classify
+    // each run as overview (above the roofline — the overview band starts at
+    // 1.1 × TOWER_HEIGHT) or canyon.
+    const runs: Array<{ y: number; length: number }> = []
+    for (const y of targetAltitudes) {
+      const last = runs[runs.length - 1]
+      if (last && last.y === y) {
+        last.length++
+      } else {
+        runs.push({ y, length: 1 })
+      }
+    }
+    // Only completed runs: the recording window can cut off mid-episode, so
+    // the very last run (whatever its kind) may be truncated.
+    const overviewRuns = runs.slice(0, -1).filter((r) => r.y > TOWER_HEIGHT)
+
+    // A long walk over paced episodes must contain several overview episodes…
+    expect(overviewRuns.length).toBeGreaterThanOrEqual(3)
+    // …and every one of them sustains its single drawn apex for the full
+    // episode length — the intent never resets to a fresh draw mid-episode
+    // (which is exactly what compressed the old climbs into pop-ups).
+    for (const run of overviewRuns) {
+      expect(run.length).toBeGreaterThanOrEqual(OVERVIEW_EPISODE_WAYPOINTS)
+    }
+  })
+
+  it('paces episodes apart: every stretch between two overview episodes is a real canyon dwell, never a back-to-back yo-yo', () => {
+    let tour: DemoTourState = createDemoTour({ seed: 7, placements, entry: ORIGIN_POSE })
+    const targetAltitudes: number[] = []
+    for (let i = 0; i < 400; i++) {
+      tour = stepDemoTour(tour, 5, placements)
+      if (tour.kind === 'canyon') {
+        targetAltitudes.push(tour.window[2].y)
+      }
+    }
+
+    // Count the canyon-waypoint gaps strictly *between* overview episodes
+    // (the leading partial gap before the first episode is excluded — the
+    // tour's creation already consumed part of it).
+    const gaps: number[] = []
+    let inOverview = false
+    let sawFirstEpisode = false
+    let gap = 0
+    for (const y of targetAltitudes) {
+      const overview = y > TOWER_HEIGHT
+      if (overview) {
+        if (!inOverview && sawFirstEpisode) {
+          gaps.push(gap)
+        }
+        sawFirstEpisode = true
+        gap = 0
+      } else if (sawFirstEpisode) {
+        gap++
+      }
+      inOverview = overview
+    }
+
+    expect(gaps.length).toBeGreaterThanOrEqual(2)
+    for (const g of gaps) {
+      expect(g).toBeGreaterThanOrEqual(OVERVIEW_GAP_WAYPOINTS_MIN)
+    }
+  })
+
+  it.each([42424242, 7, 13])(
+    'seed %i: the camera still genuinely gets over the rooftops, then eases back down into the canyon (overviews not killed)',
+    (seed) => {
+      let tour: DemoTourState = createDemoTour({ seed, placements, entry: ORIGIN_POSE })
+      const delta = 0.05
+      let crossedAboveRoofline = false
+      let returnedToCanyon = false
+
+      // 120 simulated seconds: comfortably more than one full paced cycle
+      // (max gap + episode + climb/descent), so this is deterministic per
+      // seed, not probabilistic.
+      for (let i = 0; i < 2400; i++) {
+        tour = stepDemoTour(tour, delta, placements)
+        const y = sampleDemoTourPose(tour).position[1]
+        if (!crossedAboveRoofline) {
+          crossedAboveRoofline = y > TOWER_HEIGHT
+        } else if (y <= CANYON_ALTITUDE_MAX) {
+          returnedToCanyon = true
+          break
+        }
+      }
+
+      expect(crossedAboveRoofline).toBe(true)
+      expect(returnedToCanyon).toBe(true)
+    },
+  )
+})
+
+/**
+ * The forcing-function invariant for #91's climb-out aim fix: the camera is
+ * the pilot's eye — even while climbing it looks ahead and *down* into the
+ * canyon and at the Towers, never up into the empty black sky. Before this
+ * pass the forward aim could sit up to half a Tower *above* the roofline
+ * (`LOOKAT_FORWARD_ALTITUDE_CAP`), and on a climb-out the steep raw spline
+ * tangent pitched it there for a second or more (~32% of climb-out frames
+ * read as dark sky). The aim is now projected along the *flyable* (glide-
+ * slope-clamped) pitch and pinned below the roofline (LOOKAT_AIM_CEILING),
+ * so every frame keeps Tower structure in front of the camera.
+ */
+describe('the look-at never aims above the roofline (#91 climb-out aim invariant)', () => {
+  const placements = grid(5, 5)
+  const seeds = [42424242, 1, 7, 13, 55]
+
+  it.each(seeds)(
+    'seed %i: every sampled aim stays below the roofline, and pitches below the camera once over the rooftops',
+    (seed) => {
+      let tour: DemoTourState = createDemoTour({ seed, placements, entry: ORIGIN_POSE })
+      let sawOverRooftops = false
+
+      for (let i = 0; i < 1200; i++) {
+        tour = stepDemoTour(tour, 0.1, placements)
+        const pose = sampleDemoTourPose(tour)
+
+        // The aim's ceiling: the forward point is pinned at LOOKAT_AIM_CEILING
+        // (below the roofline) and the partial Tower pull can only lift it
+        // toward the roofline point itself — never past it. (Glances rotate
+        // the target around the vertical axis, so they can't raise it either.)
+        expect(pose.target[1]).toBeLessThanOrEqual(TOWER_HEIGHT + 1e-9)
+
+        // And once the camera is above the rooftops, the pilot's eye is
+        // looking *down* at them, not level into the sky at its own altitude.
+        if (pose.position[1] > TOWER_HEIGHT) {
+          sawOverRooftops = true
+          expect(pose.target[1]).toBeLessThan(pose.position[1])
+        }
+      }
+
+      // Sanity check on the test itself: the run must actually have exercised
+      // the over-the-rooftops regime (paced episodes guarantee several).
+      expect(sawOverRooftops).toBe(true)
+    },
+  )
+
+  it('the aim ceiling itself sits below the roofline (the invariant above is geometric, not incidental)', () => {
+    expect(LOOKAT_AIM_CEILING).toBeLessThan(TOWER_HEIGHT)
   })
 })
 
@@ -458,16 +626,16 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
       const tangent = new Vector3(1, 0, 0) // level forward travel
       const pull = nearestTowerPull(position, placements)
 
-      const target = demandDrivenLookAt(position, tangent, pull.strength, placements, NO_GLANCE)
+      const target = demandDrivenLookAt(position, tangent, pull.strength, pull.point, NO_GLANCE)
 
       // A level forward look-ahead alone (the pre-fix behaviour) sits at the
       // camera's own altitude. The fix must pull the target's Y meaningfully
-      // below the camera's — tilting the aim down toward the skyline. (The
-      // required margin was lowered by #91's climb-rate tuning pass, which
-      // lowered OVERVIEW_ALTITUDE_MAX itself: less altitude above the
-      // roofline for either LOOKAT_FORWARD_ALTITUDE_CAP or the pull — both
-      // deliberately left untouched — to react to. This is that same,
-      // unchanged look-at maths evaluated at a new, lower altitude.)
+      // below the camera's — tilting the aim down toward the skyline. (#91's
+      // feel pass strengthened this further: the forward aim itself is now
+      // clamped below the roofline by LOOKAT_AIM_CEILING — the pilot's eye
+      // looks ahead and down at the Towers during an overview pass, never at
+      // open sky — so the tilt here is now guaranteed by the aim window, with
+      // the demand-driven pull refining it.)
       expect(target.y).toBeLessThan(position.y - TOWER_HEIGHT * 0.05)
       // And it should land near the cluster horizontally, not drift into the void.
       const horizontalDistance = Math.hypot(
@@ -483,7 +651,7 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
       const tangent = new Vector3(0, 0, 1)
       const pull = nearestTowerPull(position, placements)
 
-      const target = demandDrivenLookAt(position, tangent, pull.strength, placements, NO_GLANCE)
+      const target = demandDrivenLookAt(position, tangent, pull.strength, pull.point, NO_GLANCE)
 
       expect(target.y).toBeCloseTo(position.y, 5)
     })
@@ -499,13 +667,11 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
     // This checks the real geometric invariant — clearance from the look-at
     // target to the nearest Tower's bounding volume (the same measurement
     // the #91 forcing-function invariant below uses) — rather than a bare
-    // "target.y meaningfully below position.y" heuristic. #91's climb-rate
-    // tuning pass compressed the overview band close enough to the roofline
-    // that a deep-overview sample can now legitimately look slightly *above*
-    // its own altitude (the camera's own rate-limited climb can still lag a
-    // still-rising raw spline tangent) while remaining close to a Tower
-    // horizontally — a real, harmless case the old y-only heuristic would
-    // have wrongly failed.
+    // "target.y meaningfully below position.y" heuristic. (Since #91's feel
+    // pass the aim is additionally pinned below the roofline by
+    // LOOKAT_AIM_CEILING — that stronger per-frame property has its own
+    // dedicated invariant test below; this one stays focused on the original
+    // clearance regression.)
     const deepOverviewY = (OVERVIEW_ALTITUDE_MIN + OVERVIEW_ALTITUDE_MAX) / 2
     const VOID_CLEARANCE_THRESHOLD = TOWER_SPACING * 2
     let tour: DemoTourState = createDemoTour({ seed: 99, placements, entry: ORIGIN_POSE })
@@ -513,7 +679,7 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
 
     for (let i = 0; i < 600; i++) {
       tour = stepDemoTour(tour, 0.15, placements)
-      const pose = sampleDemoTourPose(tour, placements)
+      const pose = sampleDemoTourPose(tour)
       const [, positionY] = pose.position
       if (positionY > deepOverviewY) {
         sawDeepOverview = true
@@ -523,10 +689,11 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
       }
     }
 
-    // A seed run this long should hit at least one overview waypoint deep
-    // enough into the band (OVERVIEW_PROBABILITY=0.15 per waypoint, and
-    // altitude is jittered across the whole band) — otherwise this test isn't
-    // actually exercising the regression.
+    // A seed run this long should hit at least one overview episode with an
+    // apex deep enough into the band (episodes are paced — guaranteed within
+    // every OVERVIEW_GAP_WAYPOINTS_MAX + OVERVIEW_EPISODE_WAYPOINTS stretch —
+    // and the apex is jittered across the whole band) — otherwise this test
+    // isn't actually exercising the regression.
     expect(sawDeepOverview).toBe(true)
   })
 })
@@ -555,6 +722,9 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
  * consistently, vs. this fix's observed max of ~6.8 across the same seeds and
  * duration) — i.e. this threshold is comfortably below what the known-broken
  * behaviour produces and comfortably above what the fixed behaviour produces.
+ * (Re-calibrated unchanged after #91's climb-choreography feel pass: observed
+ * max 6.6–6.9 across these seeds with the sustained-episode altitude program
+ * and the roofline-capped aim.)
  */
 describe('the demand-driven look-at never aims into the void (#91 forcing-function invariant)', () => {
   const placements = grid(5, 5)
@@ -579,7 +749,7 @@ describe('the demand-driven look-at never aims into the void (#91 forcing-functi
 
       for (let i = 0; i < steps; i++) {
         tour = stepDemoTour(tour, SAMPLE_INTERVAL_SECONDS, placements)
-        const pose = sampleDemoTourPose(tour, placements)
+        const pose = sampleDemoTourPose(tour)
         const clearance = clearanceToNearestTower(pose.target, placements)
         maxClearanceSeen = Math.max(maxClearanceSeen, clearance)
 
@@ -598,15 +768,15 @@ describe('the demand-driven look-at never aims into the void (#91 forcing-functi
 describe('the orbit-and-bob fallback', () => {
   it('stays close to its centre and keeps moving, for an empty scene', () => {
     let tour: DemoTourState = createDemoTour({ seed: 4, placements: [], entry: ORIGIN_POSE })
-    const start = sampleDemoTourPose(tour, []).position
+    const start = sampleDemoTourPose(tour).position
     let maxDistanceFromOrigin = 0
 
     for (let i = 0; i < 100; i++) {
       tour = stepDemoTour(tour, 0.1, [])
-      const position = sampleDemoTourPose(tour, []).position
+      const position = sampleDemoTourPose(tour).position
       maxDistanceFromOrigin = Math.max(maxDistanceFromOrigin, Math.hypot(position[0], position[2]))
     }
-    const later = sampleDemoTourPose(tour, []).position
+    const later = sampleDemoTourPose(tour).position
 
     expect(distance(start, later)).toBeGreaterThan(0.1)
     expect(maxDistanceFromOrigin).toBeLessThan(TOWER_SPACING * 5)
@@ -616,7 +786,7 @@ describe('the orbit-and-bob fallback', () => {
     let tour: DemoTourState = createDemoTour({ seed: 4, placements: [], entry: ORIGIN_POSE })
     for (let i = 0; i < 50; i++) {
       tour = stepDemoTour(tour, 0.1, [])
-      expect(Math.abs(sampleDemoTourPose(tour, []).roll)).toBeLessThanOrEqual(DEMO_BANK_MAX + 1e-9)
+      expect(Math.abs(sampleDemoTourPose(tour).roll)).toBeLessThanOrEqual(DEMO_BANK_MAX + 1e-9)
     }
   })
 
