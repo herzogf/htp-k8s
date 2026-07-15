@@ -4,6 +4,7 @@ import { Euler, Vector3 } from 'three'
 import {
   createDemoTour,
   type DemoIntro,
+  demoIntroSpeedFactor,
   type DemoPose,
   type DemoTourState,
   type RollRecovery,
@@ -304,15 +305,20 @@ export function FreeFlyControls({
       // elapsed step below: a stall's oversized delta must not leap the
       // Canyon tour far ahead in one frame.
       const step = Math.min(delta, MAX_FOCUS_STEP_SECONDS)
-      demoTour.current = stepDemoTour(demoTour.current, step, placements)
-      // Sampled every frame regardless of the intro, so the tour keeps
-      // advancing during the intro rather than waiting for it (matching
-      // #84's original "the path doesn't wait for it" behaviour).
+      if (demoIntro.current) {
+        demoIntro.current.elapsed += step
+      }
+      // While the intro runs, the tour's own advancement is ramped from 0 up
+      // to full speed (demoIntroSpeedFactor), so activation reads as gently
+      // taking flight from the current pose rather than the flight departing
+      // at full cruise the instant the toggle flips — the tour still advances
+      // during the intro (never waits for it), just eased.
+      const ramp = demoIntro.current ? demoIntroSpeedFactor(demoIntro.current.elapsed) : 1
+      demoTour.current = stepDemoTour(demoTour.current, step * ramp, placements)
       const flight = sampleDemoTourPose(demoTour.current)
 
       let flightPose: DemoPose
       if (demoIntro.current) {
-        demoIntro.current.elapsed += step
         const sample = sampleDemoIntro(demoIntro.current, flight)
         flightPose = sample.pose
         if (sample.done) {

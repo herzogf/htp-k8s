@@ -106,14 +106,22 @@ test('demo mode: the HUD toggle flies the camera on its own with a visible bank,
 
   // Acceptance criterion 2: while active, the camera flies through the scene
   // on its own — sampled with no keyboard/mouse input at all — with a visible
-  // banking/swinging motion.
+  // banking/swinging motion. The window is generous (up to ~15s, exiting
+  // early once a bank has been seen): since #91's smoothness pass the tour
+  // takes flight *from the activation pose* and cruises straight to its
+  // entry node with wings deliberately level ("level when flying straight"),
+  // so the first genuine banked turn only comes once the lattice walk turns
+  // a corner — a few seconds in, not instantly.
   const before = await cameraPosition(page)
   const samples: Array<[number, number, number]> = [before]
   const rolls: number[] = [Math.abs(await rightVectorY(page))]
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 60; i++) {
     await page.waitForTimeout(250)
     samples.push(await cameraPosition(page))
     rolls.push(Math.abs(await rightVectorY(page)))
+    if (i >= 12 && Math.max(...rolls) > 0.02) {
+      break
+    }
   }
   const afterFlying = samples[samples.length - 1]
 
