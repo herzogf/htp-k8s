@@ -74,6 +74,12 @@ function distance(a: readonly number[], b: readonly number[]): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
 }
 
+// Mirror of TOWER_SPACING (src/scene/towerLayout.ts), restated per this
+// suite's cross-compilation-boundary convention (see the CameraTestHook
+// comment above) — used only to calibrate the hand-off threshold below
+// against real scene geometry, never to duplicate production logic.
+const TOWER_SPACING = 4
+
 test('demo mode: the HUD toggle flies the camera on its own with a visible bank, then hands back smoothly', async ({
   page,
 }, testInfo) => {
@@ -128,10 +134,22 @@ test('demo mode: the HUD toggle flies the camera on its own with a visible bank,
   await page.waitForFunction(() => window.__htpCameraTest?.isDemoActive() === false)
   const justAfterOff = await cameraPosition(page)
 
-  // No teleport: the camera's position is continuous across the toggle. A
-  // genuine jump back to some stale free-fly pose would move it by many world
-  // units (the flight path's own radius); this stays small.
-  expect(distance(justBeforeOff, justAfterOff)).toBeLessThan(1)
+  // No teleport: the camera's position is continuous across the toggle.
+  // FreeFlyControls' deactivation path leaves the camera exactly where Demo
+  // Mode's flight left it — it does not snap to some stale pre-demo pose —
+  // so `justBeforeOff` and `justAfterOff` are not simultaneous: the Canyon
+  // tour (#91) keeps flying smoothly through the async settle window between
+  // them (`toggle.click()` + the `aria-pressed`/text assertions + the
+  // `waitForFunction(isDemoActive === false)` await), at up to
+  // CANYON_TRAVEL_SPEED (TOWER_SPACING * 1.1 world units/second). Over that
+  // settle window this can plausibly cover on the order of one Tower spacing
+  // — smooth continued flight, not a jump. A genuine stale-pose teleport
+  // would be much larger: the pre-demo default camera pose ([10, 9, 15]) is
+  // many Tower-spacings from mid-flight. So "no teleport" here means "no
+  // multi-Tower-spacing jump", not "sub-unit stillness" — TOWER_SPACING
+  // itself is comfortably above the smooth-flight distance this settle
+  // window produces, and comfortably below what a real teleport would be.
+  expect(distance(justBeforeOff, justAfterOff)).toBeLessThan(TOWER_SPACING)
 
   // Free-fly has genuinely resumed: with no input and Demo Mode off, the
   // camera now holds still (once any brief roll-recovery — at most a second —

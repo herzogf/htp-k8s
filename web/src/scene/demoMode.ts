@@ -94,7 +94,7 @@ export const CANYON_ALTITUDE_MAX = TOWER_HEIGHT * 0.75
  * Towers. Lowered by the #91 climb-rate tuning pass (was `TOWER_HEIGHT *
  * 1.5` / `* 2.4`): still clears the `y = TOWER_HEIGHT` roofline comfortably,
  * but sits close enough above it that the climb out of the canyon (now
- * additionally rate-limited — see {@link MAX_VERTICAL_RATE}) stays gentle
+ * additionally rate-limited — see {@link MAX_CLIMB_GRADIENT}) stays gentle
  * and the Towers stay large in frame during an overview pass, rather than
  * shrinking under a soaring wide-orbit camera.
  */
@@ -115,37 +115,44 @@ export const CANYON_TRAVEL_SPEED = TOWER_SPACING * 1.1
 
 /**
  * MAX_CLIMB_GRADIENT caps how fast the tour's altitude is ever allowed to
- * change *relative to its horizontal travel speed* — expressed as a
- * dimensionless ratio (`tan` of the climb angle) rather than a bare
- * units/second number, so it reads as what it is: a shallow glide slope, the
- * gentle climb/descent of a small plane, never an elevator. Two adjacent
- * waypoints can land in very different altitude bands (a canyon-low hop
- * followed by an overview draw) regardless of how far apart they are
- * horizontally or how the horizontal path between them bends — this is what
- * keeps that transition from ever reading as "the plane turns straight up".
- * `0.65` ⇒ roughly a 33° climb angle: clearly, readably gentler than a
- * straight-up "elevator" ascent, while still comfortably reaching the
+ * change *relative to the horizontal distance the camera actually travels* —
+ * expressed as a dimensionless ratio (`tan` of the climb angle) rather than a
+ * bare units/second number, so it reads as what it is: a shallow glide slope,
+ * the gentle climb/descent of a small plane, never an elevator.
+ *
+ * This is enforced *per frame, relative to that frame's own horizontal (x, z)
+ * travel* — not as a units/second rate against elapsed time (see {@link
+ * stepDemoTour}'s altitude pursuit, which clamps `|Δaltitude|` to
+ * `MAX_CLIMB_GRADIENT * horizontalDistanceMovedThisFrame`). A time-based
+ * units/second cap looks identical *on average*, but fails exactly where the
+ * elevator bug came from: wherever horizontal speed dips within a frame (a
+ * tight corner, a slow point in the Catmull-Rom's uniform-`t`
+ * parameterization, a near-stationary moment near a waypoint), a temporal cap
+ * keeps climbing at full rate while the camera barely moves forward, so the
+ * *visual* climb angle spikes toward vertical even though the average rate
+ * looks fine. Gating on the frame's actual horizontal travel instead means
+ * the apparent climb/descent angle can never exceed `atan(MAX_CLIMB_GRADIENT)`
+ * regardless of how fast or slow the horizontal path is moving — including
+ * holding altitude outright while the camera is essentially stationary
+ * horizontally (a waypoint dwell, or the first frame after activation), which
+ * is correct: there's nothing to compute a glide angle against.
+ *
+ * Two adjacent waypoints can land in very different altitude bands (a
+ * canyon-low hop followed by an overview draw) regardless of how far apart
+ * they are horizontally or how the horizontal path between them bends — this
+ * is what keeps that transition from ever reading as "the plane turns
+ * straight up". `0.65` ⇒ roughly a 33° climb angle: clearly, readably gentler
+ * than a straight-up "elevator" ascent, while still comfortably reaching the
  * overview band's altitude within a normal viewing session — a shallower
  * gradient reads even gentler but, chained with the walk's independent
  * per-waypoint altitude draws, can spend most of a tour never actually
  * catching up to a genuine overview pass before the target changes again.
  * Tune this (not the spline or the altitude bands) to make climbs feel
- * shallower or brisker.
+ * shallower or brisker. The demand-driven look-at (the aim, as opposed to the
+ * camera's own position) is intentionally untouched by this — see {@link
+ * LOOKAT_FORWARD_ALTITUDE_CAP}'s doc comment.
  */
 export const MAX_CLIMB_GRADIENT = 0.65
-
-/**
- * MAX_VERTICAL_RATE is {@link MAX_CLIMB_GRADIENT} converted to world
- * units/second at the tour's cruise speed — the actual per-frame cap {@link
- * stepDemoTour}'s altitude pursuit (see {@link approach}) enforces on the
- * camera's own altitude: how fast the camera's world-space Y is allowed to
- * change, independent of how steeply the underlying waypoint-to-waypoint
- * altitude draws differ or how the horizontal spline between them bends. The
- * demand-driven look-at (the aim, as opposed to the camera's own position) is
- * intentionally untouched by this — see {@link LOOKAT_FORWARD_ALTITUDE_CAP}'s
- * doc comment.
- */
-export const MAX_VERTICAL_RATE = CANYON_TRAVEL_SPEED * MAX_CLIMB_GRADIENT
 
 /**
  * MIN_SEGMENT_SECONDS floors how short a spline segment's travel time can be,
@@ -217,7 +224,7 @@ const LOOKAT_BLEND_RATE = 0.8
  *
  * Deliberately left unchanged by the #91 climb-rate tuning pass — the
  * demand-driven look-at (this constant included) was judged good as-is; only
- * the camera's own altitude *motion* (see {@link MAX_VERTICAL_RATE}) and the
+ * the camera's own altitude *motion* (see {@link MAX_CLIMB_GRADIENT}) and the
  * overview altitude band changed. `position` passed into {@link
  * forwardLookAheadPoint} is still the camera's actual (now glide-slope-
  * limited) altitude, so this absolute ceiling engages less often with the
@@ -764,10 +771,12 @@ interface CanyonTourState {
    * steeply between two adjacent waypoints and produce the "elevator"
    * climb/dive this field exists to prevent). Instead this is a standalone
    * value {@link stepDemoTour} eases toward the current segment's destination
-   * altitude (`window[2].y`) at {@link MAX_VERTICAL_RATE} — a rate-limited
+   * altitude (`window[2].y`), gated each frame by {@link MAX_CLIMB_GRADIENT}
+   * relative to that frame's actual horizontal travel — a rate-limited
    * pursuit, not a snap — so the camera's height only ever changes at a
-   * shallow, constant-ish glide-slope rate regardless of how steep the
-   * underlying waypoint-to-waypoint altitude change is. `window`'s Y
+   * shallow, constant glide-slope *angle* regardless of how steep the
+   * underlying waypoint-to-waypoint altitude change is, or how fast/slow the
+   * horizontal path happens to be moving that frame. `window`'s Y
    * coordinates remain the *target* altitudes the walk actually drew; only
    * the horizontal (x, z) components of the spline drive the camera's
    * horizontal position and weave.
@@ -899,19 +908,38 @@ export function stepDemoTour(
   }
 
   const segmentT = state.segmentT + delta / state.segmentSeconds
+  // The spline's horizontal position *before* this frame's advance — what was
+  // actually rendered last frame (sampleDemoTourPose reads state.window at
+  // state.segmentT, exactly what's sampled here) — so the gradient cap below
+  // can measure how far the camera really moved horizontally this frame,
+  // rather than assuming a nominal/average travel speed.
+  const { position: previousPosition } = sampleSpline(state.window, state.segmentT)
   const { position: currentPosition, tangent: currentTangent } = sampleSpline(
     state.window,
     Math.min(segmentT, 1),
   )
-  // The camera's actual altitude (#91 climb-rate tuning pass): a rate-limited
+  // The camera's actual altitude (#91 climb-rate tuning pass, reworked to a
+  // per-frame gradient cap by the elevator-look follow-up): a rate-limited
   // pursuit of the *current segment's* destination altitude (`window[2].y`,
-  // the waypoint this segment is flying toward), capped at
-  // MAX_VERTICAL_RATE — never the spline's own (possibly steep) Y directly.
+  // the waypoint this segment is flying toward), never the spline's own
+  // (possibly steep) Y directly. The per-frame cap is {@link
+  // MAX_CLIMB_GRADIENT} times the horizontal (x, z) distance the camera
+  // actually moved *this frame* — not a units/second rate against elapsed
+  // time — so the visual climb/descent angle can never exceed
+  // atan(MAX_CLIMB_GRADIENT) no matter how the horizontal spline speed varies
+  // frame to frame (a tight corner, a slow point in the uniform-`t`
+  // parameterization, a near-stationary moment near a waypoint). When the
+  // camera is essentially stationary horizontally, horizontalDelta ≈ 0 and
+  // altitude simply holds — correct: there's no glide angle to climb along.
   // This is what turns a big waypoint-to-waypoint altitude jump into a
   // gradual, shallow climb/descent that can span several segments rather
   // than snapping to the waypoint's altitude within the one segment that
   // happens to lead to it.
-  const altitude = approach(state.altitude, state.window[2].y, MAX_VERTICAL_RATE * delta)
+  const horizontalDelta = Math.hypot(
+    currentPosition.x - previousPosition.x,
+    currentPosition.z - previousPosition.z,
+  )
+  const altitude = approach(state.altitude, state.window[2].y, MAX_CLIMB_GRADIENT * horizontalDelta)
   const actualPosition = new Vector3(currentPosition.x, altitude, currentPosition.z)
   // The blend must ease toward the deficiency of the *forward look-ahead
   // point* (what the camera is about to aim at), not the camera's own

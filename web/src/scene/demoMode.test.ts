@@ -9,6 +9,7 @@ import {
   DEMO_TRANSITION_SECONDS,
   type DemoTourState,
   LOOKAT_TOWER_PULL_MAX,
+  MAX_CLIMB_GRADIENT,
   nearestTowerPull,
   NO_GLANCE,
   OVERVIEW_ALTITUDE_MAX,
@@ -293,6 +294,87 @@ describe('the seeded Canyon tour', () => {
     if (tour.kind === 'canyon') {
       expect(tour.graph).toEqual(buildCanyonGraph(after))
     }
+  })
+})
+
+/**
+ * The forcing-function test for the "elevator climb" bug (#91 follow-up): the
+ * camera's altitude was previously rate-limited *temporally*
+ * (`MAX_VERTICAL_RATE` units/second against elapsed time), which does not
+ * bound the *visual* climb angle — wherever the horizontal spline speed dips
+ * within a frame (a tight corner, a slow point in the Catmull-Rom's uniform-
+ * `t` parameterization, a near-stationary moment near a waypoint), altitude
+ * kept changing at the full rate while the camera barely moved forward, so
+ * the apparent climb/descent angle could spike toward vertical — the
+ * "elevator" look. The fix (see {@link MAX_CLIMB_GRADIENT}'s doc comment)
+ * gates `|Δaltitude|` each frame by the horizontal (x, z) distance the camera
+ * actually travelled *that* frame, so the climb/descent angle can never
+ * exceed `atan(MAX_CLIMB_GRADIENT)` regardless of how the horizontal speed
+ * varies. This test densely samples several full seeded tours and asserts
+ * that invariant holds on every single frame — not just on average — which is
+ * exactly the property a temporal rate cap cannot guarantee and a spatial
+ * gradient cap can.
+ */
+describe('the Canyon tour altitude never climbs/descends steeper than the glide-slope cap (#91 elevator-climb fix)', () => {
+  const placements = grid(5, 5)
+  const seeds = [3, 17, 101, 555, 42424242]
+  const delta = 0.05
+  const STEPS = 800
+  // Generous floating-point slack, not a loosened bound: the cap itself is
+  // exact (`approach`'s maxDelta), this only absorbs the sqrt/hypot rounding
+  // in re-deriving horizontal distance from two sampled positions.
+  const EPSILON = 1e-9
+
+  it.each(seeds)(
+    'seed %i: every frame’s altitude change stays within MAX_CLIMB_GRADIENT × that frame’s horizontal travel',
+    (seed) => {
+      let tour: DemoTourState = createDemoTour({ seed, placements, entry: ORIGIN_POSE })
+      let previousPosition = sampleDemoTourPose(tour, placements).position
+      let sawNontrivialHorizontalMove = false
+
+      for (let i = 0; i < STEPS; i++) {
+        tour = stepDemoTour(tour, delta, placements)
+        const position = sampleDemoTourPose(tour, placements).position
+
+        const horizontalDelta = Math.hypot(
+          position[0] - previousPosition[0],
+          position[2] - previousPosition[2],
+        )
+        const verticalDelta = Math.abs(position[1] - previousPosition[1])
+
+        // The core invariant: the climb/descent angle this frame never
+        // exceeds atan(MAX_CLIMB_GRADIENT) — an elevator-like near-vertical
+        // rise while horizontal speed is low is exactly what this forbids.
+        expect(verticalDelta).toBeLessThanOrEqual(MAX_CLIMB_GRADIENT * horizontalDelta + EPSILON)
+
+        if (horizontalDelta > 0.01) {
+          sawNontrivialHorizontalMove = true
+        }
+        previousPosition = position
+      }
+
+      // Sanity check on the test itself: a run this long over a 5x5 grid
+      // should spend the overwhelming majority of frames actually moving
+      // horizontally (not stalled at a waypoint) — otherwise the invariant
+      // above would be trivially satisfied by near-zero altitude at every
+      // step and wouldn't actually be exercising the cap.
+      expect(sawNontrivialHorizontalMove).toBe(true)
+    },
+  )
+
+  it('still reaches its target altitude once the plane resumes horizontal travel (holding altitude near-stationary is not a stuck climb)', () => {
+    let tour: DemoTourState = createDemoTour({ seed: 8, placements, entry: ORIGIN_POSE })
+    let reachedATargetAltitude = false
+
+    for (let i = 0; i < STEPS; i++) {
+      tour = stepDemoTour(tour, delta, placements)
+      if (tour.kind === 'canyon' && Math.abs(tour.altitude - tour.window[2].y) < 1e-6) {
+        reachedATargetAltitude = true
+        break
+      }
+    }
+
+    expect(reachedATargetAltitude).toBe(true)
   })
 })
 
