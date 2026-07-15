@@ -2,11 +2,15 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import { Euler, Vector3 } from 'three'
 import {
+  createDemoTour,
   type DemoIntro,
+  demoIntroSpeedFactor,
   type DemoPose,
-  demoPose,
+  type DemoTourState,
   type RollRecovery,
   sampleDemoIntro,
+  sampleDemoTourPose,
+  stepDemoTour,
   stepRollRecovery,
 } from './demoMode'
 import {
@@ -26,6 +30,8 @@ import {
   NO_KEYS,
   type MoveKeys,
 } from './freeFly'
+import { DEFAULT_APP_CONFIG } from '../appConfig'
+import { type TowerPlacement } from './towerLayout'
 
 /** An in-flight Focus fly-to: the pose we started from, where we're headed, and how far along we are. */
 interface FocusTween {
@@ -59,6 +65,21 @@ export interface FreeFlyControlsProps {
    * snapping — see the `useFrame` below for the hand-off mechanics.
    */
   demoActive?: boolean
+  /**
+   * The Tower placements Demo Mode's Canyon tour (#91) is built from — the
+   * same {@link TowerPlacement}s the scene renders Towers at, so the flight
+   * threads *this* cluster's actual canyons rather than a fixed shape. Empty
+   * or a single Tower falls back to the orbit-and-bob behaviour (see
+   * `demoMode.ts`).
+   */
+  placements?: readonly TowerPlacement[]
+  /**
+   * Seed for Demo Mode's Canyon-tour PRNG (#91), resolved by the backend and
+   * fetched once via `GET /api/config` (see `useAppConfig`). Reused every
+   * activation this session, so "same spot + same seed" replays identically
+   * (ADR-0010) while the Tower arrangement stays unchanged.
+   */
+  demoSeed?: number
 }
 
 declare global {
@@ -88,11 +109,16 @@ declare global {
  * (unit-tested without a renderer); this component is the thin rig that binds DOM
  * input and integrates it into the live camera each frame. Speed and look
  * sensitivity are the fixed {@link FLY_SPEED}/{@link LOOK_SENSITIVITY} tunings —
- * their single source of truth lives in the pure seam. Demo Mode's flight path,
- * intro ease-on, and roll ease-off likewise live in the pure {@link demoPose}/
- * {@link sampleDemoIntro}/{@link stepRollRecovery} seam in `demoMode.ts`.
+ * their single source of truth lives in the pure seam. Demo Mode's Canyon-tour
+ * route, intro ease-on, and roll ease-off likewise live in the pure {@link
+ * createDemoTour}/{@link stepDemoTour}/{@link sampleDemoTourPose}/{@link
+ * sampleDemoIntro}/{@link stepRollRecovery} seam in `demoMode.ts`.
  */
-export function FreeFlyControls({ demoActive = false }: FreeFlyControlsProps = {}) {
+export function FreeFlyControls({
+  demoActive = false,
+  placements = [],
+  demoSeed = DEFAULT_APP_CONFIG.demoSeed,
+}: FreeFlyControlsProps = {}) {
   const camera = useThree((state) => state.camera)
   const gl = useThree((state) => state.gl)
   const focus = useFocus()
@@ -112,14 +138,16 @@ export function FreeFlyControls({ demoActive = false }: FreeFlyControlsProps = {
   // allocating in the render loop.
   const forward = useRef(new Vector3())
 
-  // Demo Mode state (#22). `demoElapsed` is the flight-loop clock, reset to 0
-  // each time Demo Mode switches on. `demoIntro` is the brief ease from
-  // wherever the camera was onto the (already-moving) flight path, non-null
+  // Demo Mode state (#22, Canyon tour route #91). `demoTour` is the live
+  // Canyon-tour walk (#91's `createDemoTour`/`stepDemoTour`), (re)created the
+  // instant Demo Mode switches on and advanced one frame at a time; `null`
+  // only before the very first activation. `demoIntro` is the brief ease
+  // from wherever the camera was onto the (already-moving) tour, non-null
   // only for the first `DEMO_TRANSITION_SECONDS` after activation. `rollBank`
   // is the last bank angle Demo Mode applied — captured every demo frame so a
   // `rollRecovery` ease-back-to-level can start from the true value the
   // instant Demo Mode switches off, rather than guessing or snapping to zero.
-  const demoElapsed = useRef(0)
+  const demoTour = useRef<DemoTourState | null>(null)
   const demoIntro = useRef<DemoIntro | null>(null)
   const rollBank = useRef(0)
   const rollRecovery = useRef<RollRecovery | null>(null)
@@ -236,18 +264,26 @@ export function FreeFlyControls({ demoActive = false }: FreeFlyControlsProps = {
     // useFrame — see the refs' doc comments above).
     if (demoActive && !wasDemoActive.current) {
       // Entering Demo Mode: capture the camera's current pose as the intro's
-      // start, reset the flight-loop clock, and drop any in-flight Focus
-      // tween — Demo Mode takes the camera over outright.
+      // start, create a fresh Canyon tour entering at the nearest waypoint to
+      // that pose (#91, ADR-0010), and drop any in-flight Focus tween — Demo
+      // Mode takes the camera over outright.
       forward.current.set(0, 0, -1).applyQuaternion(camera.quaternion).add(camera.position)
-      demoIntro.current = {
-        from: {
-          position: camera.position.toArray() as [number, number, number],
-          target: forward.current.toArray() as [number, number, number],
-        },
-        elapsed: 0,
+      const entry: Pose = {
+        position: camera.position.toArray() as [number, number, number],
+        target: forward.current.toArray() as [number, number, number],
       }
-      demoElapsed.current = 0
+      demoIntro.current = { from: entry, elapsed: 0 }
+      demoTour.current = createDemoTour({ seed: demoSeed, placements, entry })
       tween.current = null
+      // Reproduction-critical logging (#91): the seed and activation pose are
+      // the "same spot + same seed replays identically" key (ADR-0010). Only
+      // guaranteed to reproduce while Demo Mode is enabled at startup (the
+      // camera unflown at the fixed default pose) — see `useAppConfig`/#91;
+      // this console log covers the best-effort interactive-activation case.
+      const { yaw, pitch } = focusLookAngles(entry.position, entry.target)
+      console.log(
+        `Demo Mode activated: seed=${demoSeed} position=[${entry.position.map((v) => v.toFixed(2)).join(', ')}] yaw=${yaw.toFixed(3)} pitch=${pitch.toFixed(3)}`,
+      )
     } else if (!demoActive && wasDemoActive.current) {
       // Leaving Demo Mode: ease the bank back to level from whatever it was
       // the instant control hands back, instead of snapping it to zero — the
@@ -261,22 +297,35 @@ export function FreeFlyControls({ demoActive = false }: FreeFlyControlsProps = {
     }
     wasDemoActive.current = demoActive
 
-    if (demoActive) {
-      // Cap the flight clock's own step for the same reason the Focus tween
-      // caps its elapsed step below: a stall's oversized delta must not leap
-      // the flight path far ahead in one frame.
-      demoElapsed.current += Math.min(delta, MAX_FOCUS_STEP_SECONDS)
+    // `demoTour.current` is always set the instant `demoActive` flips true
+    // (the edge-detect block above runs earlier this same frame) — the `&&`
+    // is only to satisfy the type checker's null-check, never a real fallthrough.
+    if (demoActive && demoTour.current) {
+      // Cap the tour's own step for the same reason the Focus tween caps its
+      // elapsed step below: a stall's oversized delta must not leap the
+      // Canyon tour far ahead in one frame.
+      const step = Math.min(delta, MAX_FOCUS_STEP_SECONDS)
+      if (demoIntro.current) {
+        demoIntro.current.elapsed += step
+      }
+      // While the intro runs, the tour's own advancement is ramped from 0 up
+      // to full speed (demoIntroSpeedFactor), so activation reads as gently
+      // taking flight from the current pose rather than the flight departing
+      // at full cruise the instant the toggle flips — the tour still advances
+      // during the intro (never waits for it), just eased.
+      const ramp = demoIntro.current ? demoIntroSpeedFactor(demoIntro.current.elapsed) : 1
+      demoTour.current = stepDemoTour(demoTour.current, step * ramp, placements)
+      const flight = sampleDemoTourPose(demoTour.current)
 
       let flightPose: DemoPose
       if (demoIntro.current) {
-        demoIntro.current.elapsed += Math.min(delta, MAX_FOCUS_STEP_SECONDS)
-        const sample = sampleDemoIntro(demoIntro.current, demoElapsed.current)
+        const sample = sampleDemoIntro(demoIntro.current, flight)
         flightPose = sample.pose
         if (sample.done) {
           demoIntro.current = null
         }
       } else {
-        flightPose = demoPose(demoElapsed.current)
+        flightPose = flight
       }
 
       camera.position.set(...flightPose.position)

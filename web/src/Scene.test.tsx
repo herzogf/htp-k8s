@@ -1,10 +1,18 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { DEFAULT_APP_CONFIG } from './appConfig'
 import { type Tower, type ViewMode, ViewModeNamespace, ViewModeNode } from './generated/scenestate'
+import { useAppConfig } from './hooks/useAppConfig'
 import { Scene } from './Scene'
 import { type TowerPlacement } from './scene/towerLayout'
 import { makeSceneState, makeTower } from './test-support/sceneFixtures'
+
+// Scene fetches the backend's startup config once at bootstrap (#91) through
+// this hook; stand it in so no test here makes a real network call, defaulting
+// to Demo Mode off/an arbitrary seed (mirroring the hook's own pre-fetch
+// default) unless a test overrides it via `vi.mocked(useAppConfig)`.
+vi.mock('./hooks/useAppConfig', () => ({ useAppConfig: vi.fn() }))
 
 // jsdom has no WebGL context, so the real @react-three/fiber Canvas can't
 // mount here. Full 3D rendering correctness is covered by the Playwright
@@ -22,14 +30,28 @@ vi.mock('@react-three/drei', () => ({
 
 // FreeFlyControls (#20) drives the live camera via useThree/useFrame, which have
 // no WebGL context under jsdom. Its movement/look maths is unit-tested in
-// scene/freeFly.test.ts, Demo Mode's flight/hand-off maths in
+// scene/freeFly.test.ts, Demo Mode's Canyon-tour/hand-off maths in
 // scene/demoMode.test.ts, and the rig's wiring by the Playwright interaction/
-// demo e2e tests, so here it's a stand-in that just surfaces the `demoActive`
-// prop Scene passes it (as a data attribute), so this file can assert the HUD
-// toggle (#22) actually reaches the rig without a renderer.
+// demo e2e tests, so here it's a stand-in that just surfaces the props Scene
+// passes it (as data attributes), so this file can assert the HUD toggle
+// (#22) and the Canyon tour's placements/seed (#91) actually reach the rig
+// without a renderer.
 vi.mock('./scene/FreeFlyControls', () => ({
-  FreeFlyControls: ({ demoActive }: { demoActive?: boolean }) => (
-    <div data-testid="free-fly-controls" data-demo-active={demoActive ?? false} />
+  FreeFlyControls: ({
+    demoActive,
+    placements,
+    demoSeed,
+  }: {
+    demoActive?: boolean
+    placements?: readonly TowerPlacement[]
+    demoSeed?: number
+  }) => (
+    <div
+      data-testid="free-fly-controls"
+      data-demo-active={demoActive ?? false}
+      data-placements-count={placements?.length ?? 0}
+      data-demo-seed={demoSeed ?? ''}
+    />
   ),
 }))
 
@@ -79,6 +101,10 @@ const sceneState = (viewMode: ViewMode, towers: Tower[] = []) =>
   makeSceneState({ viewMode, towers })
 
 describe('Scene', () => {
+  beforeEach(() => {
+    vi.mocked(useAppConfig).mockReturnValue(DEFAULT_APP_CONFIG)
+  })
+
   it('renders an R3F canvas', () => {
     render(<Scene sceneState={null} />)
 
@@ -199,6 +225,54 @@ describe('Scene', () => {
 
       expect(toggle).toHaveAttribute('aria-pressed', 'false')
       expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-demo-active', 'false')
+    })
+
+    it("seeds demoActive from the backend's demoAutostart config on bootstrap (#91)", () => {
+      vi.mocked(useAppConfig).mockReturnValue({ demoSeed: 1, demoAutostart: true })
+
+      render(<Scene sceneState={sceneState(ViewModeNode)} />)
+
+      const toggle = screen.getByRole('button', { name: /demo mode/i })
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-demo-active', 'true')
+    })
+
+    it('does not autostart when the backend config leaves demoAutostart off', () => {
+      vi.mocked(useAppConfig).mockReturnValue({ demoSeed: 1, demoAutostart: false })
+
+      render(<Scene sceneState={sceneState(ViewModeNode)} />)
+
+      expect(screen.getByRole('button', { name: /demo mode/i })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      )
+    })
+  })
+
+  // The Canyon tour (#91) is built from the scene's actual Tower placements
+  // and the backend-resolved seed; this proves Scene threads both through to
+  // FreeFlyControls rather than the rig inventing its own.
+  describe('Canyon tour wiring (#91)', () => {
+    it("hands FreeFlyControls the scene's Tower placements", () => {
+      const towers = [tower('alpha', 0, 0), tower('bravo', 1, 0), tower('charlie', 0, 1)]
+
+      render(<Scene sceneState={sceneState(ViewModeNode, towers)} />)
+
+      expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-placements-count', '3')
+    })
+
+    it('hands FreeFlyControls no placements before any snapshot has arrived', () => {
+      render(<Scene sceneState={null} />)
+
+      expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-placements-count', '0')
+    })
+
+    it('hands FreeFlyControls the backend-resolved demo seed from GET /api/config', () => {
+      vi.mocked(useAppConfig).mockReturnValue({ demoSeed: 12345, demoAutostart: false })
+
+      render(<Scene sceneState={null} />)
+
+      expect(screen.getByTestId('free-fly-controls')).toHaveAttribute('data-demo-seed', '12345')
     })
   })
 })

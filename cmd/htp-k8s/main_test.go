@@ -115,6 +115,150 @@ func TestParseFlags_InvalidNamePatternRejected(t *testing.T) {
 	}
 }
 
+// TestParseFlags_DemoSeedDefaultsToRandomWhenUnset proves that with neither
+// the flag nor the env var set, parseFlags still resolves a seed (rather than
+// the zero value) — Demo Mode's Canyon tour (ADR-0010) always has something to
+// seed from, even when an operator never sets one explicitly.
+func TestParseFlags_DemoSeedDefaultsToRandomWhenUnset(t *testing.T) {
+	opts, err := parseFlags(nil, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoSeed == 0 {
+		t.Fatal("demoSeed = 0 with no flag or env, want a resolved (non-zero) random seed")
+	}
+}
+
+// TestParseFlags_DemoSeedFlagIsHonored proves an explicit -demo-seed is used
+// verbatim, not overridden by the random fallback — including the seed 0,
+// which is a legitimate explicit seed distinct from "unset".
+func TestParseFlags_DemoSeedFlagIsHonored(t *testing.T) {
+	opts, err := parseFlags([]string{"-demo-seed", "0"}, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoSeed != 0 {
+		t.Fatalf("demoSeed = %d, want the explicit 0", opts.demoSeed)
+	}
+
+	opts, err = parseFlags([]string{"-demo-seed", "12345"}, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoSeed != 12345 {
+		t.Fatalf("demoSeed = %d, want 12345", opts.demoSeed)
+	}
+}
+
+// TestParseFlags_DemoSeedFromEnv proves HTP_K8S_DEMO_SEED is honored,
+// mirroring the addr/filter env precedent.
+func TestParseFlags_DemoSeedFromEnv(t *testing.T) {
+	opts, err := parseFlags(nil, envMap(map[string]string{"HTP_K8S_DEMO_SEED": "777"}))
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoSeed != 777 {
+		t.Fatalf("demoSeed = %d, want 777", opts.demoSeed)
+	}
+}
+
+// TestParseFlags_DemoSeedFlagOverridesEnv proves flag > env precedence for
+// -demo-seed/HTP_K8S_DEMO_SEED.
+func TestParseFlags_DemoSeedFlagOverridesEnv(t *testing.T) {
+	opts, err := parseFlags([]string{"-demo-seed", "5"}, envMap(map[string]string{"HTP_K8S_DEMO_SEED": "9"}))
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoSeed != 5 {
+		t.Fatalf("demoSeed = %d, want 5", opts.demoSeed)
+	}
+}
+
+// TestParseFlags_InvalidDemoSeedRejected proves a non-integer -demo-seed fails
+// at startup rather than silently falling back to a random seed.
+func TestParseFlags_InvalidDemoSeedRejected(t *testing.T) {
+	if _, err := parseFlags([]string{"-demo-seed", "not-a-number"}, noEnv); err == nil {
+		t.Fatal("expected an error for a non-integer demo seed, got nil")
+	}
+}
+
+// TestParseFlags_DemoDefaultsFalse proves Demo Mode does not auto-start
+// unless requested.
+func TestParseFlags_DemoDefaultsFalse(t *testing.T) {
+	opts, err := parseFlags(nil, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoAutostart {
+		t.Fatal("demoAutostart = true with no flag or env, want false")
+	}
+}
+
+// TestParseFlags_DemoFlagEnablesAutostart proves the -demo flag enables
+// autostart.
+func TestParseFlags_DemoFlagEnablesAutostart(t *testing.T) {
+	opts, err := parseFlags([]string{"-demo"}, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if !opts.demoAutostart {
+		t.Fatal("demoAutostart = false with -demo set, want true")
+	}
+}
+
+// TestParseFlags_DemoFromEnv proves HTP_K8S_DEMO is honored, mirroring the
+// addr/filter env precedent.
+func TestParseFlags_DemoFromEnv(t *testing.T) {
+	opts, err := parseFlags(nil, envMap(map[string]string{"HTP_K8S_DEMO": "true"}))
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if !opts.demoAutostart {
+		t.Fatal("demoAutostart = false with HTP_K8S_DEMO=true, want true")
+	}
+}
+
+// TestParseFlags_DemoFlagOverridesEnv proves flag > env precedence for
+// -demo/HTP_K8S_DEMO, and that -demo=false can override an env default of true.
+func TestParseFlags_DemoFlagOverridesEnv(t *testing.T) {
+	opts, err := parseFlags([]string{"-demo=false"}, envMap(map[string]string{"HTP_K8S_DEMO": "true"}))
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoAutostart {
+		t.Fatal("demoAutostart = true with -demo=false overriding HTP_K8S_DEMO=true, want false")
+	}
+}
+
+// TestParseFlags_InvalidDemoEnvRejected proves a malformed HTP_K8S_DEMO value
+// fails at startup rather than silently defaulting.
+func TestParseFlags_InvalidDemoEnvRejected(t *testing.T) {
+	if _, err := parseFlags(nil, envMap(map[string]string{"HTP_K8S_DEMO": "not-a-bool"})); err == nil {
+		t.Fatal("expected an error for a malformed HTP_K8S_DEMO value, got nil")
+	}
+}
+
+// TestParseFlags_DemoSeedAndAutostartAreOrthogonal proves the two flags can be
+// set independently in either combination — a seed without autostart, and
+// autostart without an explicit seed.
+func TestParseFlags_DemoSeedAndAutostartAreOrthogonal(t *testing.T) {
+	opts, err := parseFlags([]string{"-demo-seed", "42"}, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.demoSeed != 42 || opts.demoAutostart {
+		t.Fatalf("opts = %+v, want seed 42 with autostart false", opts)
+	}
+
+	opts, err = parseFlags([]string{"-demo"}, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if !opts.demoAutostart || opts.demoSeed == 0 {
+		t.Fatalf("opts = %+v, want autostart true with a resolved (non-zero) random seed", opts)
+	}
+}
+
 func TestVersionRequested(t *testing.T) {
 	cases := []struct {
 		name string

@@ -13,6 +13,10 @@ _Avoid_: tile, cell, block
 
 **Floor Lane**:
 A glowing line on the scene floor connecting two Towers, carrying traveling light pulses. In v1, decorative only (not driven by real cluster data). Reserved for later wiring to a real traffic or control-plane signal.
+_Note_: a **Canyon** is the distinct concept — the open *air* corridor between Towers that Demo Mode flies through, not this ground light-line. (A future ticket may tighten this term once the lanes carry a real signal — e.g. "Link" / "Traffic Lane"; keep "Floor Lane" until then.)
+
+**Canyon**:
+The open air corridor between grid-adjacent Tower columns/rows that Demo Mode's flight threads through — the "urban canyon" (Häuserschlucht) between the skyscrapers. *Interior canyons* run between Towers (structures on both sides); *perimeter canyons* hug the outer edge of the cluster (Towers on one side, open space on the other, and the room to bank around a corner). Distinct from a **Floor Lane** (the decorative ground light-line): a Canyon is in the air and is where the camera flies, not a rendered object.
 
 **View Mode**:
 Determines what a Tower represents: Node-mode (Towers = Nodes, Panels = pods scheduled on that node) or Namespace-mode (Towers = Namespaces/Projects, Panels = pods in that namespace). Auto-selected at startup based on a permission probe (falls back to Namespace-mode when the user can't list Nodes), and user-switchable at any time.
@@ -28,7 +32,7 @@ An in-world (not fixed screen-space) popup shown beside a clicked Tower or Panel
 The camera behavior triggered by clicking a Tower or Panel: smoothly animates the free-fly camera to a good viewing distance/angle (a specific tower side for a Tower, close enough to read the Detail Popup for a Panel), rather than teleporting.
 
 **Demo Mode**:
-An optional automated cinematic camera flight through the tower landscape, with a swinging/banking motion (like a small plane navigating between skyscrapers), for unattended/showcase viewing.
+An optional automated cinematic camera flight through the tower landscape, with a swinging/banking motion (like a small plane navigating between skyscrapers), for unattended/showcase viewing. The flight threads the **Canyons** between Towers — sometimes dropping low through a canyon, sometimes rising over the rooftops — always keeping the Towers in frame. Because it targets hours-long unattended display, the route is a seeded, non-repeating tour rather than a fixed loop; see [[0010-demo-mode-is-a-seeded-stochastic-canyon-tour]]. Can be auto-started at launch via a CLI argument.
 
 **Namespace Filter**:
 User-controlled visibility filter over Namespaces/Projects. Simple mode filters by name (with wildcard/pattern support); advanced mode filters by label. Nothing is excluded by default — all namespaces are visible on first launch. Can be preset via a CLI argument at startup.
