@@ -1,6 +1,6 @@
 import { Canvas } from '@react-three/fiber'
 import { Text } from '@react-three/drei'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type SceneState } from './generated/scenestate'
 import { viewModeLabel } from './scene/sceneState'
 import { towerPlacements } from './scene/towerLayout'
@@ -14,6 +14,7 @@ import { DetailLayer } from './detail/DetailLayer'
 import { type Selection } from './detail/selection'
 import { SelectionContext, type SelectionApi } from './detail/selectionContext'
 import { useDetailTestHook } from './detail/useDetailTestHook'
+import { useAppConfig } from './hooks/useAppConfig'
 
 const WAITING_TEXT = 'Waiting for connection…'
 
@@ -55,8 +56,21 @@ export function Scene({ sceneState }: SceneProps) {
   // Demo Mode (#22): an optional, user-toggleable automated cinematic camera
   // flight (CONTEXT.md's Demo Mode) for unattended/showcase viewing. The HUD
   // toggle just flips this boolean; FreeFlyControls owns the flight itself
-  // (and the smooth hand-off back to free-fly on toggle-off).
+  // (and the smooth hand-off back to free-fly on toggle-off). `appConfig` is
+  // the backend's startup config (#91, `GET /api/config`, fetched once):
+  // `demoSeed` threads into FreeFlyControls' Canyon tour so it's reproducible,
+  // and `demoAutostart` seeds `demoActive` the moment it arrives — but only
+  // once (the ref below), so it can never stomp a toggle the user already made
+  // by hand while the fetch was still in flight.
+  const appConfig = useAppConfig()
   const [demoActive, setDemoActive] = useState(false)
+  const autostartApplied = useRef(false)
+  useEffect(() => {
+    if (!autostartApplied.current && appConfig.demoAutostart) {
+      autostartApplied.current = true
+      setDemoActive(true)
+    }
+  }, [appConfig.demoAutostart])
   const toggleDemoActive = useCallback(() => setDemoActive((active) => !active), [])
   // Publish a stable test handle so the e2e can open a Tower/Panel popup
   // deterministically, instead of relying on a headless canvas raycast landing
@@ -84,8 +98,14 @@ export function Scene({ sceneState }: SceneProps) {
               orientation — so the default framed skyline is unchanged until the
               user flies. A click-to-Focus fly-to (#21) and the automated Demo
               Mode flight (#22, toggled by the HUD control below) coexist in the
-              same rig, which owns handing control between them smoothly. */}
-            <FreeFlyControls demoActive={demoActive} />
+              same rig, which owns handing control between them smoothly.
+              `placements`/`demoSeed` (#91) are what the Demo Mode Canyon tour
+              is built from — see FreeFlyControls' prop docs. */}
+            <FreeFlyControls
+              demoActive={demoActive}
+              placements={placements}
+              demoSeed={appConfig.demoSeed}
+            />
             <color attach="background" args={['#05050a']} />
             {/* Dim ambient plus a key light: enough to read the prisms' faces while
               keeping the dark, high-contrast data-center mood. The Towers are
