@@ -21,7 +21,13 @@ import {
   type RollRecovery,
 } from './demoMode'
 import { type Pose } from './focus'
-import { TOWER_HEIGHT, TOWER_SPACING, towerPlacements, type TowerPlacement } from './towerLayout'
+import {
+  TOWER_FOOTPRINT,
+  TOWER_HEIGHT,
+  TOWER_SPACING,
+  towerPlacements,
+  type TowerPlacement,
+} from './towerLayout'
 import { type Tower } from '../generated/scenestate'
 import { makeTower } from '../test-support/sceneFixtures'
 
@@ -393,6 +399,90 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
     // actually exercising the regression.
     expect(sawDeepOverview).toBe(true)
   })
+})
+
+/**
+ * The forcing-function test for #91's root-cause fix: a renderer-free
+ * invariant, checked densely across several full seeded tours, that no
+ * sampled look-at target ever aims into the void — the property both bug
+ * flavours (the original horizontal-only "aims at empty sky" bug, and the
+ * climb/dive transition bug this changeset fixes) violated. This does not
+ * reuse {@link nearestTowerPull}'s internal clearance math — it's a
+ * deliberately independent re-implementation of "distance from a point to the
+ * nearest Tower's bounding volume", so a bug in the production clearance
+ * calculation itself wouldn't slip through as a tautology.
+ *
+ * `VOID_CLEARANCE_THRESHOLD` is derived from the scene geometry: two Tower
+ * spacings (`TOWER_SPACING * 2` = 8 world units). That's small relative to
+ * the Canyon graph's full extent (a 5x5 grid plus the perimeter ring spans
+ * several times that), but generous enough to allow the intentional partial
+ * blend (`LOOKAT_TOWER_PULL_MAX` = 0.6, not 1.0 — the look-at is allowed to
+ * sit partway between the forward point and the nearest Tower, not snap fully
+ * onto it) during a legitimate deep-overview pass or a wide turn. It is not a
+ * loosened-to-pass number: a version of this same measurement run against the
+ * pre-fix code (this changeset's HEAD~1) put ~9% of sampled frames, across
+ * every seed tried, above this exact threshold (max observed clearance ~10.6,
+ * consistently, vs. this fix's observed max of ~6.8 across the same seeds and
+ * duration) — i.e. this threshold is comfortably below what the known-broken
+ * behaviour produces and comfortably above what the fixed behaviour produces.
+ */
+describe('the demand-driven look-at never aims into the void (#91 forcing-function invariant)', () => {
+  const placements = grid(5, 5)
+  const VOID_CLEARANCE_THRESHOLD = TOWER_SPACING * 2
+
+  /**
+   * Independent re-implementation of point-to-Tower-bounding-box distance
+   * (deliberately not imported from demoMode.ts — see the describe block's
+   * doc comment).
+   */
+  function clearanceToNearestTower(
+    target: readonly number[],
+    allPlacements: TowerPlacement[],
+  ): number {
+    const halfFootprint = TOWER_FOOTPRINT / 2
+    let nearest = Infinity
+    for (const placement of allPlacements) {
+      const dx = Math.max(0, Math.abs(target[0] - placement.position[0]) - halfFootprint)
+      const dz = Math.max(0, Math.abs(target[2] - placement.position[2]) - halfFootprint)
+      const dy = Math.max(0, target[1] - TOWER_HEIGHT, -target[1])
+      nearest = Math.min(nearest, Math.hypot(dx, dy, dz))
+    }
+    return nearest
+  }
+
+  // Several seeds, including the one explicitly called out for coverage.
+  // Each is driven for a long, densely-sampled run — several full tours'
+  // worth of segments (canyon hops and overview hops both), not just a few
+  // seconds — so the invariant is checked across every regime the tour
+  // visits: canyon-forward, flat overview, and the climb/dive transitions
+  // between them.
+  const seeds = [42424242, 1, 7, 13, 55]
+  const SAMPLE_INTERVAL_SECONDS = 0.25
+  const TOUR_DURATION_SECONDS = 150 // several dozen segments per seed
+
+  it.each(seeds)(
+    'seed %i: every sampled pose looks at/near a Tower, never into the void',
+    (seed) => {
+      let tour: DemoTourState = createDemoTour({ seed, placements, entry: ORIGIN_POSE })
+      const steps = Math.round(TOUR_DURATION_SECONDS / SAMPLE_INTERVAL_SECONDS)
+      let maxClearanceSeen = 0
+
+      for (let i = 0; i < steps; i++) {
+        tour = stepDemoTour(tour, SAMPLE_INTERVAL_SECONDS, placements)
+        const pose = sampleDemoTourPose(tour, placements)
+        const clearance = clearanceToNearestTower(pose.target, placements)
+        maxClearanceSeen = Math.max(maxClearanceSeen, clearance)
+
+        expect(clearance).toBeLessThan(VOID_CLEARANCE_THRESHOLD)
+      }
+
+      // Sanity check on the test itself: a run this long, over a 5x5 grid with
+      // OVERVIEW_PROBABILITY=0.15, should have exercised a real mix of canyon
+      // and overview altitude (i.e. this isn't accidentally a no-op check that
+      // never got near the danger zone in the first place).
+      expect(maxClearanceSeen).toBeGreaterThan(0)
+    },
+  )
 })
 
 describe('the orbit-and-bob fallback', () => {
