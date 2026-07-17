@@ -16,4 +16,4 @@ Use the `playwright-cli` skill for authoring/debugging these tests interactively
 
 You're dispatched **on demand** — when a dev subagent flags an e2e/visual-coverage need or the `code-reviewer` flags an integration/e2e-relevant untested feature, and **before** that PR's review. CI already runs the existing e2e suite and captures artifacts on every PR; your job is to extend that coverage so it exercises and visually proves *new* features, not to run what already exists.
 
-For a **feel-changing** PR (camera/animation/aesthetic), producing the **ADR-0011 layer-3 authoritative video capture** for the maintainer's human review is part of your remit — that review is itself a merge gate (see AGENTS.md → _Review gate_), because CI validates motion mechanics, not choreography.
+For a **feel-changing** PR (camera/animation/aesthetic), producing the **ADR-0011 layer-3 authoritative video capture** for the maintainer's human review is part of your remit — that review is itself a merge gate (see AGENTS.md → _Review gate, fixes & merge_), because CI validates motion mechanics, not choreography.
