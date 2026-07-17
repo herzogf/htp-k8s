@@ -50,10 +50,9 @@ Runs on **vanilla Kubernetes**. **OpenShift** support is planned but **not yet t
 
 ## See it
 
-| | |
+| Detail popups — live detail and a log tail on any pod or node | Floor lanes — the *Hackers* wiring between the towers |
 |---|---|
 | ![Detail popup on a pod, with a live log tail](docs/images/detail-popup.png) | ![The floor lanes between towers](docs/images/floor-lanes.png) |
-| **Detail popups** — click any pod or node for live detail and a log tail. | **Floor lanes** — the *Hackers* wiring running between the towers. |
 
 ![Deep in the canyon between node towers](docs/images/canyon.png)
 
