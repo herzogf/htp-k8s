@@ -1,6 +1,6 @@
 # htp-k8s
 
-**A cinematic, *Hackers*-(1995)-styled live 3D view of your Kubernetes cluster.** Hack the planet.
+**A cinematic, *Hackers*-(1995)-styled live 3D view of your Kubernetes cluster.** Hack the planet!
 
 ![htp-k8s — a 3D city of node towers](docs/images/hero.png)
 
@@ -42,7 +42,7 @@ kind create cluster        # htp-k8s shows this single node as one lone tower
 ./htp-k8s
 ```
 
-For a *populated* multi-tower scene (artificial KWOK load) and for building from source, see **[Running & developing locally](docs/running-locally.md)**.
+For a *populated* multi-tower scene (artificial [KWOK](https://kwok.sigs.k8s.io/) load) and for building from source, see **[Running & developing locally](docs/running-locally.md)**.
 
 ## Cluster support
 
@@ -62,7 +62,7 @@ Runs on **vanilla Kubernetes**. **OpenShift** support is planned but **not yet t
 
 ## Supply chain
 
-Every release is built in CI with **keyless, Sigstore-backed attestations** — build provenance for the binaries and the container image, plus a CycloneDX **SBOM** per artifact — and is **CVE-scanned** with Trivy. There are no keys to manage; verify what you downloaded with the `gh` CLI:
+Every release is built in CI with **keyless, Sigstore-backed attestations** — build provenance for the binaries and the container image, plus a CycloneDX **SBOM** per artifact — and is **CVE-scanned** with Trivy. There are no keys to manage; verify what you downloaded with the [GitHub CLI (`gh`)](https://cli.github.com/):
 
 ```bash
 # the release binary you downloaded
