@@ -50,9 +50,9 @@ Runs on **vanilla Kubernetes**. **OpenShift** support is planned but **not yet t
 
 ## See it
 
-| Detail popups — live detail and a log tail on any pod or node | Threading the canyon between the towers |
-|---|---|
-| ![Detail popup on a pod, with a live log tail](docs/images/detail-popup.png) | ![Deep in the canyon between node towers](docs/images/canyon.png) |
+![Detail popup on a pod, with a live log tail](docs/images/detail-popup.png)
+
+*Detail popups — live detail and a log tail on any pod or node.*
 
 ![The floor lanes running between the towers](docs/images/floor-lanes.png)
 
