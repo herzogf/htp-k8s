@@ -12,3 +12,5 @@ Two tiers:
 - **KWOK**, run as a controller attached to that same kind cluster (not a separate cluster stack), adding simulated Node/Pod objects on top of the real ones. Modest scale (5-10 nodes, 30-50 pods) for the PR-blocking suite; full target scale (50+ nodes, thousands of pods) reserved for the nightly/scheduled suite only — see ADR-0004 for why that split exists (CI flakiness risk from software-WebGL rendering at scale, not cost).
 
 Always tear down any cluster you create, even on test failure. Keep the PR-blocking suite fast; anything that needs full target scale belongs in the nightly job, not here.
+
+You're dispatched **on demand**, not on every PR — when a dev subagent flags an integration-coverage need or the `code-reviewer` flags one, and **before** that PR's review. The PR-blocking suite already runs in CI on every PR; your job is to author/extend that coverage, not to run what already exists.
