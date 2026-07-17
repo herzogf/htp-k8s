@@ -29,8 +29,8 @@ This project is built entirely by AI, directed by the user rather than hand-writ
 - **Architect/orchestrator** — not a subagent. Whichever session is driving `/implement` plays this role: read the ticket(s), decide sequential vs. parallel dispatch, choose which subagent handles which ticket, and dispatch the mandatory `code-reviewer` once component work lands. **Delegates implementation by default** — the dev subagents write the code; the orchestrator does only small, conscious, announced fixes when it already holds the full analysis (e.g. acting directly on a review finding), and a re-review must follow any such fix.
 - **`backend-developer`** (`.claude/agents/backend-developer.md`) — Go backend (`cmd/`, `internal/`).
 - **`frontend-developer`** (`.claude/agents/frontend-developer.md`) — React Three Fiber frontend (`web/`).
-- **`backend-tester`** (`.claude/agents/backend-tester.md`) — kind + KWOK integration tests. On-demand only (see _Review gate_).
-- **`frontend-tester`** (`.claude/agents/frontend-tester.md`) — Playwright e2e, screenshots/video. On-demand only (see _Review gate_).
+- **`backend-tester`** (`.claude/agents/backend-tester.md`) — kind + KWOK integration tests. On-demand only (see _Testers are empirical & on-demand_).
+- **`frontend-tester`** (`.claude/agents/frontend-tester.md`) — Playwright e2e, screenshots/video. On-demand only (see _Testers are empirical & on-demand_).
 - **`code-reviewer`** (`.claude/agents/code-reviewer.md`, `opus`) — independent, mandatory pre-merge review along three axes (Standards, Spec, Integration/Coherence) plus a security-review triage flag. Reads only; **never** fixes its own findings. Applies the methodology in `docs/agents/code-review.md`.
 - **`release-manager`** (`.claude/agents/release-manager.md`) — GoReleaser/`ko`/SBOM/attestation pipeline. Can prepare a release autonomously; **never** tags/pushes/triggers the real release without the user's explicit go-ahead in that turn.
 
@@ -49,7 +49,7 @@ Every PR passes an independent review before it can merge — **no exceptions, i
 3. **Review (mandatory).** Once work lands on the PR branch, the orchestrator dispatches the **`code-reviewer`** subagent against the PR diff. It reviews along three axes (Standards, Spec, Integration/Coherence) and returns a `security_review_recommended` triage flag. It **never fixes its own findings.**
 4. **Security (conditional).** If the reviewer flags `security_review_recommended: yes`, the orchestrator runs the `/security-review` skill and folds in its findings.
 5. **Fix.** Blocking findings go back to the **original dev subagent**; the orchestrator may apply only small, conscious, announced fixes when it already holds the full analysis. After any fix the orchestrator **re-dispatches the reviewer** on the updated diff. The loop is capped at **3 rounds**, then **escalate to the human**.
-6. **Merge gate.** A PR merges only when **both** hold: CI is green (including the strict up-to-date-branch checks) **and** the `code-reviewer` returns no blocking findings (and `/security-review` is clean, if it ran).
+6. **Merge gate.** A PR merges only when: CI is green (including the strict up-to-date-branch checks); the `code-reviewer` returns no blocking findings (and `/security-review` is clean, if it ran); **and — for any PR that changes camera/animation/aesthetic *feel* — the ADR-0011 layer-3 authoritative video capture has had its human review.** CI validates motion *mechanics*, not choreography or aesthetics, so a feel-changing PR is not merge-ready on green CI + clean review alone (see ADR-0011 and `frontend-developer.md`).
 
 ### Testers are empirical & on-demand
 
