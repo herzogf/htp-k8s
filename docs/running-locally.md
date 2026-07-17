@@ -97,7 +97,7 @@ Quick sanity check without a browser:
 
 ```bash
 curl -s http://localhost:8080/api/config                 # {"demoSeed":...,"demoAutostart":false}
-curl -s http://localhost:8080/api/towers/kwok-node-0     # tower detail, podCount ~7
+curl -s http://localhost:8080/api/towers/kwok-node-0     # tower detail, podCount 5
 ```
 
 ## Controls
