@@ -50,15 +50,17 @@ Runs on **vanilla Kubernetes**. **OpenShift** support is planned but **not yet t
 
 ## See it
 
-| Detail popups — live detail and a log tail on any pod or node | Floor lanes — the *Hackers* wiring between the towers |
+| Detail popups — live detail and a log tail on any pod or node | Threading the canyon between the towers |
 |---|---|
-| ![Detail popup on a pod, with a live log tail](docs/images/detail-popup.png) | ![The floor lanes between towers](docs/images/floor-lanes.png) |
+| ![Detail popup on a pod, with a live log tail](docs/images/detail-popup.png) | ![Deep in the canyon between node towers](docs/images/canyon.png) |
 
-![Deep in the canyon between node towers](docs/images/canyon.png)
+![The floor lanes running between the towers](docs/images/floor-lanes.png)
+
+*Floor lanes — the *Hackers* wiring running between the towers.*
 
 ![Demo Mode: a hands-off camera tour threading the canyon between towers](docs/images/demo-canyon-tour.gif)
 
-*Demo Mode threads a hands-off cinematic tour through the canyon between towers.*
+*Demo Mode threads a hands-off cinematic tour through the canyon between the towers.*
 
 ## Supply chain
 
