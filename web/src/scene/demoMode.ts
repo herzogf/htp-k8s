@@ -94,9 +94,9 @@ export const PERIMETER_OFFSET = TOWER_SPACING * 1.1
 /**
  * World-space Y of a Tower's roofline (its prism top) — `TOWER_HEIGHT`, since
  * a Tower's centre sits at `TOWER_HEIGHT / 2` (towerLayout.ts) resting on the
- * floor at y = 0. The one fixed reference the altitude program and the
- * look-at's vertical pull ({@link nearestTowerPull}) are both measured
- * against.
+ * floor at y = 0. The fixed reference the altitude program, the Tower-box
+ * clearance ({@link towerBoxClearance}) and the rendered aim's hard ceiling
+ * ({@link sampleDemoTourPose}) are measured against.
  */
 const TOWER_ROOFLINE_Y = TOWER_HEIGHT
 
@@ -150,6 +150,69 @@ export const OVERVIEW_ALTITUDE_MAX = TOWER_HEIGHT * 1.6
 export const OVERVIEW_EPISODE_WAYPOINTS = 6
 export const OVERVIEW_GAP_WAYPOINTS_MIN = 12
 export const OVERVIEW_GAP_WAYPOINTS_MAX = 24
+
+/**
+ * The wide-vantage half of an overview episode (#105 iteration 4 — "could
+ * the plane fly a tad more to the outside sometimes, to give the viewer an
+ * overview? Not often, but sometimes"): while a *wide* episode's wide phase
+ * runs (see {@link isWideOverviewDraw}), waypoints on a perimeter line swing
+ * OVERVIEW_PERIMETER_EXTRA farther out than {@link PERIMETER_OFFSET} — a
+ * brief high-and-wide hero pass along the cluster edge (up to two
+ * consecutive waypoints of it — see {@link OVERVIEW_WIDE_START_WAYPOINT}),
+ * then back to the tight ring.
+ *
+ * 0.7 spacings is a calibration between two measured cliffs. Larger (0.9
+ * tried): the entry/exit diagonals steepen to ~42° of heading change against
+ * the lattice, and where such a diagonal meets a real 90° ring corner the
+ * leg-fraction clamp shrinks the corner's arc — peak heading rate rose from
+ * 7.6 to 8.7-9.2 rad/s, walking toward the 9.5 cusp guard. At 0.7 the
+ * diagonals are ~32° and the peak heading rate stays at the merged build's
+ * 7.5-7.9. Smaller offsets stop reading as a vantage change at all (the
+ * widened ring sits inside the wide-vantage framing distance). Only
+ * *straight* perimeter nodes widen — ring corners keep their exact geometry.
+ */
+export const OVERVIEW_PERIMETER_EXTRA = TOWER_SPACING * 0.7
+
+/**
+ * A *wide* overview episode is one waypoint shorter than a tight one: the
+ * wide detour's perpendicular entry/exit legs add roughly one leg's worth of
+ * apex-cruise distance, and the shorter episode refunds it — measured
+ * (layer-1, kwok7), without the refund every wide pass grew the tour's total
+ * time over the rooftops and time-in-canyon paid for it (0.70 → 0.68 on the
+ * worst seed).
+ */
+export const OVERVIEW_WIDE_EPISODE_WAYPOINTS = OVERVIEW_EPISODE_WAYPOINTS - 1
+
+/**
+ * Only *shallow-apex* episodes (apex at or below this altitude — the lower
+ * half of the overview band) go wide: a shallow climb clears the roofline
+ * within the wide phase's lead-in, while a deep apex is still climbing below
+ * the roofline when the wide phase would start — measured, deep wide
+ * episodes are exactly where time-in-canyon regressed. Deep episodes staying
+ * tight over the rooftops is also vantage *variety*, and the gate is what
+ * makes wide passes "sometimes, not often" by construction (roughly every
+ * other episode).
+ */
+export const OVERVIEW_WIDE_APEX_MAX = (OVERVIEW_ALTITUDE_MIN + OVERVIEW_ALTITUDE_MAX) / 2
+
+/**
+ * The wide phase starts this many waypoints into a wide episode — the
+ * climb-out's run — so widened legs are flown high, above the roofline, not
+ * during the climb. Two waypoints of lead-in clear the roofline from the
+ * *median* canyon start altitude ((CANYON_ALTITUDE_MIN + CANYON_ALTITUDE_MAX)/2
+ * ≈ 2.7 → (TOWER_HEIGHT − 2.7) / (MAX_CLIMB_GRADIENT × TOWER_SPACING) ≈ 2.0
+ * waypoints); the shallow-apex gate ({@link OVERVIEW_WIDE_APEX_MAX}) covers
+ * the deeper-start tail — measured, time-in-canyon holds its floor with this
+ * pairing, and one waypoint later the wide phase shrank to a single node
+ * whose out-and-back dogleg paid the same two roll side-changes for half the
+ * wide dwell.
+ *
+ * With a 5-waypoint wide episode this makes the wide phase waypoints #3-#4 —
+ * up to two *consecutive* widened waypoints (where the lattice cooperates: a
+ * shared perimeter line makes them one parallel widened stretch flown for a
+ * full leg) before the episode's final, never-widened waypoint.
+ */
+export const OVERVIEW_WIDE_START_WAYPOINT = 2
 
 /**
  * CANYON_TRAVEL_SPEED is the flight's *horizontal ground speed*, world
@@ -392,7 +455,8 @@ const LOOKAT_BLEND_RATE = 0.8
 
 /**
  * How fast (world units/second) the demand-driven pull's *anchor point* — the
- * nearest Tower's roofline point the blend aims toward — is allowed to move
+ * nearest Tower's anchor the blend aims toward (see {@link nearestTowerPull})
+ * — is allowed to move
  * (#91 feel pass). The geometric nearest Tower switches identity
  * *discontinuously* as the forward point sweeps across a Voronoi boundary
  * between two Towers; with any nonzero blend weight that used to snap the aim
@@ -451,6 +515,31 @@ const LOOKAT_MIN_HORIZONTAL_DISTANCE = TOWER_SPACING
  */
 export const LOOKAT_AIM_CEILING = TOWER_HEIGHT * 0.9
 export const LOOKAT_AIM_FLOOR = TOWER_HEIGHT * 0.1
+
+/**
+ * How much of the flown climb gradient the aim's altitude leads by (#105
+ * iteration 4 — the pitch analogue of #91's level-on-straight roll rule):
+ * the forward aim's altitude is `position.y + climbGradient ×
+ * LOOKAT_GAZE_GRADIENT_FACTOR × LOOKAT_LOOKAHEAD_DISTANCE`, so genuinely
+ * level flight aims exactly level down the canyon — the vanishing-point shot
+ * the tour never had — and a full climb/dive tilts the gaze gently
+ * (~atan(0.42 × 0.4) ≈ 9.5°) toward where the plane is going.
+ *
+ * Both endpoints of this dial were measured wrong before landing here
+ * (layer-1 aim-pitch metrics, 5 seeds × 3 grids). Before iteration 4 the aim
+ * altitude tracked the *route's upcoming waypoint altitudes* (the spline
+ * altitude metadata): with waypoints drawn anywhere in the canyon band, the
+ * aim led every altitude change at up to the full ±23° glide slope plus the
+ * roofline pull on top — median aim pitch +4..+11°, p90 +23..+32°, more than
+ * half of every tour pitched up > 5° (the "captain cranking his head up").
+ * At factor 1.0 (aim fully along the flown slope), dives dragged the aim
+ * into the canyon-floor clamp and the clamp re-keyed the rendered pitch at
+ * up to 40 rad/s² — worse than the bug being fixed. At 0.4 the whole pitch
+ * distribution sits at −5..+7° (p50 slightly below level — a pilot's gaze),
+ * and the demand stays clear of both aim-window bounds on nearly every
+ * frame (ceiling-pinned share 0.06-0.13 → ≤ 0.04).
+ */
+export const LOOKAT_GAZE_GRADIENT_FACTOR = 0.4
 
 /**
  * The sliding-window spline's parameterization (#91 smoothness pass):
@@ -1036,14 +1125,19 @@ function drawAltitude(
     }
   }
   if (program.waypointsLeft <= 0) {
-    // Gap exhausted: this waypoint begins a new overview episode.
+    // Gap exhausted: this waypoint begins a new overview episode — a *wide*
+    // (and one-waypoint-shorter) one when the drawn apex is shallow (see
+    // OVERVIEW_WIDE_EPISODE_WAYPOINTS / OVERVIEW_WIDE_APEX_MAX).
     const apexRoll = mulberry32Step(rngState)
     const apexAltitude =
       OVERVIEW_ALTITUDE_MIN + apexRoll.value * (OVERVIEW_ALTITUDE_MAX - OVERVIEW_ALTITUDE_MIN)
+    const episodeWaypoints = isWideApex(apexAltitude)
+      ? OVERVIEW_WIDE_EPISODE_WAYPOINTS
+      : OVERVIEW_EPISODE_WAYPOINTS
     return {
       altitude: apexAltitude,
       isOverview: true,
-      program: { mode: 'overview', waypointsLeft: OVERVIEW_EPISODE_WAYPOINTS - 1, apexAltitude },
+      program: { mode: 'overview', waypointsLeft: episodeWaypoints - 1, apexAltitude },
       nextState: apexRoll.nextState,
     }
   }
@@ -1054,6 +1148,31 @@ function drawAltitude(
     program: { mode: 'canyon', waypointsLeft: program.waypointsLeft - 1, apexAltitude: 0 },
     nextState: jitterRoll.nextState,
   }
+}
+
+/** Whether an overview episode with this apex is a *wide* one — see {@link OVERVIEW_WIDE_APEX_MAX}. */
+function isWideApex(apexAltitude: number): boolean {
+  return apexAltitude <= OVERVIEW_WIDE_APEX_MAX
+}
+
+/**
+ * Whether the waypoint just drawn under `program` belongs to the *wide*
+ * phase of a wide overview episode. Three gates, all serving one constraint
+ * — widened legs must only ever convert existing above-the-roofline
+ * apex-cruise time, never canyon time (the "zip" floor):
+ *
+ * - only *shallow-apex* episodes go wide ({@link OVERVIEW_WIDE_APEX_MAX});
+ * - the climb gets {@link OVERVIEW_WIDE_START_WAYPOINT} waypoints of run
+ *   before the route swings out;
+ * - the episode's final apex waypoint (`mode` already back to `'canyon'` on
+ *   that draw) stays on the ordinary ring so the descent starts close-in.
+ */
+function isWideOverviewDraw(program: AltitudeProgram): boolean {
+  return (
+    program.mode === 'overview' &&
+    isWideApex(program.apexAltitude) &&
+    program.waypointsLeft <= OVERVIEW_WIDE_EPISODE_WAYPOINTS - 1 - OVERVIEW_WIDE_START_WAYPOINT
+  )
 }
 
 /** One drawn waypoint: its lattice coordinate, resolved world position (with altitude), and overview flag. */
@@ -1076,6 +1195,28 @@ function drawNextWaypoint(
   const nextCoord: LatticeCoord = { i: coord.i + picked.move.di, j: coord.j + picked.move.dj }
   const altitude = drawAltitude(picked.nextState, program)
   const position = new Vector3(graph.xs[nextCoord.i], altitude.altitude, graph.zs[nextCoord.j])
+  // A wide overview episode's wide phase (#105 iteration 4 — see
+  // OVERVIEW_PERIMETER_EXTRA): waypoints on a *straight* stretch of
+  // perimeter line swing outward, so the tour flies wide-and-high past the
+  // cluster edge for a beat — the occasional hero overview — and returns to
+  // the tight ring as the episode ends. Ring-corner nodes (boundary in both
+  // axes) stay put so the 90° ring-corner geometry is never reshaped (at
+  // wider offsets the reshaped corners measurably sharpened toward the cusp
+  // guard). A pure function of the drawn state (deterministic per ADR-0010),
+  // derived from TOWER_SPACING (scale-free).
+  if (isWideOverviewDraw(altitude.program)) {
+    const onWest = nextCoord.i === 0
+    const onEast = nextCoord.i === graph.xs.length - 1
+    const onNorth = nextCoord.j === 0
+    const onSouth = nextCoord.j === graph.zs.length - 1
+    const boundaryX = onWest || onEast
+    const boundaryZ = onNorth || onSouth
+    if (boundaryX && !boundaryZ) {
+      position.x += onWest ? -OVERVIEW_PERIMETER_EXTRA : OVERVIEW_PERIMETER_EXTRA
+    } else if (boundaryZ && !boundaryX) {
+      position.z += onNorth ? -OVERVIEW_PERIMETER_EXTRA : OVERVIEW_PERIMETER_EXTRA
+    }
+  }
   return {
     waypoint: { coord: nextCoord, position, isOverview: altitude.isOverview },
     move: picked.move,
@@ -1505,8 +1646,17 @@ function towerBoxClearance(
 
 /**
  * The blend weight (`[0, LOOKAT_TOWER_PULL_MAX]`) the look-at should pull
- * toward the nearest Tower, and that Tower's roofline point — ADR-0010's
- * demand-driven blend. `point` is expected to be the forward look-ahead point
+ * toward the nearest Tower, and that Tower's anchor point — ADR-0010's
+ * demand-driven blend. The anchor sits on the Tower's vertical axis at the
+ * *aim's own altitude* (clamped into the aim window), not at the roofline:
+ * the pull frames Towers *horizontally* and leaves the aim's pitch to the
+ * flown-gradient gaze (#105 iteration 4). Anchoring at the roofline — as
+ * every version through iteration 3 did — dragged the aim toward Tower tops
+ * whenever the pull engaged, which iteration 3's stronger/earlier pull
+ * turned into the maintainer's "captain always cranking his head up" (and
+ * drove the aim-ceiling clamp share from 0.04-0.08 to 0.10-0.13, with
+ * clamp-frame pitch-acceleration spikes to 14.7 rad/s² as the clamp pinned
+ * the aim's altitude against the camera's own climb). `point` is expected to be the forward look-ahead point
  * (see {@link demandDrivenLookAt}'s `forward`), **not** the camera's own
  * position: the deficiency this measures is "is the point the camera is about
  * to aim at actually near a Tower", via {@link towerBoxClearance} to the
@@ -1539,8 +1689,15 @@ export function nearestTowerPull(
   const strength =
     LOOKAT_TOWER_PULL_MAX *
     smoothstep(LOOKAT_NEAR_CLEARANCE, LOOKAT_FAR_CLEARANCE, nearestClearance)
+  // Horizontal-only pull: the anchor keeps the aim point's own (already
+  // window-clamped) altitude, so the blend can steer the aim's yaw onto a
+  // Tower without ever steering its pitch (see the doc comment).
   return {
-    point: new Vector3(nearest.position[0], TOWER_ROOFLINE_Y, nearest.position[2]),
+    point: new Vector3(
+      nearest.position[0],
+      clamp(point.y, LOOKAT_AIM_FLOOR, LOOKAT_AIM_CEILING),
+      nearest.position[2],
+    ),
     strength,
   }
 }
@@ -1579,22 +1736,33 @@ function approachPoint(
  * the *flyable* pitch, not the raw spline's:
  *
  * - The vertical component follows the tangent's gradient clamped to
- *   ±{@link MAX_CLIMB_GRADIENT} — the pitch the camera's own glide-slope-
- *   limited motion can actually fly. The raw spline slope between a canyon
- *   waypoint and an episode apex can exceed 2.0 (~64°); aiming along *that*
- *   is exactly the old "crane up into black sky on a climb-out / stare at the
- *   floor on a dive" bug. Aiming along the real flight path instead keeps the
- *   view on where the plane is genuinely going.
+ *   ±{@link MAX_CLIMB_GRADIENT} and scaled by
+ *   {@link LOOKAT_GAZE_GRADIENT_FACTOR} (#105 iteration 4) — the gentle gaze
+ *   tilt of the pitch the camera's own glide-slope-limited motion can
+ *   actually fly. The raw spline slope between a canyon waypoint and an
+ *   episode apex can exceed 2.0 (~64°); aiming along *that* is exactly the
+ *   old "crane up into black sky on a climb-out / stare at the floor on a
+ *   dive" bug, and even the full flyable ±23° slope reads as the captain
+ *   craning his head (the iteration-4 finding).
  * - The result is then clamped into [{@link LOOKAT_AIM_FLOOR},
  *   {@link LOOKAT_AIM_CEILING}] — into the canyon, onto the Towers, never
  *   above the roofline (see those constants' doc comment).
  *
  * Both stages are continuous in the camera's position and tangent, so the aim
  * pitches gradually with the (already eased) climb — no snap, the
- * motion-sickness guardrail. Shared by {@link demandDrivenLookAt} and
- * {@link stepDemoTour} (which needs the same point to know what deficiency to
- * ease the blend toward) so the two can never disagree about what "forward"
- * means.
+ * motion-sickness guardrail.
+ *
+ * **Reached only through {@link demandDrivenLookAt} — the test-facing seam,
+ * not the production path** (true since #105 iteration 2 made the live aim
+ * an *on-path* point): {@link stepDemoTour} builds its forward point from
+ * {@link sampleSplineExtended} and sets its altitude from the flown
+ * `climbGradient` directly. This helper mirrors that rule — same look-ahead
+ * distance, same gaze-factor scaling, same window clamp — with the
+ * *tangent's* gradient standing in for the flown one (a stateless helper
+ * has no glide-slope pursuit to read; on the flattened horizontal tangents
+ * the production spline yields, both are simply "level"). If the production
+ * aim rule changes, change this to match — the demandDrivenLookAt unit
+ * tests exercise the blend/guardrail composition through it.
  */
 function forwardLookAheadPoint(
   position: Vector3,
@@ -1619,7 +1787,7 @@ function forwardLookAheadPoint(
     new Vector3(
       position.x + (tangent.x / horizontalLength) * LOOKAT_LOOKAHEAD_DISTANCE,
       clamp(
-        position.y + flyableGradient * LOOKAT_LOOKAHEAD_DISTANCE,
+        position.y + flyableGradient * LOOKAT_GAZE_GRADIENT_FACTOR * LOOKAT_LOOKAHEAD_DISTANCE,
         LOOKAT_AIM_FLOOR,
         LOOKAT_AIM_CEILING,
       ),
@@ -1670,10 +1838,13 @@ function clampToAimBounds(point: Vector3, bounds: AimBounds | null): Vector3 {
 /**
  * The demand-driven look-at target: the forward look-ahead point ({@link
  * forwardLookAheadPoint}), blended toward `pullPoint` by `lookAtBlend`, then
- * a seeded {@link applyGlance} on top. Both blend inputs are threaded in
+ * a seeded {@link applyGlance} on top. **Test-facing seam**: production
+ * ({@link stepDemoTour}) composes the same blend via {@link composeLookAt}
+ * with its own on-path forward point — see forwardLookAheadPoint's doc
+ * comment. Both blend inputs are threaded in
  * *already eased* — see {@link stepDemoTour} — so this function itself never
  * snaps: `lookAtBlend`'s rate of change is capped at {@link
- * LOOKAT_BLEND_RATE}/s, and `pullPoint` (the roofline anchor the blend aims
+ * LOOKAT_BLEND_RATE}/s, and `pullPoint` (the Tower anchor the blend aims
  * toward) is rate-limited at {@link LOOKAT_PULL_POINT_EASE_RATE} through
  * nearest-Tower switches rather than read raw off {@link nearestTowerPull}
  * (whose point jumps discontinuously at Voronoi boundaries between Towers).
@@ -1826,8 +1997,9 @@ interface CanyonTourState {
   /** The look-at's current Tower-pull weight, eased toward the geometric target at {@link LOOKAT_BLEND_RATE}/s. */
   lookAtBlend: number
   /**
-   * The pull's current roofline anchor point, eased toward the geometric
-   * nearest-Tower point at {@link LOOKAT_PULL_POINT_EASE_RATE} so a
+   * The pull's current anchor point (on the nearest Tower's axis, at the
+   * aim's altitude — see {@link nearestTowerPull}), eased toward the
+   * geometric target at {@link LOOKAT_PULL_POINT_EASE_RATE} so a
    * nearest-Tower switch pans the aim instead of snapping it.
    */
   lookAtPullPoint: [number, number, number]
@@ -2106,7 +2278,9 @@ export function createDemoTour(params: {
     window,
     arcDistanceToLocalT(segmentHorizontalArc(window), LOOKAT_LOOKAHEAD_DISTANCE),
   )
-  entryForward.y = clamp(entryForward.y, LOOKAT_AIM_FLOOR, LOOKAT_AIM_CEILING)
+  // The entry aim is level at the entry altitude (climbGradient starts at 0),
+  // matching the flown-gradient aim altitude stepDemoTour maintains.
+  entryForward.y = clamp(window[1].y, CANYON_ALTITUDE_MIN, LOOKAT_AIM_CEILING)
   clampToAimBounds(entryForward, bounds)
   const entryPull = nearestTowerPull(entryForward, params.placements)
   // Seed the eased view triplet at its geometric entry target, same reason.
@@ -2339,7 +2513,24 @@ export function stepDemoTour(
     window,
     arcDistanceToLocalT(cumulative, traveled + LOOKAT_LOOKAHEAD_DISTANCE),
   )
-  forward.y = clamp(forward.y, LOOKAT_AIM_FLOOR, LOOKAT_AIM_CEILING)
+  // The aim's altitude is the flown-gradient gaze (#105 iteration 4 — see
+  // LOOKAT_GAZE_GRADIENT_FACTOR), *not* the spline's altitude metadata: level
+  // flight looks level down the canyon, climbs/dives tilt the gaze gently
+  // along the actual glide slope. Clamped into a window deliberately
+  // *narrower* than sampleDemoTourPose's rendered clamp (floor
+  // CANYON_ALTITUDE_MIN vs LOOKAT_AIM_FLOOR, ceiling LOOKAT_AIM_CEILING vs
+  // the roofline): the margins absorb the view followers' lag, so the
+  // rendered clamp — whose engagement re-keys the rendered pitch faster than
+  // the followers allow (the clamp-frame exception the smoothness suite
+  // carves out) — almost never engages at all. Measured: ceiling-pinned
+  // share 0.06-0.13 → ≤ 0.04, worst clamp-frame pitch acceleration 14.7 →
+  // ≤ 6.5 rad/s² (below the 9.6 of the build before the strong roofline
+  // pull).
+  forward.y = clamp(
+    actualPosition.y + climbGradient * LOOKAT_GAZE_GRADIENT_FACTOR * LOOKAT_LOOKAHEAD_DISTANCE,
+    CANYON_ALTITUDE_MIN,
+    LOOKAT_AIM_CEILING,
+  )
   clampToAimBounds(forward, bounds)
   const pull = nearestTowerPull(forward, placements)
   const lookAtBlend = approach(state.lookAtBlend, pull.strength, LOOKAT_BLEND_RATE * delta)

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   buildCanyonGraph,
   CANYON_ALTITUDE_MAX,
+  CANYON_ALTITUDE_MIN,
   createDemoTour,
   demandDrivenLookAt,
   DEMO_BANK_MAX,
@@ -16,6 +17,10 @@ import {
   OVERVIEW_ALTITUDE_MAX,
   OVERVIEW_ALTITUDE_MIN,
   OVERVIEW_EPISODE_WAYPOINTS,
+  OVERVIEW_PERIMETER_EXTRA,
+  OVERVIEW_WIDE_APEX_MAX,
+  OVERVIEW_WIDE_EPISODE_WAYPOINTS,
+  OVERVIEW_WIDE_START_WAYPOINT,
   OVERVIEW_GAP_WAYPOINTS_MIN,
   PERIMETER_OFFSET,
   sampleDemoIntro,
@@ -459,11 +464,19 @@ describe('overview passes are sustained, paced episodes (#91 climb-choreography 
 
     // A long walk over paced episodes must contain several overview episodes…
     expect(overviewRuns.length).toBeGreaterThanOrEqual(3)
-    // …and every one of them sustains its single drawn apex for the full
+    // …and every one of them sustains its single drawn apex for exactly its
     // episode length — the intent never resets to a fresh draw mid-episode
-    // (which is exactly what compressed the old climbs into pop-ups).
+    // (which is exactly what compressed the old climbs into pop-ups). Since
+    // #105 iteration 4 the episode length is apex-dependent: shallow-apex
+    // episodes are the *wide* ones and run one waypoint shorter (the length
+    // refund that pays for their wide detour — see
+    // OVERVIEW_WIDE_EPISODE_WAYPOINTS).
     for (const run of overviewRuns) {
-      expect(run.length).toBeGreaterThanOrEqual(OVERVIEW_EPISODE_WAYPOINTS)
+      const expected =
+        run.y <= OVERVIEW_WIDE_APEX_MAX
+          ? OVERVIEW_WIDE_EPISODE_WAYPOINTS
+          : OVERVIEW_EPISODE_WAYPOINTS
+      expect(run.length).toBe(expected)
     }
   })
 
@@ -524,6 +537,177 @@ describe('overview passes are sustained, paced episodes (#91 climb-choreography 
       expect(returnedToCanyon).toBe(true)
     },
   )
+})
+
+describe('wide overview episodes swing the perimeter waypoints outward (#105 iteration 4)', () => {
+  // The exact 7-Tower KWOK demo scene: ring-dominant (12 ring nodes to 4
+  // interior), so wide episodes reliably meet perimeter lines — on the
+  // interior-heavy grids whole seeds can legitimately contain zero widened
+  // waypoints, which would make the per-episode assertions below vacuous.
+  const placements = towerPlacements(
+    (
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+        [0, 1],
+        [1, 1],
+        [2, 1],
+        [0, 2],
+      ] as Array<[number, number]>
+    ).map(([col, row]) => makeTower({ name: `t-${col}-${row}`, grid: { col, row } })),
+  )
+  const graph = buildCanyonGraph(placements)!
+  const seeds = [42424242, 1, 7, 13, 99]
+
+  it('the wide-phase constants stay a working pair (the coupling guard)', () => {
+    // Nothing else couples these constants, so pin the relationships here —
+    // the gate is `waypointsLeft <= WIDE_EPISODE - 1 - WIDE_START`, and a
+    // seemingly innocent nudge to either constant can silently kill or
+    // corrupt the feature:
+    // - raise WIDE_START by one and the wide phase becomes empty — the
+    //   feature never fires again, with nothing failing;
+    expect(
+      OVERVIEW_WIDE_EPISODE_WAYPOINTS - 1 - OVERVIEW_WIDE_START_WAYPOINT,
+    ).toBeGreaterThanOrEqual(1)
+    // - lower WIDE_START below the climb's lead-in and widened legs are
+    //   flown *during* the climb, below the roofline — the measured
+    //   mechanism that spent the time-in-canyon floor (see
+    //   OVERVIEW_WIDE_START_WAYPOINT's doc comment: 2 waypoints clear the
+    //   roofline from the median canyon start altitude, derived from
+    //   MAX_CLIMB_GRADIENT — asserted against that derivation, not a bare
+    //   literal; ceil, because a fractional waypoint of climb still needs
+    //   the whole next leg to complete — floor would round the required
+    //   lead-in down to 1 and this half of the guard would never bite);
+    const medianCanyonStart = (CANYON_ALTITUDE_MIN + CANYON_ALTITUDE_MAX) / 2
+    const climbWaypoints = (TOWER_HEIGHT - medianCanyonStart) / (MAX_CLIMB_GRADIENT * TOWER_SPACING)
+    expect(OVERVIEW_WIDE_START_WAYPOINT).toBeGreaterThanOrEqual(Math.ceil(climbWaypoints))
+    // - and the wide/tight split must actually split: the refund keeps wide
+    //   episodes strictly shorter, and the shallow-apex gate strictly inside
+    //   the overview band (a gate at/above the band top widens every
+    //   episode; at/below the bottom, none).
+    expect(OVERVIEW_WIDE_EPISODE_WAYPOINTS).toBeLessThan(OVERVIEW_EPISODE_WAYPOINTS)
+    expect(OVERVIEW_WIDE_APEX_MAX).toBeGreaterThan(OVERVIEW_ALTITUDE_MIN)
+    expect(OVERVIEW_WIDE_APEX_MAX).toBeLessThan(OVERVIEW_ALTITUDE_MAX)
+  })
+
+  /** Every raw waypoint (walk order) of a long tour, read off the state's leading edge like recordWaypointAltitudes does. */
+  function recordWaypoints(seed: number): Vector3[] {
+    let tour: DemoTourState = createDemoTour({ seed, placements, entry: ORIGIN_POSE })
+    const waypoints: Vector3[] = []
+    let lastKey = ''
+    const record = () => {
+      if (tour.kind !== 'canyon') return
+      const key = `${tour.headCoord.i},${tour.headCoord.j}`
+      if (key !== lastKey) {
+        lastKey = key
+        waypoints.push(tour.rawTail.clone())
+      }
+    }
+    record()
+    for (let i = 0; i < 3400; i++) {
+      tour = stepDemoTour(tour, 0.15, placements)
+      record()
+    }
+    return waypoints
+  }
+
+  const onLattice = (v: number, lines: readonly number[]) =>
+    lines.some((line) => Math.abs(v - line) < 1e-9)
+  /** Whether a lattice-line position pair is a straight (single-axis) perimeter node — the only widenable kind. */
+  const isSingleAxisBoundary = (w: Vector3) => {
+    const boundaryX =
+      Math.abs(w.x - graph.xs[0]) < 1e-9 || Math.abs(w.x - graph.xs[graph.xs.length - 1]) < 1e-9
+    const boundaryZ =
+      Math.abs(w.z - graph.zs[0]) < 1e-9 || Math.abs(w.z - graph.zs[graph.zs.length - 1]) < 1e-9
+    return boundaryX !== boundaryZ
+  }
+
+  /** Complete overview episodes of a recorded walk: runs of identical above-roofline altitude, first/last run dropped (may be truncated by the recording window). */
+  function episodeRuns(waypoints: Vector3[]): Vector3[][] {
+    const runs: Vector3[][] = []
+    for (const w of waypoints) {
+      const last = runs[runs.length - 1]
+      if (last && Math.abs(last[0].y - w.y) < 1e-12) last.push(w)
+      else runs.push([w])
+    }
+    return runs.slice(1, -1).filter((run) => run[0].y > TOWER_HEIGHT)
+  }
+
+  it('widens per episode: every wide-phase waypoint that lands on a straight perimeter node is widened — by exactly the offset, on one axis, at shallow apexes only', () => {
+    let widened = 0
+    let firingEpisodes = 0
+    let wideEpisodes = 0
+    for (const seed of seeds) {
+      for (const run of episodeRuns(recordWaypoints(seed))) {
+        const shallow = run[0].y <= OVERVIEW_WIDE_APEX_MAX
+        if (!shallow) continue
+        wideEpisodes++
+        let episodeWidened = 0
+        run.forEach((w, index) => {
+          const offLattice = !onLattice(w.x, graph.xs) || !onLattice(w.z, graph.zs)
+          const inWidePhase =
+            index >= OVERVIEW_WIDE_START_WAYPOINT && index < OVERVIEW_WIDE_EPISODE_WAYPOINTS - 1
+          if (!inWidePhase) {
+            // Lead-in (climb) and final (descent hand-back) waypoints are
+            // never widened — the route leaves and rejoins the tight ring
+            // exactly where the phase boundaries say.
+            expect(offLattice).toBe(false)
+            return
+          }
+          if (offLattice) {
+            episodeWidened++
+            // Exactly one axis beyond its ring line, by exactly the wide
+            // offset (the lattice knows no other off-ring position)…
+            const outX = w.x < graph.xs[0] - 1e-9 || w.x > graph.xs[graph.xs.length - 1] + 1e-9
+            const outZ = w.z < graph.zs[0] - 1e-9 || w.z > graph.zs[graph.zs.length - 1] + 1e-9
+            expect(outX !== outZ).toBe(true)
+            const overshoot = outX
+              ? Math.min(Math.abs(w.x - graph.xs[0]), Math.abs(w.x - graph.xs[graph.xs.length - 1]))
+              : Math.min(Math.abs(w.z - graph.zs[0]), Math.abs(w.z - graph.zs[graph.zs.length - 1]))
+            expect(overshoot).toBeCloseTo(OVERVIEW_PERIMETER_EXTRA, 9)
+          } else {
+            // A wide-phase waypoint still on the lattice must be one the
+            // widening legitimately skips (an interior or ring-corner node)
+            // — an unwidened *straight perimeter* node here would mean the
+            // feature silently degraded (the regression this per-episode
+            // assertion exists to catch, where a bare `widened > 0` cannot).
+            expect(isSingleAxisBoundary(w)).toBe(false)
+          }
+        })
+        // The wide phase is never longer than its two waypoints.
+        expect(episodeWidened).toBeLessThanOrEqual(
+          OVERVIEW_WIDE_EPISODE_WAYPOINTS - 1 - OVERVIEW_WIDE_START_WAYPOINT,
+        )
+        if (episodeWidened > 0) firingEpisodes++
+        widened += episodeWidened
+      }
+    }
+    // Sanity checks on the test itself, calibrated on this ring-dominant
+    // grid (observed: 35 complete shallow episodes across these seeds, 27
+    // of them firing, 32 widened waypoints — 5 of them consecutive
+    // two-waypoint stretches): the walks must contain many wide episodes, at
+    // least half must actually fire, and consecutive widened stretches must
+    // occur (widened > firing).
+    expect(wideEpisodes).toBeGreaterThanOrEqual(20)
+    expect(firingEpisodes * 2).toBeGreaterThanOrEqual(wideEpisodes)
+    expect(widened).toBeGreaterThan(firingEpisodes)
+  })
+
+  it('never widens deep-apex overview waypoints (deep episodes stay on the tight ring)', () => {
+    let deepOverview = 0
+    for (const seed of seeds) {
+      for (const run of episodeRuns(recordWaypoints(seed))) {
+        if (run[0].y <= OVERVIEW_WIDE_APEX_MAX) continue
+        for (const w of run) {
+          deepOverview++
+          expect(onLattice(w.x, graph.xs)).toBe(true)
+          expect(onLattice(w.z, graph.zs)).toBe(true)
+        }
+      }
+    }
+    expect(deepOverview).toBeGreaterThan(0)
+  })
 })
 
 /**
