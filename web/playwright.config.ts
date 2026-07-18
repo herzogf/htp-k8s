@@ -45,7 +45,7 @@ export default defineConfig({
     // check (ADR-0004). VITE_WS_URL pins the frontend's /ws target to the same
     // port the binary serves on. `task build` runs npm ci + vite build + the Go
     // embed + compile (root Taskfile).
-    command: `VITE_WS_URL=ws://localhost:${port}/ws task build && ./bin/htp-k8s -addr :${port}`,
+    command: `VITE_WS_URL=ws://localhost:${port}/ws task build && ./bin/htp-k8s -addr 127.0.0.1:${port}`,
     cwd: repoRoot,
     // Since issue #9 the binary fails startup unless it can reach a Kubernetes
     // cluster (client-go's default loading rules honor KUBECONFIG / ~/.kube/
