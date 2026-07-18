@@ -15,6 +15,16 @@
 # Verify locally without publishing anything:
 #   task release:snapshot      # -> goreleaser release --snapshot --clean
 #
+# NOTE: `--snapshot` skips the whole publish stage (`--skip=announce,publish,
+# validate`), and both the changelog AND `release.header`/`release.footer` are
+# only rendered inside that publish stage (see internal/pipe/release/body.go
+# in the goreleaser source) — so a snapshot run never touches them, even
+# though it happily builds/archives/SBOMs. To actually exercise the release
+# notes (including the footer, issue #99) either cut a real `vX.Y.Z-rc.N`
+# prerelease tag through the real workflow (draft, not `latest` — delete it
+# after) or render the Go template standalone against representative field
+# values to check its output before committing to it.
+#
 # The single binary embeds the frontend via go:embed (ADR-0001); the `before`
 # hook below runs `task release:frontend` so every archived binary carries the
 # real built UI, not the committed placeholder.
@@ -104,6 +114,71 @@ release:
   # release is only ever created on an explicit tag push (see release.yml).
   draft: true
   prerelease: auto
+
+  # The GitHub Release page lists binaries/checksums/SBOMs as ASSETS, but the
+  # container image is not one — it's built separately by `ko` (see .ko.yaml)
+  # and pushed straight to GHCR, so it never shows up there on its own
+  # (issue #99). This footer is the only place in the generated release notes
+  # that tells a reader the image exists at all.
+  #
+  # Deliberately by TAG, never by digest: GoReleaser (this file) and ko
+  # (release.yml's separate `image` job) are two independent jobs that both
+  # only `need: verify-green-commit` — they run in parallel, not sequentially
+  # — so at the point GoReleaser renders this footer and creates the (draft)
+  # release, the image's digest doesn't exist yet to template in. The release
+  # stays a draft until a human publishes it, by which point both jobs have
+  # finished and the tag resolves.
+  #
+  # Content is deliberately scoped to what release.yml/ADR-0005 actually ship
+  # today: multi-arch pull/run + build-provenance verification (the index-level
+  # `attest-build-provenance` from the `image` job). It does NOT claim an
+  # image SBOM (the `sboms` block below only covers archives — see issue #98)
+  # and does NOT show a `cosign verify` example (no bare cosign signature is
+  # emitted yet — that's issue #100 to decide). The `docker run` line mirrors
+  # the README's current example (explicit `-e KUBECONFIG`); issue #113 may
+  # change that default, at which point this footer needs a matching update.
+  # NOTE the leading blank line: GoReleaser's body template joins the
+  # changelog and this footer with exactly ONE newline (see
+  # internal/pipe/release/body.go), so a footer starting directly with `---`
+  # would sit right under the changelog's last paragraph line with no blank
+  # line between them — CommonMark then reads that as a setext H2 underline
+  # (turning the changelog's last line into a heading) instead of the
+  # intended horizontal rule. The blank line here restores the gap so `---`
+  # renders as a thematic break, verified by rendering the full body
+  # (changelog + footer) through Go's text/template, matching GoReleaser's
+  # own template+options exactly (see the PR for #99).
+  footer: |
+
+    ---
+
+    ### Container image
+
+    Multi-arch (`linux/amd64`, `linux/arm64`), published to GHCR — this is **not** a release asset, it lives in [GHCR (Packages)](https://github.com/herzogf/htp-k8s/pkgs/container/htp-k8s):
+
+    ```bash
+    docker pull ghcr.io/herzogf/htp-k8s:{{ .Tag }}
+    ```
+
+    Run it:
+
+    ```bash
+    docker run --rm -p 8080:8080 \
+      -e KUBECONFIG=/kube/config \
+      -v "$HOME/.kube/config:/kube/config:ro" \
+      ghcr.io/herzogf/htp-k8s:{{ .Tag }}
+    ```
+    {{- if not .Prerelease }}
+
+    `:latest` also points at this release.
+    {{- end }}
+
+    Verify build provenance (keyless, Sigstore-backed — no keys to manage):
+
+    ```bash
+    gh attestation verify oci://ghcr.io/herzogf/htp-k8s:{{ .Tag }} --repo herzogf/htp-k8s
+    ```
+
+    A passing check means this image was built by this repo's release workflow and hasn't been tampered with since. More on the posture: [ADR-0005](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0005-supply-chain-security-posture.md).
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
