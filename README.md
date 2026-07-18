@@ -26,14 +26,15 @@ tar -xzf htp-k8s_0.2.0_linux_amd64.tar.gz
 **Or run the container image:**
 
 ```bash
-docker run --rm -p 8080:8080 \
-  -e KUBECONFIG=/kube/config \
+docker run --rm -p 127.0.0.1:8080:8080 \
   -v "$HOME/.kube/config:/kube/config:ro" \
   ghcr.io/herzogf/htp-k8s:v0.2.0
 # then open http://localhost:8080
 ```
 
-Your cluster has to be reachable from wherever htp-k8s runs — for a container talking to a *local* cluster on Linux, add `--network host`. htp-k8s exits immediately if it can't reach a cluster.
+The container looks for a kubeconfig at `/kube/config` by default, so mounting your kubeconfig there is all that's needed — no `-e KUBECONFIG` boilerplate. Mounting elsewhere? Override it explicitly: add `-e KUBECONFIG=/some/other/path` and mount to match.
+
+Your cluster has to be reachable from wherever htp-k8s runs — for a container talking to a *local* cluster on Linux, add `--network host`. htp-k8s exits immediately if it can't reach a cluster (if you forget the `-v` mount, the error names the missing `/kube/config` path).
 
 **Just want to try it?** Spin up a throwaway local cluster with [kind](https://kind.sigs.k8s.io/):
 
