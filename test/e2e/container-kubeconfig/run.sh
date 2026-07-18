@@ -47,6 +47,16 @@
 #      naming /kube/config and the -v flag — the case most likely to rot
 #      silently, since nobody manually re-checks an error message on every
 #      base-image bump.
+#   5. The shipped IMAGE's *own default* (issue #127), exercised for the
+#      first time by this script: run it exactly as an operator who forgot
+#      `-e HTP_K8S_ADDR=:8080` would — bridge networking, a published host
+#      port, no HTP_K8S_ADDR at all — and prove the published port is
+#      unreachable (fail-closed), while independently proving the container
+#      is genuinely alive and correctly loopback-bound (not merely dead),
+#      then confirm the positive control: the identical invocation WITH
+#      HTP_K8S_ADDR=:8080 serves 200. Every other subtest above always passes
+#      HTP_K8S_ADDR explicitly, so none of them would notice IMAGE's own
+#      default silently flipping to fail-open.
 #
 # Formerly worked around #128 by mounting a chmod-644 COPY of the kubeconfig
 # rather than a real 0600 file (see the git history of this file for that
@@ -180,6 +190,34 @@ wait_http_200() {
     fi
     sleep 1
   done
+}
+
+# wait_log_contains <container> <pattern> <timeout-seconds>: polls the
+# container's log for a fixed grep pattern, or fails once the timeout
+# elapses. Used by Test 5 to positively confirm the process reached its
+# startup log line (proof of "correctly bound to loopback", not merely
+# "the port didn't answer" — see that test's header comment for why the
+# distinction matters).
+wait_log_contains() {
+  local name="$1" pattern="$2" timeout="$3" deadline
+  deadline=$((SECONDS + timeout))
+  while :; do
+    if docker logs "${name}" 2>&1 | grep -q -- "${pattern}"; then
+      return 0
+    fi
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# container_is_running <container>: true iff docker reports the container as
+# currently Running. Used by Test 5 alongside wait_log_contains — together
+# they positively prove the process is alive and past its bind step, rather
+# than inferring that from the mere absence of a symptom.
+container_is_running() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -377,5 +415,119 @@ if echo "${out}" | grep -q -- '--user'; then
 fi
 docker rm -f "${name}" >/dev/null 2>&1
 echo "OK: a forgotten mount exits 1 with the documented -v hint."
+
+# ---------------------------------------------------------------------------
+# 5. The shipped IMAGE's own default (issue #127): under bridge networking
+#    with a published host port and NO HTP_K8S_ADDR at all — the exact thing
+#    every subtest above deliberately avoids testing, by always passing
+#    HTP_K8S_ADDR=:8080 itself. The whole security argument for the
+#    container recipe (README.md, .goreleaser.yaml's release footer) rests
+#    on IMAGE defaulting to loopback-only, so that forgetting the flag fails
+#    CLOSED (published port unreachable) rather than OPEN (published port
+#    serving traffic). Nothing before this point in the file exercises that
+#    default; it's asserted only in prose.
+#
+#    5a proves the negative (published port unreachable) is NOT the vacuous
+#    "the container might just be dead" case: `docker inspect` must report
+#    it Running, AND its own log must name the loopback bind, both checked
+#    independently of the port probe. A subtest that only checked
+#    unreachability would pass identically if the binary crashed on
+#    startup — see this file's header comment on why that shape has burned
+#    this script three times already.
+#
+#    5b is the positive control the negative is meaningless without: the
+#    IDENTICAL invocation, differing only by adding -e HTP_K8S_ADDR=:8080,
+#    must serve 200. Without 5b, 5a's failure could just as easily mean
+#    "the API server was unreachable" or "the port picker collided" as
+#    "the loopback default did its job".
+# ---------------------------------------------------------------------------
+log "Test 5a: IMAGE's own default (no HTP_K8S_ADDR) is fail-closed under bridge networking"
+name="htpk8s-image-default-loopback"
+CONTAINERS+=("${name}")
+port5="$(pick_free_port)"
+docker run -d --name "${name}" --network kind \
+  --user "${HOST_USER}" \
+  -p "127.0.0.1:${port5}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
+  "${IMAGE}" >/dev/null
+
+# Positive proof of life FIRST: the process must reach and log its loopback
+# bind line (cmd/htp-k8s/main.go's logListenAddr/isLoopbackAddr) within a
+# generous startup window. If this never appears, the container either
+# crashed or is hung before binding — a real failure, but a DIFFERENT one
+# from "the loopback default leaked traffic", so it's reported distinctly
+# from the port-unreachability check below rather than folded into it.
+if ! wait_log_contains "${name}" "bound to loopback only" 20; then
+  echo "FAIL: container never logged a loopback bind within 20s — IMAGE's own default may not be loopback-only any more, or the container failed to start. Log:" >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+if ! container_is_running "${name}"; then
+  echo "FAIL: container logged a loopback bind but is not Running (crashed immediately after logging?). Log:" >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+
+# Now the actual security assertion: the published host port must be
+# unreachable. Docker's `-p 127.0.0.1:<port>:8080` maps to the container's
+# OWN interface, not its loopback — a process bound to 127.0.0.1 inside the
+# container never receives that traffic, so the connection is refused/reset
+# at the kernel level (verified against a real kind cluster and a real
+# ko-built image while writing this test: curl reports exit 56, "Recv
+# failure: Connection reset by peer", http_code 000 — never a completed
+# response of any kind, let alone 200). Accept curl's other well-known
+# connection-failure exit codes too (7 "Couldn't connect", 52 "empty reply")
+# since the exact one can vary with the host's iptables/docker-proxy setup;
+# anything else (e.g. 28, a timeout — traffic silently dropped rather than
+# refused/reset) is treated as a genuine failure of this test rather than
+# silently accepted, since that would be a different, unverified failure
+# mode.
+set +e
+http_code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${port5}/api/config" 2>/dev/null)"
+curl_rc=$?
+set -e
+if [ "${curl_rc}" -eq 0 ]; then
+  echo "FAIL: curl succeeded (http_code=${http_code}) against the published port with no HTP_K8S_ADDR set — IMAGE's own default is no longer loopback-only, the exact fail-open regression issue #127 exists to prevent." >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+case "${curl_rc}" in
+7 | 52 | 56) : ;;
+*)
+  echo "FAIL: expected a connection-refused/reset curl exit code (7, 52, or 56), got ${curl_rc} (http_code=${http_code}) — an unrecognized failure mode, not the refused/reset this test asserts." >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+  ;;
+esac
+if [ "${http_code}" = "200" ]; then
+  echo "FAIL: got http_code 200 from a curl call that reported failure (curl_rc=${curl_rc}) — contradictory result, treat as a test bug rather than trusting either half." >&2
+  exit 1
+fi
+if ! container_is_running "${name}"; then
+  echo "FAIL: container stopped running during the port-unreachability probe — the port being unreachable may just mean the process died mid-test, not that it correctly stayed loopback-bound." >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+docker rm -f "${name}" >/dev/null 2>&1
+echo "OK: IMAGE's own default (no HTP_K8S_ADDR) left the published port unreachable (curl exit ${curl_rc}) while the container stayed running and logged a genuine loopback bind — fail-closed, not crashed."
+
+log "Test 5b: positive control — the identical invocation WITH HTP_K8S_ADDR=:8080 serves 200"
+name="htpk8s-image-default-positive-control"
+CONTAINERS+=("${name}")
+port5b="$(pick_free_port)"
+docker run -d --name "${name}" --network kind \
+  --user "${HOST_USER}" \
+  -p "127.0.0.1:${port5b}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
+  -e HTP_K8S_ADDR=:8080 \
+  "${IMAGE}" >/dev/null
+
+if ! wait_http_200 "${port5b}" /api/config 20; then
+  echo "FAIL: positive control (same invocation as 5a, plus HTP_K8S_ADDR=:8080) did not serve GET /api/config within 20s — without this working, Test 5a's failure proves nothing (could be an unrelated networking/cluster problem, not the loopback default). Container log:" >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+docker rm -f "${name}" >/dev/null 2>&1
+echo "OK: the identical invocation with HTP_K8S_ADDR=:8080 set does serve 200 — Test 5a's unreachability is attributable to the loopback default, not some other break."
 
 log "All container kubeconfig fallback checks passed."
