@@ -146,6 +146,14 @@ release:
   # cluster on the same host, so it'd be noise for the likelier reader here
   # (unlike the README's Quickstart, which leads with a local kind cluster).
   #
+  # DOES copy the README's `--user "$(id -u):$(id -g)"` flag (issue #128): a
+  # standard kind/kubectl-written kubeconfig is mode 0600, and this footer's
+  # command mounts that file read-only into a fixed-non-root-uid container
+  # exactly like the README's does — the permission-denied failure is
+  # identical either way, so a release-notes reader copy-pasting this footer
+  # needs the same fix. Same bash-only caveat as the README applies here too
+  # (not repeated in this footer's prose to keep it short; see README.md).
+  #
   # UNLIKE the README, this binds `-p 127.0.0.1:8080:8080` (loopback), not a
   # bare `-p 8080:8080` (all interfaces). There's no auth layer anywhere in
   # internal/server/ (defaultAddr in cmd/htp-k8s/main.go is a bare `:8080`),
@@ -200,11 +208,14 @@ release:
 
     ```bash
     docker run --rm -p 127.0.0.1:8080:8080 \
+      --user "$(id -u):$(id -g)" \
       -e KUBECONFIG=/kube/config \
       -v "$HOME/.kube/config:/kube/config:ro" \
       ghcr.io/herzogf/htp-k8s:{{ .Tag }}
     # then open http://localhost:8080
     ```
+
+    (`--user "$(id -u):$(id -g)"` lets the container read your kubeconfig — a standard `kind`/`kubectl`-written one is mode `0600`. Bash/zsh syntax; on Windows, drop the flag and see the README for the caveat.)
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.

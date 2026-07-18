@@ -27,12 +27,15 @@ tar -xzf htp-k8s_0.2.0_linux_amd64.tar.gz
 
 ```bash
 docker run --rm -p 127.0.0.1:8080:8080 \
+  --user "$(id -u):$(id -g)" \
   -v "$HOME/.kube/config:/kube/config:ro" \
   ghcr.io/herzogf/htp-k8s:v0.2.0
 # then open http://localhost:8080
 ```
 
 The container looks for a kubeconfig at `/kube/config` by default, so mounting your kubeconfig there is all that's needed — no `-e KUBECONFIG` boilerplate. Mounting elsewhere? Override it explicitly: add `-e KUBECONFIG=/some/other/path` and mount to match.
+
+`--user "$(id -u):$(id -g)"` makes the container read that mount as you rather than as its own built-in non-root user: a standard kind/kubectl-written kubeconfig is mode `0600` (owner-read-only), and without this flag the container can't read a file it doesn't own — it fails with `permission denied`, and the resulting error names this exact flag. `$(id -u)` is bash/zsh syntax (Linux, macOS Terminal); PowerShell and cmd.exe have no `id` command, so on Windows drop the flag and try the plain command first. We haven't verified on this project how Docker Desktop's bind-mount layer handles host file permissions on Windows or macOS — if you still hit `permission denied` there, mounting a copy of your kubeconfig with broader read permissions is a fallback that doesn't depend on any of this.
 
 Your cluster has to be reachable from wherever htp-k8s runs — for a container talking to a *local* cluster on Linux, add `--network host`. htp-k8s exits immediately if it can't reach a cluster (if you forget the `-v` mount, the error names the missing `/kube/config` path).
 

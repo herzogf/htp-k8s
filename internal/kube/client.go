@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -69,9 +70,41 @@ func restConfig() (*rest.Config, error) {
 				"load kubeconfig: no kubeconfig found at $KUBECONFIG, ~/.kube/config, or the container default %s — run with -v $HOME/.kube/config:%s:ro (or set KUBECONFIG to override the path): %w",
 				containerKubeconfigPath, containerKubeconfigPath, err)
 		}
+		// issue #128: a file IS mounted at containerKubeconfigPath but the
+		// container's fixed non-root user can't read it. This is the common
+		// case in practice: clientcmd.WriteToFile — what kind, kubectl, and
+		// most cloud-provider CLIs use — writes kubeconfigs mode 0600, and
+		// the published image (ko's Chainguard-static base) runs as a fixed
+		// uid that doesn't own the host's file. Distinct from the
+		// fs.ErrNotExist branch above (a missing mount) — that diagnostic
+		// would be actively misleading here, since a file IS mounted; the fix
+		// is to make the container read it as the host user, not to mount it
+		// somewhere else.
+		if isPermissionError(err) {
+			return nil, fmt.Errorf(
+				"load kubeconfig: found %s but cannot read it — a standard kind/kubectl-written kubeconfig is mode 0600 and the container runs as a fixed non-root user; add --user \"$(id -u):$(id -g)\" to docker run so the container reads it as you: %w",
+				containerKubeconfigPath, err)
+		}
 		return nil, fmt.Errorf("load kubeconfig: %w", err)
 	}
 	return cfg, nil
+}
+
+// isPermissionError reports whether err represents a filesystem permission
+// failure (e.g. a mounted-but-unreadable kubeconfig, issue #128).
+//
+// errors.Is(err, fs.ErrPermission) alone is NOT sufficient here, unlike the
+// fs.ErrNotExist check above: verified empirically that a permission-denied
+// ExplicitPath load surfaces through clientcmd's DeferredLoadingClientConfig
+// wrapped in k8s.io/apimachinery/pkg/util/errors' aggregate type, which has
+// no Unwrap() method — so errors.Is can't see through it to the underlying
+// *fs.PathError. (The sibling not-exist case happens to reach a raw
+// *fs.PathError instead, which is why that check works unmodified.) Matching
+// the OS's "permission denied" wording is the reliable signal in practice;
+// errors.Is is checked first in case a future clientcmd/apimachinery version
+// starts unwrapping correctly.
+func isPermissionError(err error) bool {
+	return errors.Is(err, fs.ErrPermission) || strings.Contains(err.Error(), "permission denied")
 }
 
 // usesContainerKubeconfigDefault decides whether restConfig should retry
