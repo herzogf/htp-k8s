@@ -248,25 +248,35 @@ describe('the seeded Canyon tour', () => {
   it('never immediately backtracks while a forward option exists (a large-enough grid never dead-ends)', () => {
     let tour: DemoTourState = createDemoTour({ seed: 21, placements, entry: ORIGIN_POSE })
     expect(tour.kind).toBe('canyon')
-    const visited: string[] =
-      tour.kind === 'canyon' ? [key(tour.window[1]), key(tour.window[2])] : []
 
-    for (let i = 0; i < 300; i++) {
-      tour = stepDemoTour(tour, 5, placements) // large delta: force a rollover every step
-      if (tour.kind === 'canyon') {
-        visited.push(key(tour.window[2]))
+    // Observe the walk through the state's leading raw waypoint (headCoord):
+    // since corner rounding (#105 iteration 2) the spline's control points
+    // are no longer lattice nodes, so the walk's node sequence is read off
+    // the lattice coordinate of each newly drawn waypoint instead of off the
+    // window. Steps are kept small enough that at most one waypoint can be
+    // drawn per step (a step's travel is well below the window arc a single
+    // draw appends), so the recorded sequence has no gaps — an immediate
+    // backtrack would appear as `visited[i] === visited[i - 2]`.
+    const visited: string[] = []
+    const record = () => {
+      if (tour.kind !== 'canyon') return
+      const key = `${tour.headCoord.i},${tour.headCoord.j}`
+      if (visited[visited.length - 1] !== key) {
+        visited.push(key)
       }
     }
-
-    // An immediate backtrack revisits the waypoint two steps back. This 5x5
-    // grid is large relative to a 300-step walk, so the "only legal move is
-    // to backtrack" dead-end escape hatch should never trigger.
-    for (let i = 2; i < visited.length; i++) {
-      expect(visited[i]).not.toBe(visited[i - 2])
+    record()
+    for (let i = 0; i < 2600; i++) {
+      tour = stepDemoTour(tour, 0.15, placements)
+      record()
     }
 
-    function key(v: { x: number; z: number }): string {
-      return `${v.x.toFixed(3)},${v.z.toFixed(3)}`
+    // A run this long must actually exercise a long walk (sanity on the
+    // observation mechanism itself), and this 5x5 grid has no dead ends, so
+    // the "only legal move is to backtrack" escape hatch never triggers.
+    expect(visited.length).toBeGreaterThan(100)
+    for (let i = 2; i < visited.length; i++) {
+      expect(visited[i]).not.toBe(visited[i - 2])
     }
   })
 
@@ -389,21 +399,47 @@ describe('the Canyon tour altitude never climbs/descends steeper than the glide-
  * cap alone (the previous describe block) cannot distinguish a long graceful
  * arc from a maximal-slope pop-up-and-back spike.
  */
+/**
+ * Steps a tour in small increments and records each newly drawn raw
+ * waypoint's altitude (walk order, no gaps) — the altitude program's actual
+ * per-waypoint output. Small steps guarantee at most one draw per step (see
+ * the no-backtrack test's doc comment), so runs of identical apex altitude
+ * in the result correspond 1:1 to waypoint runs.
+ */
+function recordWaypointAltitudes(
+  tour: DemoTourState,
+  placements: TowerPlacement[],
+  steps: number,
+): number[] {
+  const altitudes: number[] = []
+  let lastKey = ''
+  const record = () => {
+    if (tour.kind !== 'canyon') return
+    const key = `${tour.headCoord.i},${tour.headCoord.j}`
+    if (key !== lastKey) {
+      lastKey = key
+      altitudes.push(tour.rawTail.y)
+    }
+  }
+  record()
+  for (let i = 0; i < steps; i++) {
+    tour = stepDemoTour(tour, 0.15, placements)
+    record()
+  }
+  return altitudes
+}
+
 describe('overview passes are sustained, paced episodes (#91 climb-choreography feel pass)', () => {
   const placements = grid(5, 5)
 
   it('sustains one apex altitude across a whole episode of consecutive waypoints (a climb-out is a long arc, not a one-waypoint spike)', () => {
-    let tour: DemoTourState = createDemoTour({ seed: 42424242, placements, entry: ORIGIN_POSE })
-    // Large delta: force exactly one segment rollover per step (the same
-    // trick the no-backtrack test uses), so this records the sequence of
-    // waypoint target altitudes (window[2].y) in walk order.
-    const targetAltitudes: number[] = []
-    for (let i = 0; i < 300; i++) {
-      tour = stepDemoTour(tour, 5, placements)
-      if (tour.kind === 'canyon') {
-        targetAltitudes.push(tour.window[2].y)
-      }
-    }
+    const tour: DemoTourState = createDemoTour({ seed: 42424242, placements, entry: ORIGIN_POSE })
+    // The per-waypoint altitude sequence in walk order, read off the state's
+    // leading raw waypoint (rawTail carries each newly drawn waypoint's
+    // altitude; the spline window no longer maps 1:1 to waypoints since
+    // corner rounding, #105 iteration 2). Small steps so no draw is skipped
+    // — same observation mechanism as the no-backtrack test.
+    const targetAltitudes = recordWaypointAltitudes(tour, placements, 3400)
 
     // Split the sequence into runs of identical target altitude and classify
     // each run as overview (above the roofline — the overview band starts at
@@ -432,14 +468,8 @@ describe('overview passes are sustained, paced episodes (#91 climb-choreography 
   })
 
   it('paces episodes apart: every stretch between two overview episodes is a real canyon dwell, never a back-to-back yo-yo', () => {
-    let tour: DemoTourState = createDemoTour({ seed: 7, placements, entry: ORIGIN_POSE })
-    const targetAltitudes: number[] = []
-    for (let i = 0; i < 400; i++) {
-      tour = stepDemoTour(tour, 5, placements)
-      if (tour.kind === 'canyon') {
-        targetAltitudes.push(tour.window[2].y)
-      }
-    }
+    const tour: DemoTourState = createDemoTour({ seed: 7, placements, entry: ORIGIN_POSE })
+    const targetAltitudes = recordWaypointAltitudes(tour, placements, 4600)
 
     // Count the canyon-waypoint gaps strictly *between* overview episodes
     // (the leading partial gap before the first episode is excluded — the
@@ -677,7 +707,10 @@ describe('the demand-driven look-at, at overview altitude (#91 follow-up)', () =
     let tour: DemoTourState = createDemoTour({ seed: 99, placements, entry: ORIGIN_POSE })
     let sawDeepOverview = false
 
-    for (let i = 0; i < 600; i++) {
+    // 240 simulated seconds: episode apexes are jittered across the whole
+    // overview band, so several paced episodes are needed before one lands
+    // deep enough for the assertion window to be exercised.
+    for (let i = 0; i < 1600; i++) {
       tour = stepDemoTour(tour, 0.15, placements)
       const pose = sampleDemoTourPose(tour)
       const [, positionY] = pose.position
