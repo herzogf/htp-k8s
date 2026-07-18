@@ -12,7 +12,7 @@ It's **read-only** — a thing to *watch*, styled after the 1995 film *Hackers*,
 
 ## Quickstart
 
-htp-k8s is a single binary (the web UI is embedded) that serves a browser UI against whatever cluster your current kubeconfig points at. There's no authentication anywhere in it (it's a read-only viewer, see below), so **it listens on `127.0.0.1:8080` — loopback only — by default**: reachable from a browser on the same machine, not from anywhere else on the network. `-addr :8080` (or `HTP_K8S_ADDR=:8080`) opens that up — but on its own that only gets a remote browser a *loaded page with no data*: the released frontend's WebSocket target is baked to `ws://localhost:8080/ws` regardless of where the page was loaded from, so it dials the *viewer's own* machine, not htp-k8s's. Real remote viewing additionally needs the frontend rebuilt with a matching `VITE_WS_URL` — see [Running & developing locally](docs/running-locally.md#gotchas) — which has always been true, not something this change adds.
+htp-k8s is a single binary (the web UI is embedded) that serves a browser UI against whatever cluster your current kubeconfig points at. It's read-only with no authentication, so it **listens on `127.0.0.1:8080` (loopback only) by default** — see [Running & developing locally](docs/running-locally.md) for why, and how to widen it.
 
 **Run the binary** — grab the latest build for your platform from [Releases](https://github.com/herzogf/htp-k8s/releases):
 
@@ -23,7 +23,9 @@ tar -xzf htp-k8s_0.2.0_linux_amd64.tar.gz
 # then open http://localhost:8080
 ```
 
-**Or run the container image:**
+**Or run the container image.** It looks for a kubeconfig at `/kube/config`; `--user` reads a `0600` one — see [Running & developing locally](docs/running-locally.md#the-container-image) if either needs troubleshooting.
+
+Your cluster is at a real network address (EKS, GKE, OpenShift, on-prem):
 
 ```bash
 docker run --rm -p 127.0.0.1:8080:8080 \
@@ -34,19 +36,7 @@ docker run --rm -p 127.0.0.1:8080:8080 \
 # then open http://localhost:8080
 ```
 
-The container looks for a kubeconfig at `/kube/config` by default, so mounting your kubeconfig there is all that's needed — no `-e KUBECONFIG` boilerplate. Mounting elsewhere? Override it explicitly: add `-e KUBECONFIG=/some/other/path` and mount to match.
-
-`--user "$(id -u):$(id -g)"` makes the container read that mount as you rather than as its own built-in non-root user: a standard kind/kubectl-written kubeconfig is mode `0600` (owner-read-only), and without this flag the container can't read a file it doesn't own — it fails with `permission denied`, and the resulting error names this exact flag. `$(id -u)` is bash/zsh syntax (Linux, macOS Terminal); PowerShell and cmd.exe have no `id` command, so on Windows drop the flag and try the plain command first. We haven't verified on this project how Docker Desktop's bind-mount layer handles host file permissions on Windows or macOS — if you still hit `permission denied` there, mounting a copy of your kubeconfig with broader read permissions is a fallback that doesn't depend on any of this. From a **root shell**, `$(id -u):$(id -g)` expands to `0:0`, silently turning the container back into root instead of your (non-root) uid — run this from your normal user shell, not as root (`sudo docker run …` is fine: the shell expands `$(id -u)` before `sudo` ever runs).
-
-`-e HTP_K8S_ADDR=:8080` is required here — it's not optional the way it looks. Docker's `-p 127.0.0.1:8080:8080` forwards traffic to the *container's* own interface address, never to its loopback, so a container left on the loopback-only default above would never see that traffic at all. The `-p` host-side binding (loopback) is what actually keeps this off your network, exactly as it does for the bare binary above — the container just has to bind wider *inside its own network namespace* for that forwarding to reach it. (Baking a wider default into the image binary itself — an image-only build-time default — is mechanically possible, but deliberately not done: it would make the `--network host` fallback recipe below fail *open* instead of closed if someone forgets its own `-e HTP_K8S_ADDR=127.0.0.1:8080` — every other way to forget a flag in this design loses connectivity, not access control, and that's the one shape that wouldn't. Separately, there's no way to set this via a container-*runtime* env var baked into the image: ko, which builds it, only supports Go *build*-time env through its config — verified against the pinned ko and GoReleaser versions while implementing this.)
-
-htp-k8s exits immediately if it can't reach a cluster (if you forget the `-v` mount, the error names the missing `/kube/config` path). The recipe above works as-is for any cluster reachable at a real network address — EKS, GKE, OpenShift, a remote on-prem cluster.
-
-#### Pointing the container at a *local* cluster
-
-A local cluster's kubeconfig usually points at `https://127.0.0.1:<port>` — meaningless from inside a bridge-networked container, which has its own separate loopback distinct from the host's. Two cases:
-
-**Already have a local [kind](https://kind.sigs.k8s.io/) cluster** (perhaps made with the `kind create cluster` example below, or one you already use for other local development)? Point the container at it without touching that cluster, or your normal kubeconfig, at all:
+Already have a local [kind](https://kind.sigs.k8s.io/) cluster:
 
 ```bash
 kind get kubeconfig --internal --name kind > /tmp/htp-k8s-kubeconfig   # "kind" is the default cluster name; use yours if you named it
@@ -58,14 +48,11 @@ docker run --rm --network kind -p 127.0.0.1:8080:8080 \
 # then open http://localhost:8080
 ```
 
-`kind get kubeconfig --internal` only *reads* the cluster's existing state — it's a generator, not a mutation. It writes a second, container-only kubeconfig to the file you redirect it to; your `~/.kube/config` and current `kubectl` context are untouched (verified: identical before/after, byte for byte). What differs is the server address inside it: the cluster's in-network hostname (`https://<cluster>-control-plane:6443`) instead of the externally-published `127.0.0.1:<port>` your normal kubeconfig has — `--network kind` (the Docker network `kind create cluster` already made, nothing extra to set up) is what makes that hostname resolve from the container.
-
-**Some other local cluster** — k3d, minikube with the Docker driver, Docker Desktop's built-in Kubernetes — has the same `127.0.0.1`-only problem but no `kind`-style in-network hostname to fall back on. The general fallback is `--network host`, which shares the host's network stack outright, so your normal kubeconfig's `127.0.0.1:<port>` resolves correctly from inside the container:
+Some other local cluster (k3d, minikube, Docker Desktop):
 
 ```bash
-# NOTE: HTP_K8S_ADDR is "127.0.0.1:8080" here, NOT the bare ":8080" used
-# above — --network host makes docker's `-p` a no-op, so the app must bind
-# loopback ITSELF or it's reachable from every interface on this host.
+# NOTE: HTP_K8S_ADDR is 127.0.0.1:8080 here, not the bare :8080 above —
+# --network host makes `-p` a no-op, so the app must bind loopback itself.
 docker run --rm --network host \
   --user "$(id -u):$(id -g)" \
   -e HTP_K8S_ADDR=127.0.0.1:8080 \
@@ -74,9 +61,7 @@ docker run --rm --network host \
 # then open http://localhost:8080
 ```
 
-`--network host` shares the host's network stack outright, so Docker's `-p` is silently ignored — there is no host-side publish step left to restrict access, which is exactly why the `-e` value above has to change (see the comment in the snippet). (Verified directly: under `--network host`, `-e HTP_K8S_ADDR=127.0.0.1:8080` binds loopback-only exactly like the native binary's own default — reachable at `localhost:8080`, unreachable from elsewhere on the network. Not verified against k3d/minikube/Docker Desktop specifically — none are set up in this project's own test environment — but the recipe follows from how `--network host` and Docker's `-p` interact, which doesn't depend on which tool created the cluster.)
-
-**Just want to try it?** Spin up a throwaway local cluster with [kind](https://kind.sigs.k8s.io/) and run the binary directly — no container networking to think about at all:
+**Just want to try it?** Spin up a throwaway local cluster with [kind](https://kind.sigs.k8s.io/) and run the binary directly:
 
 ```bash
 kind create cluster        # htp-k8s shows this single node as one lone tower

@@ -137,42 +137,35 @@ release:
   # existing one). It does NOT claim an image SBOM (the `sboms` block below
   # only covers archives — see issue #98) and does NOT show a `cosign verify`
   # example (no bare cosign signature is emitted yet — that's issue #100 to
-  # decide). The `docker run` line mirrors the README's current example
-  # (explicit `-e KUBECONFIG`, plus the README's `# then open
+  # decide). The `docker run` line mirrors the README's current "real network
+  # address" example (explicit `-e KUBECONFIG`, plus the README's `# then open
   # http://localhost:8080` follow-up so the reader has a next step); issue
   # #113 may change the KUBECONFIG default. Deliberately NOT copying the
-  # README's "Pointing the container at a local cluster" recipes
-  # (`--network kind`+`--internal` for kind, `--network host` for
-  # k3d/minikube/Docker Desktop) here — a release-notes reader is more likely
-  # pointing at a remote/real cluster than a local one on the same host, so
-  # it'd be noise for the likelier reader here (unlike the README's
-  # Quickstart, which leads with a local kind cluster).
+  # README's local-cluster recipes (`--network kind`+`--internal` for kind,
+  # `--network host` for k3d/minikube/Docker Desktop) here — a release-notes
+  # reader is more likely pointing at a remote/real cluster than a local one
+  # on the same host, so it'd be noise for the likelier reader here (unlike
+  # the README's Quickstart, which leads with a local kind cluster).
   #
-  # DOES copy the README's `--user "$(id -u):$(id -g)"` flag (issue #128): a
-  # standard kind/kubectl-written kubeconfig is mode 0600, and this footer's
-  # command mounts that file read-only into a fixed-non-root-uid container
-  # exactly like the README's does — the permission-denied failure is
-  # identical either way, so a release-notes reader copy-pasting this footer
-  # needs the same fix. Same bash-only caveat as the README applies here too
-  # (not repeated in this footer's prose to keep it short; see README.md).
+  # DOES copy the README's `--user "$(id -u):$(id -g)"` flag (issue #128) and
+  # `-e HTP_K8S_ADDR=:8080` (issue #127): a standard kind/kubectl-written
+  # kubeconfig is mode 0600 and this footer's command mounts it read-only into
+  # a fixed-non-root-uid container exactly like the README's does, and
+  # `defaultAddr` in cmd/htp-k8s/main.go is loopback-only for the same reason
+  # the README's is — so a release-notes reader copy-pasting this footer needs
+  # both fixes too. This binds `-p 127.0.0.1:8080:8080` (loopback), not a bare
+  # `-p 8080:8080` (all interfaces) — this footer is the copy-paste surface
+  # for every release reader, so it gets the safer form; zero usability cost,
+  # since the next line already says `http://localhost:8080`.
   #
-  # This binds `-p 127.0.0.1:8080:8080` (loopback), not a bare `-p
-  # 8080:8080` (all interfaces): there's no auth layer anywhere in
-  # internal/server/, and this command mounts the operator's kubeconfig
-  # read-only into the container — a bare `-p 8080:8080` hands anyone who
-  # can reach that port read access to the cluster under the operator's own
-  # credentials. Since issue #127, `defaultAddr` in cmd/htp-k8s/main.go is
-  # loopback-only (`127.0.0.1:8080`) for the SAME reason, so `-e
-  # HTP_K8S_ADDR=:8080` is now required here too — Docker's `-p` forwards to
-  # the container's own interface address, never to its loopback, so a
-  # container left on the loopback-only default would never see that
-  # forwarded traffic at all. The `-p` host-side binding above is what
-  # actually restricts access (verified: the host listener really is
-  # loopback-only, not merely labeled that way); the container has to bind
-  # wider *inside its own network namespace* for the forwarding to reach it.
-  # This footer is the copy-paste surface for every release reader, so it
-  # gets the safer form. Zero usability cost: the next line already says
-  # `http://localhost:8080`.
+  # The shipped parenthetical right after the command is deliberately terse
+  # (maintainer feedback on PR #132: the README's Quickstart had grown a full
+  # paragraph of "why" per flag across several review rounds — cut back there
+  # to commands + minimal orientation, with the "why" moved to
+  # docs/running-locally.md and docs/adr/0012-loopback-listen-address-by-
+  # default.md). This footer follows the same discipline and links out to both
+  # rather than restating their content — don't re-inflate it; if a future
+  # flag needs explaining here, add a short pointer, not a paragraph.
   #
   # `--signer-workflow` on both `gh attestation verify` calls: `--repo` alone
   # only proves SOME workflow in this repo produced the attestation, not
@@ -225,7 +218,7 @@ release:
     # then open http://localhost:8080
     ```
 
-    (`--user "$(id -u):$(id -g)"` lets the container read your kubeconfig — a standard `kind`/`kubectl`-written one is mode `0600`. Bash/zsh syntax; on Windows, drop the flag and see the README for the caveat. Run this from your normal shell, not as root — `$(id -u)` expands to `0` there, silently handing the container root instead of your uid. `-e HTP_K8S_ADDR=:8080` is required: htp-k8s listens on loopback only by default — there's no authentication layer in front of it — but a container bound to its own loopback would never see the traffic `-p` forwards to it, so the container has to bind wider *inside its own network namespace*; the `-p 127.0.0.1:8080:8080` above is what actually keeps this off your network.)
+    (`--user "$(id -u):$(id -g)"` reads your `0600` kubeconfig; `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats: [README](https://github.com/herzogf/htp-k8s#quickstart), [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-loopback-listen-address-by-default.md).)
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.
