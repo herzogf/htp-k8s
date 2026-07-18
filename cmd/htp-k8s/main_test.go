@@ -349,10 +349,17 @@ func TestIsLoopbackAddr(t *testing.T) {
 // TestLogListenAddr_LoopbackMentionsBothOptOutForms proves the loopback log
 // message names BOTH the flag and the env var an operator might reach for to
 // widen exposure — an operator who only knows one form of htp-k8s's
-// flag/env convention must still find the other in this line.
+// flag/env convention must still find the other in this line. It also pins
+// the literal "bound to loopback only" text: test/e2e/container-kubeconfig/
+// run.sh's test 5a greps the real container's log for that exact string to
+// prove the SHIPPED IMAGE's own default is fail-closed, and nothing else
+// fast-fails a wording change to it — without this assertion, a copy-edit
+// here would only surface as a confusing e2e failure ("IMAGE's own default
+// may not be loopback-only any more") instead of a fast, on-point one right
+// here.
 func TestLogListenAddr_LoopbackMentionsBothOptOutForms(t *testing.T) {
 	out := captureLog(t, func() { logListenAddr("127.0.0.1:8080") })
-	for _, want := range []string{"-addr", "HTP_K8S_ADDR", "127.0.0.1:8080"} {
+	for _, want := range []string{"-addr", "HTP_K8S_ADDR", "127.0.0.1:8080", "bound to loopback only"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("logListenAddr(loopback) output = %q, missing %q", out, want)
 		}
