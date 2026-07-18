@@ -115,12 +115,16 @@ this endpoint reports.
 
 ## Controls
 
-- **Free-fly:** click the canvas to grab pointer-lock, then `WASD` + mouse to fly;
+- **Free-fly:** click the canvas to grab pointer-lock, then `WASD` (or the arrow
+  keys) plus `Space`/`Shift` to rise/descend, and the mouse to look around;
   `Esc` releases the pointer.
 - **Focus + detail:** click a Tower or a Panel to smoothly focus the camera on it and
   open its read-only Detail Popup (Panel popups include a short live log tail).
+  Close it with its own close button, `Esc`, or by clicking empty space.
 - **Demo Mode:** the toggle at the top-right starts/stops the automated cinematic
   canyon-tour flight (ADR-0010).
+- **Quit:** close the browser tab, then `Ctrl-C` the running binary (or stop the
+  container) — see [Teardown](#teardown) below if you also seeded a kind cluster.
 
 ## Useful flags for testing
 

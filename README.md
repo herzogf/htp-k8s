@@ -62,6 +62,15 @@ Runs on **vanilla Kubernetes**. **OpenShift** support is planned but **not yet t
 
 *Demo Mode threads a hands-off cinematic tour through the canyon between the towers.*
 
+## Controls
+
+- **Fly:** click the canvas to grab the pointer, then `WASD` (or the arrow keys) plus the mouse to fly and look around. `Esc` releases the pointer again.
+- **Inspect:** click any tower or pod panel to fly the camera to it and open its detail popup; `Esc`, its close button, or a click on empty space dismisses it.
+- **Demo Mode:** click the **Demo Mode** toggle (top right) to start or stop the hands-off canyon tour.
+- **Quit:** close the tab, then `Ctrl-C` the binary/container.
+
+The full control scheme (including vertical flight) is in [Running & developing locally](docs/running-locally.md#controls).
+
 ## Supply chain
 
 Every release is built in CI with **keyless, Sigstore-backed attestations** — build provenance for the binaries and the container image, plus a CycloneDX **SBOM** per artifact — and is **CVE-scanned** with Trivy. There are no keys to manage; verify what you downloaded with the [GitHub CLI (`gh`)](https://cli.github.com/):
