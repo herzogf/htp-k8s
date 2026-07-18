@@ -12,34 +12,56 @@ It's **read-only** — a thing to *watch*, styled after the 1995 film *Hackers*,
 
 ## Quickstart
 
-htp-k8s is a single binary (the web UI is embedded) that serves a browser UI on `:8080` against whatever cluster your current kubeconfig points at.
+htp-k8s is a single binary (the web UI is embedded) that serves a browser UI against whatever cluster your current kubeconfig points at. It's read-only with no authentication, so it **listens on `127.0.0.1:8080` (loopback only) by default** — see [Running & developing locally](docs/running-locally.md) for why, and how to widen it.
 
 **Run the binary** — grab the latest build for your platform from [Releases](https://github.com/herzogf/htp-k8s/releases):
 
 ```bash
 # Linux amd64 example — see Releases for your platform and the latest version
 tar -xzf htp-k8s_0.2.0_linux_amd64.tar.gz
-./htp-k8s                     # serves on :8080 against your current kubeconfig
+./htp-k8s                     # serves on 127.0.0.1:8080 (loopback only) against your current kubeconfig
 # then open http://localhost:8080
 ```
 
-**Or run the container image:**
+**Or run the container image.** It looks for a kubeconfig at `/kube/config`; `--user` is needed because of kubeconfig file permissions (`0600`) — see [Running & developing locally](docs/running-locally.md#the-container-image) if either needs troubleshooting.
+
+Your cluster is at a real network address (EKS, GKE, OpenShift, on-prem):
 
 ```bash
 docker run --rm -p 127.0.0.1:8080:8080 \
   --user "$(id -u):$(id -g)" \
+  -e HTP_K8S_ADDR=:8080 \
   -v "$HOME/.kube/config:/kube/config:ro" \
   ghcr.io/herzogf/htp-k8s:v0.2.0
 # then open http://localhost:8080
 ```
 
-The container looks for a kubeconfig at `/kube/config` by default, so mounting your kubeconfig there is all that's needed — no `-e KUBECONFIG` boilerplate. Mounting elsewhere? Override it explicitly: add `-e KUBECONFIG=/some/other/path` and mount to match.
+Already have a local [kind](https://kind.sigs.k8s.io/) cluster:
 
-`--user "$(id -u):$(id -g)"` makes the container read that mount as you rather than as its own built-in non-root user: a standard kind/kubectl-written kubeconfig is mode `0600` (owner-read-only), and without this flag the container can't read a file it doesn't own — it fails with `permission denied`, and the resulting error names this exact flag. `$(id -u)` is bash/zsh syntax (Linux, macOS Terminal); PowerShell and cmd.exe have no `id` command, so on Windows drop the flag and try the plain command first. We haven't verified on this project how Docker Desktop's bind-mount layer handles host file permissions on Windows or macOS — if you still hit `permission denied` there, mounting a copy of your kubeconfig with broader read permissions is a fallback that doesn't depend on any of this. From a **root shell**, `$(id -u):$(id -g)` expands to `0:0`, silently turning the container back into root instead of your (non-root) uid — run this from your normal user shell, not as root (`sudo docker run …` is fine: the shell expands `$(id -u)` before `sudo` ever runs).
+```bash
+kind get kubeconfig --internal --name kind > /tmp/htp-k8s-kubeconfig   # "kind" is the default cluster name; use yours if you named it
+docker run --rm --network kind -p 127.0.0.1:8080:8080 \
+  --user "$(id -u):$(id -g)" \
+  -e HTP_K8S_ADDR=:8080 \
+  -v /tmp/htp-k8s-kubeconfig:/kube/config:ro \
+  ghcr.io/herzogf/htp-k8s:v0.2.0
+# then open http://localhost:8080
+```
 
-Your cluster has to be reachable from wherever htp-k8s runs — for a container talking to a *local* cluster on Linux, add `--network host`. htp-k8s exits immediately if it can't reach a cluster (if you forget the `-v` mount, the error names the missing `/kube/config` path).
+Some other local cluster (k3d, minikube, Docker Desktop):
 
-**Just want to try it?** Spin up a throwaway local cluster with [kind](https://kind.sigs.k8s.io/):
+```bash
+# NOTE: HTP_K8S_ADDR is 127.0.0.1:8080 here, not the bare :8080 above —
+# --network host makes `-p` a no-op, so the app must bind loopback itself.
+docker run --rm --network host \
+  --user "$(id -u):$(id -g)" \
+  -e HTP_K8S_ADDR=127.0.0.1:8080 \
+  -v "$HOME/.kube/config:/kube/config:ro" \
+  ghcr.io/herzogf/htp-k8s:v0.2.0
+# then open http://localhost:8080
+```
+
+**Just want to try it?** Spin up a throwaway local cluster with [kind](https://kind.sigs.k8s.io/) and run the binary directly:
 
 ```bash
 kind create cluster        # htp-k8s shows this single node as one lone tower

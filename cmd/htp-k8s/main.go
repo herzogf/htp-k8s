@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -19,7 +20,55 @@ import (
 	"github.com/herzogf/htp-k8s/internal/server"
 )
 
-const defaultAddr = ":8080"
+// defaultAddr is loopback-only (issue #127): htp-k8s has no authentication or
+// authorization layer anywhere in internal/server (ADR-0003 keeps it a
+// read-only viewer, not a reason to add one), so a non-loopback default would
+// hand anyone who can reach the port a read-only view of the operator's
+// cluster under the operator's own credentials. htp-k8s's default use case is
+// local — the browser runs on the same machine as the server, whether or not
+// the *cluster* itself is local or remote (this holds even for the
+// conference-showcase Demo Mode) — so binding wider by default buys nothing
+// for that case and costs real exposure for everyone else. -addr/HTP_K8S_ADDR
+// is the explicit opt-in to expose (e.g. `-addr :8080`).
+//
+// BREAKING CHANGE, but narrower than it first looks: this does NOT newly
+// break the primary "load the page in a browser on another machine" case —
+// that was already broken on the OLD all-interfaces default too, because the
+// released frontend's WebSocket target is baked to ws://localhost:8080/ws
+// regardless of where the page was loaded from (web/src/config.ts's
+// DEFAULT_WS_URL), so a remote browser already got a blank/stalled page
+// there, not a working live scene. What silently breaks on upgrade: anyone
+// reaching /api endpoints directly from another host (curl, custom tooling,
+// monitoring), and anyone who had already rebuilt the frontend with a
+// matching VITE_WS_URL to make real remote viewing work — both now also need
+// -addr/HTP_K8S_ADDR. See run()'s startup log line, which always states the
+// listen address and, when it's loopback, exactly how to widen it — the
+// operator finds out from the log, not by discovering the app is
+// unreachable from elsewhere.
+//
+// The image BINARY has this same loopback default — it is not an exception.
+// What IS an exception is the documented `docker run` recipe (README.md),
+// which passes -e HTP_K8S_ADDR=:8080 explicitly: Docker's `-p` port
+// publishing forwards to the *container's* interface address, not its
+// loopback, so a container left on the loopback default would never see
+// traffic `-p` forwards to it, breaking `docker run -p 127.0.0.1:8080:8080
+// ...` even though that command's host-side loopback binding is what
+// actually restricts access. Baking a wider default into the image binary
+// itself (rather than the recipe) IS mechanically possible via an
+// image-only `-X main.defaultAddr=...` ldflag in .ko.yaml (which already
+// has its own ldflags block, distinct from GoReleaser's) — deliberately not
+// done, because it would make the --network host fallback recipe
+// (README.md) fail OPEN: forgetting -e HTP_K8S_ADDR=127.0.0.1:8080 there
+// would silently expose every host interface instead of just losing
+// connectivity. Every other way to forget a flag in this design fails
+// closed (see main_test.go and README.md); this is the one shape that
+// wouldn't, so it stays a recipe-level flag instead. (ko itself has no
+// supported way to set a container-*runtime* env var — verified against ko
+// v0.19.1 and GoReleaser v2.17.0's `kos:` pipe while investigating this
+// issue; both only expose Go *build*-time env, never the OCI image's
+// runtime Config.Env — but that's a different question from the ldflag
+// option above, which doesn't go through either.)
+const defaultAddr = "127.0.0.1:8080"
 
 // Build metadata. These defaults apply to plain `go build` / `go run` dev
 // builds; release builds inject the real values via `-ldflags -X` — both
@@ -236,11 +285,59 @@ func run(args []string, env func(string) string) error {
 		}),
 	}
 
-	log.Printf("htp-k8s backend listening on %s", opts.addr)
+	logListenAddr(opts.addr)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("server error: %w", err)
 	}
 	return nil
+}
+
+// logListenAddr logs the address htp-k8s is about to listen on, and — since
+// there is no authentication layer anywhere in internal/server (issue #127) —
+// always makes the exposure explicit rather than a one-line fact easy to miss:
+// a loopback bind gets a reminder of exactly how to widen it (matching flag
+// AND env var, so either form an operator reaches for works), and a
+// non-loopback bind gets a loud warning naming precisely what that means.
+// Called before ListenAndServe (which blocks), matching this function's
+// previous unconditional log line — an invalid addr still fails at bind time
+// with its own clear error, so logging the intent first is fine either way.
+func logListenAddr(addr string) {
+	log.Printf("htp-k8s backend listening on %s", addr)
+	if isLoopbackAddr(addr) {
+		log.Printf("bound to loopback only — reachable from this machine, not from other hosts. To expose it, set -addr :8080 or HTP_K8S_ADDR=:8080 (see README.md for the security implications and what a remote browser additionally needs)")
+		return
+	}
+	log.Printf("WARNING: bound to %s (not loopback-only) with no authentication — anyone who can reach this port gets read-only access to your cluster under your credentials", addr)
+}
+
+// isLoopbackAddr reports whether addr (a listen address in host:port form, as
+// taken by http.Server.Addr) binds to loopback only. It affects ONLY which
+// startup log line is printed above — never behavior — so a host form this
+// can't parse (or a hostname it can't resolve) safely falls back to "not
+// loopback": that's the conservative direction for a security-relevant log
+// message, and net.Listen gets the final, authoritative say over what the
+// process actually binds to regardless of what this reports.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Not a valid host:port at all (e.g. missing the port); net.Listen
+		// will reject it shortly with its own clear error either way.
+		return false
+	}
+	if host == "" {
+		// The ":8080" form — no host means "all interfaces".
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// A hostname other than "localhost" — DNS could resolve it to
+		// anything, so don't claim loopback.
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 // resolveViewMode verifies the cluster is reachable and determines the startup

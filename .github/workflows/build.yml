@@ -378,6 +378,12 @@ jobs:
       - name: Container kubeconfig fallback (docker)
         env:
           IMAGE: ${{ steps.build-fallback-test-image.outputs.image }}
+          # Must match the `cluster_name` given to helm/kind-action above —
+          # this script (issue #127) derives its own internal kubeconfig from
+          # it via `kind get kubeconfig --internal --name "$CLUSTER_NAME"`
+          # rather than using `--network host` (see the script's own header
+          # comment for why).
+          CLUSTER_NAME: htp-k8s-e2e
         run: ./test/e2e/container-kubeconfig/run.sh
 
       # ADR-0004's "modest" tier: layer a KWOK controller plus a handful of fake

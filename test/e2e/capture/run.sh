@@ -287,8 +287,14 @@ log "Seeding KWOK nodes/pods for a populated scene"
 # 3. Launch the app with Demo Mode auto-starting on the given seed, and wait
 #    for it to become healthy.
 # ---------------------------------------------------------------------------
-log "Starting the app on :${PORT} (Demo Mode auto-start, seed ${SEED})"
-HTP_K8S_DEMO=1 HTP_K8S_DEMO_SEED="${SEED}" "${REPO_ROOT}/bin/htp-k8s" -addr ":${PORT}" \
+log "Starting the app on 127.0.0.1:${PORT} (Demo Mode auto-start, seed ${SEED})"
+# Loopback-only (issue #127): this capture is driven entirely by a headless
+# Chromium on THIS machine (capture.mjs, via BASE_URL=http://localhost:${PORT}
+# above) — nothing about this tool needs the app reachable from elsewhere on
+# the network, so there's no reason to bind wider than the app's own
+# loopback-only default would already give it; being explicit here just
+# keeps this script's intent legible without depending on that default.
+HTP_K8S_DEMO=1 HTP_K8S_DEMO_SEED="${SEED}" "${REPO_ROOT}/bin/htp-k8s" -addr "127.0.0.1:${PORT}" \
   > "${OUT_DIR}/app.log" 2>&1 &
 APP_PID=$!
 echo "App PID: ${APP_PID}"

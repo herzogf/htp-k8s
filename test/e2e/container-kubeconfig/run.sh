@@ -13,26 +13,27 @@
 #
 # Reuses the e2e job's already-provisioned kind cluster (ADR-0004's "don't
 # spin up a redundant cluster" guidance) — it just needs a real, reachable
-# API server and a kubeconfig for it, which that job already has by the time
-# this runs. Requires: IMAGE (a local `ko build --local` image reference)
-# and KUBECONFIG (a working kubeconfig for a reachable cluster) in the
-# environment, plus docker and curl on PATH.
+# API server, which that job already has by the time this runs. Requires:
+# IMAGE (a local `ko build --local` image reference), CLUSTER_NAME (the name
+# of that already-provisioned, reachable kind cluster), and KUBECONFIG (the
+# real kubeconfig kind/kind-action wrote for it, e.g. $HOME/.kube/config —
+# used only to assert the real-world 0600 premise below, never mounted into
+# any container) in the environment, plus docker, curl, and kind on PATH.
 #
-#   IMAGE=ko.local/htp-k8s-... KUBECONFIG=$HOME/.kube/config \
+#   IMAGE=ko.local/htp-k8s-... CLUSTER_NAME=htp-k8s-e2e KUBECONFIG=$HOME/.kube/config \
 #     ./test/e2e/container-kubeconfig/run.sh
 #
 # Covers:
-#   1. The documented recipe, run EXACTLY as documented, against KUBECONFIG
-#      UNCHANGED (issue #128): mount at /kube/config with `--user
+#   1. The documented recipe, run EXACTLY as documented, against a real 0600
+#      kubeconfig (issue #128): mount at /kube/config with `--user
 #      "$(id -u):$(id -g)"`, no -e KUBECONFIG -> the app starts and actually
 #      serves (GET /api/config), not merely "didn't exit". This is the real
-#      regression test for #128 — a kind/kubectl-written kubeconfig is mode
-#      0600 (asserted below, so this test can't silently pass against a
-#      permissive file), and prior to #128 this exact invocation, minus
-#      --user, failed with "permission denied" on every real Linux Docker
-#      host.
+#      regression test for #128 — KUBECONFIG is asserted mode 0600 below, so
+#      this test can't silently pass against a permissive file, and prior to
+#      #128 this exact invocation, minus --user, failed with "permission
+#      denied" on every real Linux Docker host.
 #   2. The permission diagnostic (issue #128): the SAME real 0600
-#      KUBECONFIG, mounted at /kube/config, but WITHOUT --user — the failure
+#      kubeconfig, mounted at /kube/config, but WITHOUT --user — the failure
 #      mode users actually hit (the pre-#128 documented recipe). Must fail
 #      fast (exit 1) with a diagnostic naming --user "$(id -u):$(id -g)",
 #      distinct from the missing-mount diagnostic in test 4.
@@ -46,36 +47,71 @@
 #      naming /kube/config and the -v flag — the case most likely to rot
 #      silently, since nobody manually re-checks an error message on every
 #      base-image bump.
+#   5. The shipped IMAGE's *own default* (issue #127), exercised for the
+#      first time by this script: run it exactly as an operator who forgot
+#      `-e HTP_K8S_ADDR=:8080` would — bridge networking, a published host
+#      port, no HTP_K8S_ADDR at all — and prove the published port is
+#      unreachable (fail-closed), while independently proving the container
+#      is genuinely alive and correctly loopback-bound (not merely dead),
+#      then confirm the positive control: the identical invocation WITH
+#      HTP_K8S_ADDR=:8080 serves 200. Every other subtest above always passes
+#      HTP_K8S_ADDR explicitly, so none of them would notice IMAGE's own
+#      default silently flipping to fail-open.
 #
-# Formerly worked around #128 by mounting a chmod-644 COPY of KUBECONFIG
-# rather than the real 0600 file (see the git history of this file for that
+# Formerly worked around #128 by mounting a chmod-644 COPY of the kubeconfig
+# rather than a real 0600 file (see the git history of this file for that
 # version, and issue #129 for the gap it flagged). #128 fixed the underlying
 # permission failure with `--user "$(id -u):$(id -g)"` (see README.md and
-# internal/kube/client.go), so this script now exercises the real documented
-# recipe against the real, unmodified, 0600 KUBECONFIG throughout — no copy,
-# no chmod, nothing that could mask a real permission regression.
+# internal/kube/client.go), so this script exercises the real documented
+# recipe against a real 0600 kubeconfig throughout.
+#
+# NETWORKING (issue #127): this script does NOT use `--network host`. Under
+# host networking, Docker's `-p` publish mapping is silently ignored — a
+# container bound to a port under `--network host` is bound to that port on
+# the HOST, across every interface, regardless of what `-p` says, which is
+# exactly the exposure #127 exists to close. Instead every container here
+# joins kind's own `kind` Docker network (`--network kind`, created
+# automatically by `kind create cluster`) and is handed kind's *internal*
+# kubeconfig (`kind get kubeconfig --internal`, which points at
+# `https://<cluster>-control-plane:6443` — resolvable from another container
+# on that same network — rather than the externally-published
+# `https://127.0.0.1:<port>` a normal kubeconfig carries, which is
+# meaningless from inside a bridge-networked container). Verified
+# empirically against a real kind cluster and a real ko-built image while
+# implementing #127: ordinary bridge networking + `-p 127.0.0.1:<port>:8080`
+# reaches the cluster and serves end-to-end this way, with the *host*
+# listener staying genuinely loopback-only (confirmed with `ss -ltn` and a
+# failed connection attempt from the host's real LAN IP).
 set -euo pipefail
 
 : "${IMAGE:?IMAGE must be set to a local image reference (e.g. from ko build --local)}"
-: "${KUBECONFIG:?KUBECONFIG must be set to a working kubeconfig for a reachable cluster}"
+: "${CLUSTER_NAME:?CLUSTER_NAME must be set to the name of a reachable kind cluster}"
+: "${KUBECONFIG:?KUBECONFIG must be set to a real, naturally-written kubeconfig for that cluster (e.g. \$HOME/.kube/config) — used only to assert the issue #128 premise below, not mounted into any container}"
 
 log() { printf '\n=== [container-kubeconfig] %s\n' "$*"; }
 
-# This whole script's value rests on KUBECONFIG being genuinely
-# owner-read-only, exactly as kind/kubectl/most cloud CLIs write it (issue
-# #128's actual failure mode). Assert it rather than silently testing
-# something weaker if the environment ever hands us a more permissive file.
+# This whole script's value rests on a real kind/kubectl-written kubeconfig
+# being genuinely owner-read-only (issue #128's actual failure mode) — assert
+# that against KUBECONFIG, the kubeconfig kind/kind-action actually wrote via
+# its normal client-go path (clientcmd.WriteToFile, mode 0600), rather than
+# against a file THIS script chmods itself below (asserting a self-imposed
+# mode right after imposing it is a no-op that can never fail — caught in
+# review of an earlier version of this script; this checks the real,
+# independently-produced artifact instead).
 kc_mode="$(stat -c '%a' "${KUBECONFIG}")"
 if [ "${kc_mode}" != "600" ]; then
-  echo "FAIL: KUBECONFIG (${KUBECONFIG}) is mode ${kc_mode}, expected 600 — this script exists to test the real permission failure/fix from issue #128 against a standard kind/kubectl-written kubeconfig; a more permissive file would let tests 1-3 pass for the wrong reason." >&2
+  echo "FAIL: KUBECONFIG (${KUBECONFIG}) is mode ${kc_mode}, expected 600 — this script exists to test the real permission failure/fix from issue #128 against a standard kind/kubectl-written kubeconfig; a more permissive file would mean the environment itself no longer reflects the real-world case this script is for." >&2
   exit 1
 fi
 
-# Track every container name so cleanup can force-remove all of them
-# regardless of which subtest fails. No scratch copy of KUBECONFIG is made
-# anywhere in this script (see the header note above) — every test below
-# mounts the real file.
+# Track every container name, and the scratch dir below, so cleanup can
+# remove them regardless of which subtest fails. Both declared AND the trap
+# installed before anything that could need cleaning up is created — a
+# failure between "mktemp succeeds" and "the trap line runs" would otherwise
+# leak the scratch dir (and, worse, the kubeconfig about to be written into
+# it) with no cleanup registered to catch it.
 CONTAINERS=()
+SCRATCH_DIR=""
 
 cleanup() {
   local rc=$?
@@ -83,22 +119,41 @@ cleanup() {
   for name in "${CONTAINERS[@]:-}"; do
     [ -n "${name}" ] && docker rm -f "${name}" >/dev/null 2>&1 || true
   done
+  [ -n "${SCRATCH_DIR}" ] && rm -rf "${SCRATCH_DIR}"
   exit "${rc}"
 }
 trap cleanup EXIT INT TERM
 
+# kind's *internal* kubeconfig — see the NETWORKING note above for why this,
+# not the externally-published one, is what a container on the `kind`
+# network needs. Created AFTER the trap above is installed (so a failure
+# here still gets cleaned up) and written with `umask 077` wrapping the
+# redirect itself, rather than a default-mode write followed by a separate
+# `chmod 600`: `kind get kubeconfig --internal` writes to stdout with no
+# fixed mode, and a plain `> file` would briefly leave a real cluster
+# credential file at the shell's ambient (often world-readable) umask before
+# a later chmod tightened it — the umask subshell means the file is 0600
+# from its very first byte, no window at all. (No follow-up mode assertion
+# here — asserting a mode this same block just imposed can never fail; the
+# KUBECONFIG assertion above is what actually proves the 0600 premise, against
+# an independently-written real kubeconfig.)
+SCRATCH_DIR="$(mktemp -d)"
+INTERNAL_KUBECONFIG="${SCRATCH_DIR}/kubeconfig-internal"
+( umask 077 && kind get kubeconfig --internal --name "${CLUSTER_NAME}" > "${INTERNAL_KUBECONFIG}" )
+
 # --user "$(id -u):$(id -g)": issue #128's fix — makes the container read the
-# real 0600 KUBECONFIG mount as the host user instead of its fixed non-root
+# real 0600 kubeconfig mount as the host user instead of its fixed non-root
 # uid. Computed once so every "with --user" docker run below stays in sync.
 HOST_USER="$(id -u):$(id -g)"
 
-# port_is_free/pick_free_port: tests 1 and 3a run with --network host and
-# actually bind, so a hardcoded port risks colliding with anything else
-# already listening on the host — another job, another agent's app, a
-# developer's own process (docker's own port-publish couldn't have picked
-# one for us here, since --network host bypasses that entirely). Pick a
-# random candidate in the ephemeral range and probe it with bash's own
-# /dev/tcp (no extra tool dependency), retrying on collision.
+# port_is_free/pick_free_port: tests 1 and 3a publish the container's fixed
+# internal :8080 (see the NETWORKING note above and their -e
+# HTP_K8S_ADDR=:8080, matching the documented recipe exactly) to a HOST port
+# via `-p 127.0.0.1:<port>:8080`, so a hardcoded port risks colliding with
+# anything else already listening on the host — another job, another agent's
+# process, a developer's own process. Pick a random candidate in the
+# ephemeral range and probe it with bash's own /dev/tcp (no extra tool
+# dependency), retrying on collision.
 port_is_free() {
   local port="$1"
   if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
@@ -137,19 +192,48 @@ wait_http_200() {
   done
 }
 
+# wait_log_contains <container> <pattern> <timeout-seconds>: polls the
+# container's log for a fixed grep pattern, or fails once the timeout
+# elapses. Used by Test 5 to positively confirm the process reached its
+# startup log line (proof of "correctly bound to loopback", not merely
+# "the port didn't answer" — see that test's header comment for why the
+# distinction matters).
+wait_log_contains() {
+  local name="$1" pattern="$2" timeout="$3" deadline
+  deadline=$((SECONDS + timeout))
+  while :; do
+    if docker logs "${name}" 2>&1 | grep -q -- "${pattern}"; then
+      return 0
+    fi
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# container_is_running <container>: true iff docker reports the container as
+# currently Running. Used by Test 5 alongside wait_log_contains — together
+# they positively prove the process is alive and past its bind step, rather
+# than inferring that from the mere absence of a symptom.
+container_is_running() {
+  [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = "true" ]
+}
+
 # ---------------------------------------------------------------------------
 # 1. The documented recipe, exactly as documented, against the real 0600
 #    KUBECONFIG: -v ...:/kube/config:ro, --user "$(id -u):$(id -g)", no -e
 #    KUBECONFIG. This is the exact scenario issues #113 and #128 exist for.
 # ---------------------------------------------------------------------------
-log "Test 1: documented recipe (--user + real 0600 KUBECONFIG, no -e KUBECONFIG)"
+log "Test 1: documented recipe (--user + real 0600 kubeconfig, no -e KUBECONFIG)"
 name="htpk8s-fallback-default"
 CONTAINERS+=("${name}")
 port1="$(pick_free_port)"
-docker run -d --name "${name}" --network host \
+docker run -d --name "${name}" --network kind \
   --user "${HOST_USER}" \
-  -v "${KUBECONFIG}:/kube/config:ro" \
-  -e HTP_K8S_ADDR=":${port1}" \
+  -p "127.0.0.1:${port1}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
+  -e HTP_K8S_ADDR=:8080 \
   "${IMAGE}" >/dev/null
 
 if ! wait_http_200 "${port1}" /api/config 20; then
@@ -181,12 +265,12 @@ echo "OK: the documented recipe served a real GET /api/config response against a
 #    diagnostic (which would be actively misleading here — a file IS
 #    mounted).
 # ---------------------------------------------------------------------------
-log "Test 2: permission diagnostic (real 0600 KUBECONFIG mounted, --user omitted)"
+log "Test 2: permission diagnostic (real 0600 kubeconfig mounted, --user omitted)"
 name="htpk8s-permission-denied"
 CONTAINERS+=("${name}")
 set +e
-out="$(docker run --name "${name}" --network host \
-  -v "${KUBECONFIG}:/kube/config:ro" \
+out="$(docker run --name "${name}" --network kind \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
   "${IMAGE}" 2>&1)"
 rc=$?
 set -e
@@ -226,11 +310,12 @@ log "Test 3a: explicit KUBECONFIG is honoured (mounted elsewhere, nothing at /ku
 name="htpk8s-fallback-explicit"
 CONTAINERS+=("${name}")
 port3a="$(pick_free_port)"
-docker run -d --name "${name}" --network host \
+docker run -d --name "${name}" --network kind \
   --user "${HOST_USER}" \
-  -v "${KUBECONFIG}:/custom/kubeconfig:ro" \
+  -p "127.0.0.1:${port3a}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/custom/kubeconfig:ro" \
   -e KUBECONFIG=/custom/kubeconfig \
-  -e HTP_K8S_ADDR=":${port3a}" \
+  -e HTP_K8S_ADDR=:8080 \
   "${IMAGE}" >/dev/null
 
 if ! wait_http_200 "${port3a}" /api/config 20; then
@@ -253,7 +338,7 @@ log "Test 3b: explicit KUBECONFIG with nothing mounted there is never redirected
 name="htpk8s-fallback-explicit-missing"
 CONTAINERS+=("${name}")
 set +e
-out="$(docker run --name "${name}" --network host \
+out="$(docker run --name "${name}" --network kind \
   -e KUBECONFIG=/custom/kubeconfig \
   "${IMAGE}" 2>&1)"
 rc=$?
@@ -305,7 +390,7 @@ log "Test 4: missing mount fails fast with the actionable diagnostic"
 name="htpk8s-fallback-missing-mount"
 CONTAINERS+=("${name}")
 set +e
-out="$(docker run --name "${name}" --network host "${IMAGE}" 2>&1)"
+out="$(docker run --name "${name}" --network kind "${IMAGE}" 2>&1)"
 rc=$?
 set -e
 if [ "${rc}" -ne 1 ]; then
@@ -330,5 +415,119 @@ if echo "${out}" | grep -q -- '--user'; then
 fi
 docker rm -f "${name}" >/dev/null 2>&1
 echo "OK: a forgotten mount exits 1 with the documented -v hint."
+
+# ---------------------------------------------------------------------------
+# 5. The shipped IMAGE's own default (issue #127): under bridge networking
+#    with a published host port and NO HTP_K8S_ADDR at all — the exact thing
+#    every subtest above deliberately avoids testing, by always passing
+#    HTP_K8S_ADDR=:8080 itself. The whole security argument for the
+#    container recipe (README.md, .goreleaser.yaml's release footer) rests
+#    on IMAGE defaulting to loopback-only, so that forgetting the flag fails
+#    CLOSED (published port unreachable) rather than OPEN (published port
+#    serving traffic). Nothing before this point in the file exercises that
+#    default; it's asserted only in prose.
+#
+#    5a proves the negative (published port unreachable) is NOT the vacuous
+#    "the container might just be dead" case: `docker inspect` must report
+#    it Running, AND its own log must name the loopback bind, both checked
+#    independently of the port probe. A subtest that only checked
+#    unreachability would pass identically if the binary crashed on
+#    startup — see this file's header comment on why that shape has burned
+#    this script three times already.
+#
+#    5b is the positive control the negative is meaningless without: the
+#    IDENTICAL invocation, differing only by adding -e HTP_K8S_ADDR=:8080,
+#    must serve 200. Without 5b, 5a's failure could just as easily mean
+#    "the API server was unreachable" or "the port picker collided" as
+#    "the loopback default did its job".
+# ---------------------------------------------------------------------------
+log "Test 5a: IMAGE's own default (no HTP_K8S_ADDR) is fail-closed under bridge networking"
+name="htpk8s-image-default-loopback"
+CONTAINERS+=("${name}")
+port5="$(pick_free_port)"
+docker run -d --name "${name}" --network kind \
+  --user "${HOST_USER}" \
+  -p "127.0.0.1:${port5}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
+  "${IMAGE}" >/dev/null
+
+# Positive proof of life FIRST: the process must reach and log its loopback
+# bind line (cmd/htp-k8s/main.go's logListenAddr/isLoopbackAddr) within a
+# generous startup window. If this never appears, the container either
+# crashed or is hung before binding — a real failure, but a DIFFERENT one
+# from "the loopback default leaked traffic", so it's reported distinctly
+# from the port-unreachability check below rather than folded into it.
+if ! wait_log_contains "${name}" "bound to loopback only" 20; then
+  echo "FAIL: container never logged a loopback bind within 20s — IMAGE's own default may not be loopback-only any more, or the container failed to start. Log:" >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+if ! container_is_running "${name}"; then
+  echo "FAIL: container logged a loopback bind but is not Running (crashed immediately after logging?). Log:" >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+
+# Now the actual security assertion: the published host port must be
+# unreachable. Docker's `-p 127.0.0.1:<port>:8080` maps to the container's
+# OWN interface, not its loopback — a process bound to 127.0.0.1 inside the
+# container never receives that traffic, so the connection is refused/reset
+# at the kernel level (verified against a real kind cluster and a real
+# ko-built image while writing this test: curl reports exit 56, "Recv
+# failure: Connection reset by peer", http_code 000 — never a completed
+# response of any kind, let alone 200). Accept curl's other well-known
+# connection-failure exit codes too (7 "Couldn't connect", 52 "empty reply")
+# since the exact one can vary with the host's iptables/docker-proxy setup;
+# anything else (e.g. 28, a timeout — traffic silently dropped rather than
+# refused/reset) is treated as a genuine failure of this test rather than
+# silently accepted, since that would be a different, unverified failure
+# mode.
+set +e
+http_code="$(curl -sS -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${port5}/api/config" 2>/dev/null)"
+curl_rc=$?
+set -e
+if [ "${curl_rc}" -eq 0 ]; then
+  echo "FAIL: curl succeeded (http_code=${http_code}) against the published port with no HTP_K8S_ADDR set — IMAGE's own default is no longer loopback-only, the exact fail-open regression issue #127 exists to prevent." >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+case "${curl_rc}" in
+7 | 52 | 56) : ;;
+*)
+  echo "FAIL: expected a connection-refused/reset curl exit code (7, 52, or 56), got ${curl_rc} (http_code=${http_code}) — an unrecognized failure mode, not the refused/reset this test asserts." >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+  ;;
+esac
+if [ "${http_code}" = "200" ]; then
+  echo "FAIL: got http_code 200 from a curl call that reported failure (curl_rc=${curl_rc}) — contradictory result, treat as a test bug rather than trusting either half." >&2
+  exit 1
+fi
+if ! container_is_running "${name}"; then
+  echo "FAIL: container stopped running during the port-unreachability probe — the port being unreachable may just mean the process died mid-test, not that it correctly stayed loopback-bound." >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+docker rm -f "${name}" >/dev/null 2>&1
+echo "OK: IMAGE's own default (no HTP_K8S_ADDR) left the published port unreachable (curl exit ${curl_rc}) while the container stayed running and logged a genuine loopback bind — fail-closed, not crashed."
+
+log "Test 5b: positive control — the identical invocation WITH HTP_K8S_ADDR=:8080 serves 200"
+name="htpk8s-image-default-positive-control"
+CONTAINERS+=("${name}")
+port5b="$(pick_free_port)"
+docker run -d --name "${name}" --network kind \
+  --user "${HOST_USER}" \
+  -p "127.0.0.1:${port5b}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
+  -e HTP_K8S_ADDR=:8080 \
+  "${IMAGE}" >/dev/null
+
+if ! wait_http_200 "${port5b}" /api/config 20; then
+  echo "FAIL: positive control (same invocation as 5a, plus HTP_K8S_ADDR=:8080) did not serve GET /api/config within 20s — without this working, Test 5a's failure proves nothing (could be an unrelated networking/cluster problem, not the loopback default). Container log:" >&2
+  docker logs "${name}" >&2 || true
+  exit 1
+fi
+docker rm -f "${name}" >/dev/null 2>&1
+echo "OK: the identical invocation with HTP_K8S_ADDR=:8080 set does serve 200 — Test 5a's unreachability is attributable to the loopback default, not some other break."
 
 log "All container kubeconfig fallback checks passed."

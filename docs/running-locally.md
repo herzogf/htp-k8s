@@ -6,9 +6,10 @@ automated tests deliberately don't judge — Demo Mode's camera choreography, ho
 scene *feels*, how phase colours read (ADR-0004 scopes the e2e suite to mechanics,
 not "does it feel cinematic"; ADR-0011 keeps aesthetic sign-off human).
 
-If you just want to *use* a released build against a cluster you already have, see
-the quickstart in the [README](../README.md) instead — this document is the fuller
-build-from-source recipe.
+If you just want to *use* a released build against a cluster you already have, start
+with the quickstart in the [README](../README.md) — this document is the fuller
+build-from-source recipe, plus the detail and troubleshooting behind the README's
+container commands (see [The container image](#the-container-image) below).
 
 The scene you'll get: **1 real kind node + 6 KWOK-simulated nodes = 7 Towers**, with
 **30 seeded pods** spread across a mix of phases (Running, Pending, Succeeded, Failed,
@@ -135,7 +136,7 @@ The binary takes a few flags (each also has an `HTP_K8S_*` environment fallback)
 
 | Flag | Env | Purpose |
 | --- | --- | --- |
-| `-addr` | `HTP_K8S_ADDR` | Listen address; default `:8080`. See the port gotcha below. |
+| `-addr` | `HTP_K8S_ADDR` | Listen address; default `127.0.0.1:8080` (**loopback only** — there's no auth layer, so nothing is reachable off this machine unless you opt in; see [ADR-0012](adr/0012-secure-by-default-network-binding.md)). Pass `-addr :8080` to widen it — but that alone only reaches `/api` directly (curl, custom tooling); a remote *browser* additionally needs the frontend rebuilt with `VITE_WS_URL`, same as changing the port does. See the `/ws` gotcha below. |
 | `-demo` | `HTP_K8S_DEMO` | Auto-start Demo Mode at launch — handy for unattended showcase runs. |
 | `-demo-seed` | `HTP_K8S_DEMO_SEED` | Fix the canyon-tour PRNG seed so a flight is reproducible (ADR-0010). A random seed is chosen and logged otherwise. |
 | `-namespace-filter` | `HTP_K8S_NAMESPACE_FILTER` | Preset a name-pattern Namespace/Project filter (shell wildcards, e.g. `openshift-*`). |
@@ -153,12 +154,17 @@ Tower arrangement — the tour is a deterministic function of the seed plus the 
 
 ## Gotchas
 
-- **The `/ws` URL is baked in at build time.** The frontend defaults to
-  `ws://localhost:8080/ws` (`DEFAULT_WS_URL` in `web/src/config.ts`), so **run on
-  `:8080`** or the UI won't find the backend. To serve elsewhere, rebuild with the
-  address baked in: `VITE_WS_URL=ws://host:port/ws task build` (the `/api` origin is
-  derived from it, or overridden with `VITE_API_URL`). Passing `-addr` alone moves
-  the server but not the URL the already-built frontend dials.
+- **The `/ws` URL is baked in at build time — this also means `-addr`/`HTP_K8S_ADDR`
+  alone never makes the live scene reachable from another machine.** The frontend
+  defaults to `ws://localhost:8080/ws` (`DEFAULT_WS_URL` in `web/src/config.ts`),
+  which a browser resolves relative to *itself*, not to wherever htp-k8s is
+  running — so **run on port 8080** (the default) for the same-machine case, and
+  for a remote browser, widening `-addr`/`HTP_K8S_ADDR` to `:8080` only gets you a
+  loaded page with no data (the WebSocket dials the *viewer's* localhost). Either
+  way, rebuild with the real address baked in to fix it:
+  `VITE_WS_URL=ws://host:port/ws task build` (the `/api` origin is derived from
+  it, or overridden with `VITE_API_URL`). Passing `-addr` alone moves the server
+  but not the URL the already-built frontend dials.
 - **No cluster, no start.** The binary probes the cluster on startup and **exits
   non-zero if the API server is unreachable** (implemented for issue #9). A cluster
   that's reachable but where you can't list Nodes doesn't fail — it degrades to
@@ -166,6 +172,21 @@ Tower arrangement — the tour is a deterministic function of the seed plus the 
   (the kind cluster above, or any other) is required.
 - **One lone Tower?** You skipped step 2 — without the seed you only see the single
   real kind node.
+
+## The container image
+
+The README's Quickstart has the commands; this section is the detail and troubleshooting behind them. Why loopback by default at all, why the container needs a wider default than the native binary, and the alternatives that were considered and rejected for it, are [ADR-0012](adr/0012-secure-by-default-network-binding.md) — that reasoning isn't repeated here.
+
+**The kubeconfig mount.** The container looks for a kubeconfig at `/kube/config` by default, so mounting yours there (`-v "$HOME/.kube/config:/kube/config:ro"`) is all that's needed — no `-e KUBECONFIG` boilerplate. Mounting elsewhere? Override it explicitly: add `-e KUBECONFIG=/some/other/path` and mount to match. The container exits immediately if it can't reach a cluster; if you forget the `-v` mount entirely, the error names the missing `/kube/config` path and the flag to fix it.
+
+**`--user "$(id -u):$(id -g)"`.** Every container recipe includes this. It makes the container read the kubeconfig mount as you, rather than as its own built-in non-root user: a standard kind/kubectl-written kubeconfig is mode `0600` (owner-read-only), and without this flag the container can't read a file it doesn't own — it fails with `permission denied`, and the resulting error names this exact flag. `$(id -u)` is bash/zsh syntax (Linux, macOS Terminal); PowerShell and cmd.exe have no `id` command, so on Windows drop the flag and try the plain command first. We haven't verified on this project how Docker Desktop's bind-mount layer handles host file permissions on Windows or macOS — if you still hit `permission denied` there, mounting a copy of your kubeconfig with broader read permissions is a fallback that doesn't depend on any of this. From a **root shell**, `$(id -u):$(id -g)` expands to `0:0`, silently turning the container back into root instead of your (non-root) uid — run this from your normal user shell, not as root (`sudo docker run …` is fine: the shell expands `$(id -u)` before `sudo` ever runs).
+
+**`-e HTP_K8S_ADDR=:8080`.** Required for the remote/real-address-cluster and local-kind recipes — it's not optional the way it looks. Docker's `-p 127.0.0.1:8080:8080` forwards traffic to the *container's own* interface address, never to its loopback, so a container left on its loopback-only default would never see that traffic at all. The `-p` host-side binding is what actually restricts access, exactly as it does for the bare binary; the container just has to bind wider *inside its own network namespace* for that forwarding to reach it. Why this is a recipe flag rather than a wider image default: [ADR-0012](adr/0012-secure-by-default-network-binding.md).
+
+**Pointing the container at a local cluster.** A local cluster's kubeconfig usually points at `https://127.0.0.1:<port>` — meaningless from inside a bridge-networked container, which has its own loopback distinct from the host's. Two cases:
+
+- **An existing local kind cluster:** `kind get kubeconfig --internal --name <cluster>` only *reads* the cluster's existing state — it's a generator, not a mutation. It writes a second, container-only kubeconfig to the file you redirect it to; your `~/.kube/config` and current `kubectl` context are untouched (verified: identical before/after, byte for byte). What differs is the server address inside it: the cluster's in-network hostname (`https://<cluster>-control-plane:6443`) instead of the externally-published `127.0.0.1:<port>` your normal kubeconfig has — `--network kind` (the Docker network `kind create cluster` already made, nothing extra to set up) is what makes that hostname resolve from the container.
+- **Some other local cluster** (k3d, minikube with the Docker driver, Docker Desktop's built-in Kubernetes) has the same `127.0.0.1`-only problem but no `kind`-style in-network hostname to fall back on. The general fallback is `--network host`, which shares the host's network stack outright, so your normal kubeconfig's `127.0.0.1:<port>` resolves correctly from inside the container — but it also makes Docker's `-p` a no-op, which is why that recipe's `-e HTP_K8S_ADDR` value changes to `127.0.0.1:8080` (see [ADR-0012](adr/0012-secure-by-default-network-binding.md) for why that has to be the app binding its own loopback rather than anything Docker-side). Verified directly: under `--network host`, that value binds loopback-only exactly like the native binary's own default — reachable at `localhost:8080`, unreachable from elsewhere on the network. Not verified against k3d/minikube/Docker Desktop specifically — none are set up in this project's own test environment — but the recipe follows from how `--network host` and Docker's `-p` interact, which doesn't depend on which tool created the cluster.
 
 ## Teardown
 

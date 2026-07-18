@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,26 @@ func TestParseFlags_DefaultsWhenNoFlagOrEnv(t *testing.T) {
 	}
 	if opts.filter.Active() {
 		t.Fatal("filter is active with no flag or env, want the no-filter default (nothing hidden)")
+	}
+}
+
+// TestParseFlags_DefaultAddrIsLoopback pins the literal default (issue #127)
+// against the symbolic defaultAddr check above: htp-k8s has no
+// authentication layer anywhere in internal/server, so the default must be
+// loopback-only, not just "whatever defaultAddr happens to be" — a future
+// edit that silently widened defaultAddr back to all-interfaces would still
+// pass the test above (it compares against the same var) but must fail this
+// one.
+func TestParseFlags_DefaultAddrIsLoopback(t *testing.T) {
+	opts, err := parseFlags(nil, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.addr != "127.0.0.1:8080" {
+		t.Fatalf("addr = %q, want the loopback-only default %q", opts.addr, "127.0.0.1:8080")
+	}
+	if !isLoopbackAddr(opts.addr) {
+		t.Fatalf("default addr %q is not loopback per isLoopbackAddr", opts.addr)
 	}
 }
 
@@ -291,4 +312,90 @@ func TestVersionString_IncludesBuildMetadata(t *testing.T) {
 			t.Fatalf("versionString() = %q, missing %q", s, want)
 		}
 	}
+}
+
+// TestIsLoopbackAddr covers the cases that matter for issue #127's startup
+// log message: the two loopback spellings a real deployment might use, the
+// two "all interfaces" spellings, a non-loopback IP, and the malformed/
+// unresolvable-hostname inputs that must conservatively read as "not
+// loopback" per isLoopbackAddr's doc comment.
+func TestIsLoopbackAddr(t *testing.T) {
+	cases := []struct {
+		name string
+		addr string
+		want bool
+	}{
+		{"loopback IPv4 default", "127.0.0.1:8080", true},
+		{"loopback IPv4 other port", "127.0.0.1:9090", true},
+		{"loopback IPv6", "[::1]:8080", true},
+		{"localhost hostname", "localhost:8080", true},
+		{"bare port form (all interfaces)", ":8080", false},
+		{"explicit 0.0.0.0 (all interfaces)", "0.0.0.0:8080", false},
+		{"explicit IPv6 all interfaces", "[::]:8080", false},
+		{"non-loopback IPv4", "192.168.1.5:8080", false},
+		{"arbitrary hostname (unresolved here, must not claim loopback)", "example.com:8080", false},
+		{"malformed: no port", "127.0.0.1", false},
+		{"empty string", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isLoopbackAddr(tc.addr); got != tc.want {
+				t.Fatalf("isLoopbackAddr(%q) = %v, want %v", tc.addr, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogListenAddr_LoopbackMentionsBothOptOutForms proves the loopback log
+// message names BOTH the flag and the env var an operator might reach for to
+// widen exposure — an operator who only knows one form of htp-k8s's
+// flag/env convention must still find the other in this line. It also pins
+// the literal "bound to loopback only" text: test/e2e/container-kubeconfig/
+// run.sh's test 5a greps the real container's log for that exact string to
+// prove the SHIPPED IMAGE's own default is fail-closed, and nothing else
+// fast-fails a wording change to it — without this assertion, a copy-edit
+// here would only surface as a confusing e2e failure ("IMAGE's own default
+// may not be loopback-only any more") instead of a fast, on-point one right
+// here.
+func TestLogListenAddr_LoopbackMentionsBothOptOutForms(t *testing.T) {
+	out := captureLog(t, func() { logListenAddr("127.0.0.1:8080") })
+	for _, want := range []string{"-addr", "HTP_K8S_ADDR", "127.0.0.1:8080", "bound to loopback only"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("logListenAddr(loopback) output = %q, missing %q", out, want)
+		}
+	}
+	if strings.Contains(out, "WARNING") {
+		t.Fatalf("logListenAddr(loopback) output = %q, should not warn for a safe default", out)
+	}
+}
+
+// TestLogListenAddr_NonLoopbackWarnsLoudly proves a non-loopback bind gets an
+// explicit, loud warning naming the actual risk (no auth, read access to the
+// operator's cluster) rather than a message easy to mistake for routine
+// informational output.
+func TestLogListenAddr_NonLoopbackWarnsLoudly(t *testing.T) {
+	out := captureLog(t, func() { logListenAddr(":8080") })
+	for _, want := range []string{"WARNING", ":8080"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("logListenAddr(:8080) output = %q, missing %q", out, want)
+		}
+	}
+}
+
+// captureLog redirects the standard "log" package's output for the duration
+// of fn and returns everything it wrote, restoring the previous output
+// afterward regardless of how fn returns.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf strings.Builder
+	prevOutput := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOutput)
+		log.SetFlags(prevFlags)
+	}()
+	fn()
+	return buf.String()
 }
