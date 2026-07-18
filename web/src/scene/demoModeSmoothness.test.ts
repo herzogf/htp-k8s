@@ -150,7 +150,7 @@ const GRIDS: Array<{
     placements: kwok7(),
     expectStraightCruise: false,
     maxVoidFraction: 0.32,
-    minCanyonFraction: 0.65,
+    minCanyonFraction: 0.68,
     minWideFraction: 0.02,
   },
 ]
@@ -494,7 +494,7 @@ describe.each(GRIDS)(
         // altitude program living at the roofline) would silently move most
         // frames onto the looser clamp-frame bounds with nothing failing.
         // Observed across all seeds/grids: 3.8-7.8% at iteration 3 (nearly
-        // all of it the *ceiling*); ≤ 4.5% since iteration 4 (the remainder
+        // all of it the *ceiling*); ≤ 5% since iteration 4 (the remainder
         // mostly brief floor grazes during dives — the ceiling share has its
         // own, tighter invariant below). Calibrated bound: 15% (unchanged —
         // still ~2x iteration 3's worst, and the exception-narrowness
@@ -517,10 +517,10 @@ describe.each(GRIDS)(
         // observations and iteration 3's (main's) known-bad values:
         //
         // - median ≤ 0 (level or below — a pilot's gaze): observed
-        //   −5.1..−1.6° across all seeds/grids; main measured +4.0..+11.1°
+        //   −3.2..−1.6° across all seeds/grids; main measured +4.0..+11.1°
         //   (its *best* seed is 4° above the bound, so a regression to
         //   roofline-anchored aiming fails on every seed);
-        // - pitched-up share (> +5°) ≤ 0.30: observed 0.12-0.19; main
+        // - pitched-up share (> +5°) ≤ 0.30: observed 0.12-0.21; main
         //   0.48-0.60 — more than half of every tour looking up.
         const MAX_MEDIAN_PITCH = 0
         const MAX_UP_SHARE = 0.3
@@ -566,7 +566,7 @@ describe.each(GRIDS)(
         // spacings away — are the hero-overview shots; a tour can be
         // perfectly smooth and perfectly framed and still fail this by
         // never once stepping back. Observed on kwok7 with iteration 4's
-        // episode-gated ring widening: 0.031-0.118 per seed; main's worst
+        // episode-gated ring widening: 0.031-0.120 per seed; main's worst
         // kwok7 seed measures 0.000 (a 90-second tour without a single
         // wide-vantage frame — "uniformly cramped", literally). Calibrated
         // per-seed floor: 0.02. Skipped (bound 0) on the grids whose
@@ -650,9 +650,19 @@ describe.each(GRIDS)(
         // 16.7-25.3 side changes per minute across these seeds/grids — a
         // horizon rocking every 2-4 seconds. With corner rounding
         // (CORNER_TURN_RADIUS) and the smoothed bank driver
-        // (BANK_YAW_RATE_SMOOTHING), observed ≤ 12/min (4x2 grids ≤ 6/min).
-        // Calibrated bound: 16/min — below every pre-fix observation, ~1.3x
-        // above the worst current one.
+        // (BANK_YAW_RATE_SMOOTHING), observed ≤ 12.7/min. Since #105
+        // iteration 4 the observed worst is 15.3/min (kwok7 seed 99 / 5x5
+        // seed 13) — decomposed by a route-controlled A/B (same routes,
+        // widening offset zeroed): all but ≤ 1.4/min of any tour's total is
+        // the seed's route realization under the new episode structure, and
+        // that ≤ 1.4/min marginal cost is the wide passes' deliberate banks
+        // off and back onto the ring. Bound: 16/min — unchanged, pinned
+        // from above by the 16.7 known-bad floor, now with only ~5% headroom
+        // over the worst seed: deliberate and documented (fixed seeds, so it
+        // cannot flake) — a tuning change that trips it has eaten the whole
+        // remaining distance to the flip-flop regime and deserves the look.
+        // Whether the wide passes' slow, paired banks *read* as flown is
+        // explicitly a layer-3 question.
         const HYSTERESIS = 0.03
         const MAX_SIGN_CHANGES_PER_MINUTE = 16
         let changes = 0
@@ -717,7 +727,7 @@ describe.each(GRIDS)(
         // framing()'s doc comment for the definition's deliberate limits and
         // its validation against the real captures). Calibrated per grid,
         // re-tightened by iteration 4 (whose level gaze improved framing
-        // again): observed 0.12-0.27 across all seeds/grids (iteration 3
+        // again): observed 0.14-0.28 across all seeds/grids (iteration 3
         // measured 0.15-0.32; pre-iteration-3 `main` 0.29-0.51). Bounds sit
         // ~1.25-1.4x above the per-grid worst observation and below every
         // pre-iteration-3 per-seed value on the same grid, so a regression
@@ -740,8 +750,9 @@ describe.each(GRIDS)(
         // rooftop-cruise time instead): observed 0.70-0.85 across all
         // seeds/grids (iteration 3: 0.70-0.84; the pre-iteration-3 rebuild
         // of the ring measured ~0.40-0.55). The bounds sit just below the
-        // per-grid worst observations — deliberately snug, so any future
-        // widening tune that starts eating canyon time fails here first.
+        // per-grid worst observations (kwok7: 0.68 vs observed 0.70, the
+        // ticket's stated floor) — deliberately snug, so any future widening
+        // tune that starts eating canyon time fails here first.
         let canyonFrames = 0
         for (const pose of poses) {
           const f = framing(pose, placements)

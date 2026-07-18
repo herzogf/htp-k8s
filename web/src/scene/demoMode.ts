@@ -157,8 +157,9 @@ export const OVERVIEW_GAP_WAYPOINTS_MAX = 24
  * overview? Not often, but sometimes"): while a *wide* episode's wide phase
  * runs (see {@link isWideOverviewDraw}), waypoints on a perimeter line swing
  * OVERVIEW_PERIMETER_EXTRA farther out than {@link PERIMETER_OFFSET} — a
- * brief high-and-wide hero pass along the cluster edge, then back to the
- * tight ring.
+ * brief high-and-wide hero pass along the cluster edge (up to two
+ * consecutive waypoints of it — see {@link OVERVIEW_WIDE_START_WAYPOINT}),
+ * then back to the tight ring.
  *
  * 0.7 spacings is a calibration between two measured cliffs. Larger (0.9
  * tried): the entry/exit diagonals steepen to ~42° of heading change against
@@ -196,12 +197,22 @@ export const OVERVIEW_WIDE_APEX_MAX = (OVERVIEW_ALTITUDE_MIN + OVERVIEW_ALTITUDE
 
 /**
  * The wide phase starts this many waypoints into a wide episode — the
- * climb-out's run — so widened legs are flown high, above the roofline,
- * never during the climb. With a 5-waypoint wide episode this leaves exactly
- * one widened waypoint before the episode's final (never-widened) one: a
- * single brief swing out and back per wide episode.
+ * climb-out's run — so widened legs are flown high, above the roofline, not
+ * during the climb. Two waypoints of lead-in clear the roofline from the
+ * *median* canyon start altitude ((CANYON_ALTITUDE_MIN + CANYON_ALTITUDE_MAX)/2
+ * ≈ 2.7 → (TOWER_HEIGHT − 2.7) / (MAX_CLIMB_GRADIENT × TOWER_SPACING) ≈ 2.0
+ * waypoints); the shallow-apex gate ({@link OVERVIEW_WIDE_APEX_MAX}) covers
+ * the deeper-start tail — measured, time-in-canyon holds its floor with this
+ * pairing, and one waypoint later the wide phase shrank to a single node
+ * whose out-and-back dogleg paid the same two roll side-changes for half the
+ * wide dwell.
+ *
+ * With a 5-waypoint wide episode this makes the wide phase waypoints #3-#4 —
+ * up to two *consecutive* widened waypoints (where the lattice cooperates: a
+ * shared perimeter line makes them one parallel widened stretch flown for a
+ * full leg) before the episode's final, never-widened waypoint.
  */
-export const OVERVIEW_WIDE_START_WAYPOINT = 3
+export const OVERVIEW_WIDE_START_WAYPOINT = 2
 
 /**
  * CANYON_TRAVEL_SPEED is the flight's *horizontal ground speed*, world
@@ -1739,10 +1750,19 @@ function approachPoint(
  *
  * Both stages are continuous in the camera's position and tangent, so the aim
  * pitches gradually with the (already eased) climb — no snap, the
- * motion-sickness guardrail. Shared by {@link demandDrivenLookAt} and
- * {@link stepDemoTour} (which needs the same point to know what deficiency to
- * ease the blend toward) so the two can never disagree about what "forward"
- * means.
+ * motion-sickness guardrail.
+ *
+ * **Reached only through {@link demandDrivenLookAt} — the test-facing seam,
+ * not the production path** (true since #105 iteration 2 made the live aim
+ * an *on-path* point): {@link stepDemoTour} builds its forward point from
+ * {@link sampleSplineExtended} and sets its altitude from the flown
+ * `climbGradient` directly. This helper mirrors that rule — same look-ahead
+ * distance, same gaze-factor scaling, same window clamp — with the
+ * *tangent's* gradient standing in for the flown one (a stateless helper
+ * has no glide-slope pursuit to read; on the flattened horizontal tangents
+ * the production spline yields, both are simply "level"). If the production
+ * aim rule changes, change this to match — the demandDrivenLookAt unit
+ * tests exercise the blend/guardrail composition through it.
  */
 function forwardLookAheadPoint(
   position: Vector3,
@@ -1818,7 +1838,10 @@ function clampToAimBounds(point: Vector3, bounds: AimBounds | null): Vector3 {
 /**
  * The demand-driven look-at target: the forward look-ahead point ({@link
  * forwardLookAheadPoint}), blended toward `pullPoint` by `lookAtBlend`, then
- * a seeded {@link applyGlance} on top. Both blend inputs are threaded in
+ * a seeded {@link applyGlance} on top. **Test-facing seam**: production
+ * ({@link stepDemoTour}) composes the same blend via {@link composeLookAt}
+ * with its own on-path forward point — see forwardLookAheadPoint's doc
+ * comment. Both blend inputs are threaded in
  * *already eased* — see {@link stepDemoTour} — so this function itself never
  * snaps: `lookAtBlend`'s rate of change is capped at {@link
  * LOOKAT_BLEND_RATE}/s, and `pullPoint` (the Tower anchor the blend aims
