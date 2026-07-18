@@ -97,8 +97,14 @@ Quick sanity check without a browser:
 
 ```bash
 curl -s http://localhost:8080/api/config                 # {"demoSeed":...,"demoAutostart":false}
-curl -s http://localhost:8080/api/towers/kwok-node-0     # tower detail, podCount 5
+curl -s http://localhost:8080/api/towers/kwok-node-0     # tower detail, podCount 7
 ```
+
+`podCount 7`, not 5, is correct: each fake node carries 5 of the 30 seeded pods
+*plus* the cluster's two DaemonSet pods (`kindnet`, `kube-proxy`). The fake nodes
+have a `kwok.x-k8s.io/node=fake:NoSchedule` taint that keeps the scheduler from
+placing ordinary pods there, but DaemonSets tolerate it and bind by `nodeName`,
+so they land anyway — on every KWOK node alike.
 
 ## Controls
 
