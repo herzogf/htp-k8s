@@ -162,10 +162,11 @@ release:
   # (maintainer feedback on PR #132: the README's Quickstart had grown a full
   # paragraph of "why" per flag across several review rounds — cut back there
   # to commands + minimal orientation, with the "why" moved to
-  # docs/running-locally.md and docs/adr/0012-loopback-listen-address-by-
-  # default.md). This footer follows the same discipline and links out to both
-  # rather than restating their content — don't re-inflate it; if a future
-  # flag needs explaining here, add a short pointer, not a paragraph.
+  # docs/running-locally.md and docs/adr/0012-secure-by-default-network-
+  # binding.md, issue #127's ADR, added separately in PR #134). This footer
+  # follows the same discipline and links out to both rather than restating
+  # their content — don't re-inflate it; if a future flag needs explaining
+  # here, add a short pointer, not a paragraph.
   #
   # `--signer-workflow` on both `gh attestation verify` calls: `--repo` alone
   # only proves SOME workflow in this repo produced the attestation, not
@@ -218,7 +219,7 @@ release:
     # then open http://localhost:8080
     ```
 
-    (`--user "$(id -u):$(id -g)"` reads your `0600` kubeconfig; `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats: [README](https://github.com/herzogf/htp-k8s#quickstart), [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-loopback-listen-address-by-default.md).)
+    (`--user "$(id -u):$(id -g)"` reads your `0600` kubeconfig; `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats: [README](https://github.com/herzogf/htp-k8s#quickstart), [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-secure-by-default-network-binding.md).)
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.
