@@ -23,7 +23,7 @@ tar -xzf htp-k8s_0.2.0_linux_amd64.tar.gz
 # then open http://localhost:8080
 ```
 
-**Or run the container image.** It looks for a kubeconfig at `/kube/config`; `--user` reads a `0600` one — see [Running & developing locally](docs/running-locally.md#the-container-image) if either needs troubleshooting.
+**Or run the container image.** It looks for a kubeconfig at `/kube/config`; `--user` is needed because of kubeconfig file permissions (`0600`) — see [Running & developing locally](docs/running-locally.md#the-container-image) if either needs troubleshooting.
 
 Your cluster is at a real network address (EKS, GKE, OpenShift, on-prem):
 
