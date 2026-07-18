@@ -55,12 +55,14 @@ export const DEMO_TRANSITION_SECONDS = FOCUS_DURATION_SECONDS
  * Lowered from π/6 (30°) by #105 iteration 2: the maintainer's video review
  * of the first pass flagged the heavy left/right lean as a likely
  * motion-sickness contributor. 20° is a light aircraft's gentle cruise
- * turn — still an unmistakable lean into every corner (the Cessna read),
- * no longer a steep-turn wing-drop. Lowering the cap alone would have
- * merely made the camera slew near-level through the old point-pivot
- * corners (the "quadcopter" complaint); it lands only because the corners
- * themselves are now flown as wide arcs (see {@link CORNER_TURN_RADIUS}) —
- * the two constants are a matched pair.
+ * turn — still an unmistakable lean into every corner, no longer a
+ * steep-turn wing-drop. The lean is a *cinematic cue*, not flight physics:
+ * per ADR-0003 this is a cinematic viewer, and #105 iteration 3 explicitly
+ * decoupled the bank cap from any bank-coordination constraint on the turn
+ * radius (see {@link CORNER_TURN_RADIUS} — corners turn far faster than a
+ * 20° bank could coordinate, deliberately). What keeps the lean comfortable
+ * is this cap plus the horizon-stability machinery (the roll follower and
+ * {@link BANK_YAW_RATE_SMOOTHING}), not wide corners.
  */
 export const DEMO_BANK_MAX = Math.PI / 9
 
@@ -76,9 +78,18 @@ export const DEMO_BANK_MAX = Math.PI / 9
  * perimeter ring canyon sits (world units). Too small reads as *einengend*
  * (cramped, clipping the outer Towers on every perimeter pass); too large
  * drifts back toward the old "orbiting wide in empty space" feel. Explicitly
- * flagged in #91 as needing visual tuning.
+ * flagged in #91 as needing visual tuning — and tuned down 1.5 → 1.1 by #105
+ * iteration 3: on a small cluster the ring is *most* of the Canyon graph (a
+ * 7-Tower scene's lattice is 12 ring nodes to 4 interior ones), so the ring
+ * distance dominates how close the tour flies to anything. At 1.1 spacings
+ * the ring passes 3.6 units from the outer Tower faces — comfortably wider
+ * than an interior canyon's 1.2, nowhere near cramped, but close enough
+ * that Towers fill the frame on ring legs instead of receding into the
+ * dark. Measured (layer-1 framing metrics, 5 seeds x 3 grids): median
+ * distance to the nearest Tower 5.15 → 3.44 on the 7-Tower scene, and the
+ * time-in-canyon share roughly doubles.
  */
-export const PERIMETER_OFFSET = TOWER_SPACING * 1.5
+export const PERIMETER_OFFSET = TOWER_SPACING * 1.1
 
 /**
  * World-space Y of a Tower's roofline (its prism top) — `TOWER_HEIGHT`, since
@@ -354,10 +365,27 @@ const VIEW_RESPONSE_TIME = 0.4
  * than snaps. One uniform rule covers canyon, flat-overview, and steep-
  * transition alike: whichever regime, the question is always "is the forward
  * point actually near a Tower or not".
+ *
+ * Retuned by #105 iteration 3 against the layer-1 *framing* metrics (the
+ * maintainer's "black frames" report, measured as the share of frames with
+ * no Tower within 35° of frame centre): the old calibration
+ * (NEAR 0.6 / FAR 3.0 spacings, max 0.6) treated a perimeter-ring forward
+ * point — ~3.6 units from the outer Tower faces — as barely deficient
+ * (pull ≈ 0.1), so on ring legs and ring turns the aim tracked the empty
+ * path ahead while the Towers slid to the frame edge: roughly *half* of a
+ * tour's frames on the 7-Tower demo scene were Tower-less by the framing
+ * metric, on `main` and iteration 2 alike. The new window spans "clearly
+ * inside a canyon" (NEAR 1.4 — an interior canyon's forward point sits at
+ * ~1.2, still pulled ≈ 0) to "fully deficient" (FAR 4.5 — reached just past
+ * the ring distance), with a stronger cap (0.85) so a deficient aim really
+ * centres a Tower rather than splitting the difference. Measured across
+ * 5 seeds x 3 grids: Tower-less frames 0.47 → 0.28 (7-Tower scene),
+ * 0.31 → 0.19 (5x5), 0.48 → 0.29 (4x2), with the roll pipeline untouched
+ * and pan-rate saturation still far below the per-waypoint-rhythm regime.
  */
-export const LOOKAT_TOWER_PULL_MAX = 0.6
-const LOOKAT_NEAR_CLEARANCE = TOWER_SPACING * 0.6
-const LOOKAT_FAR_CLEARANCE = TOWER_SPACING * 3
+export const LOOKAT_TOWER_PULL_MAX = 0.85
+const LOOKAT_NEAR_CLEARANCE = TOWER_SPACING * 0.35
+const LOOKAT_FAR_CLEARANCE = TOWER_SPACING * 1.125
 const LOOKAT_BLEND_RATE = 0.8
 
 /**
@@ -456,25 +484,28 @@ const CATMULL_ROM_TYPE = 'centripetal'
  * flipped 1-3 times per corner, rocking the horizon even through an isolated
  * turn).
  *
- * The fully *coordinated* turn radius — the `tan φ = v²/(g·r)` floor at which
- * the bank the turn demands stays inside {@link DEMO_BANK_MAX} — would be
- * `CANYON_TRAVEL_SPEED × DEMO_BANK_GAIN / DEMO_BANK_MAX` ≈ 4+ Tower spacings:
- * geometrically unattainable between Towers that are one spacing apart, so a
- * canyon-threading route cannot fly fully coordinated corners at constant
- * speed (see DEMO_BANK_MAX's doc comment for how the bank side of the trade
- * is handled). What the lattice *does* afford is the widest arc that fits: a
- * turn radius of just under half the shortest canyon leg (adjacent canyon
- * lines are never closer than one {@link TOWER_SPACING}), which lowers the
- * corner's peak heading rate ~3x (to ≈ `CANYON_TRAVEL_SPEED /
- * CORNER_TURN_RADIUS` ≈ 2.4 rad/s), makes the heading rate through a corner
- * single-signed (the arc has one curvature direction — no counter-flexure,
- * no per-corner horizon rock), and stretches the turn over ~4x the ground
- * distance — a flown arc, not a pivot. The 0.45 factor (not 0.5) sizes a
- * standard 90° corner's tangent offsets comfortably inside half a lattice
- * leg; the hard never-collide guarantee for *any* turn angle or leg length
- * is {@link CORNER_MAX_LEG_FRACTION}'s.
+ * How wide, exactly, went through two calibrations. Iteration 2 chose the
+ * widest arc the lattice affords (0.45 spacings — just under half the
+ * shortest canyon leg), reasoning from bank coordination (`tan φ = v²/(g·r)`)
+ * that wider is better; the maintainer's layer-3 verdict falsified that
+ * premise: the long outer-edge turns "cost us dynamism … takes away this
+ * rapid zip-through the urban canyons feeling". Coordination is the
+ * constraint a cinematic viewer (ADR-0003) cares least about — the *aim*
+ * never whipping (the #116 view followers) is what keeps a fast corner
+ * comfortable, not the path being gentle. Iteration 3 therefore takes most
+ * of the radius back: at a quarter spacing a 90° corner is carved in ~0.36s
+ * with a peak heading rate ≈ that of the merged pivots (~7.6 vs ~6.4-8.4
+ * rad/s, 5 seeds x 3 grids) — the zip — while keeping everything the arcs
+ * bought over pivots: single-signed heading through a corner (no
+ * counter-flexure, so the horizon side-change rate stays ~9-11/min vs the
+ * pivots' ~20-23), a bank capped at {@link DEMO_BANK_MAX}, and no
+ * ground-speed dips. Below ~a fifth of a spacing the geometry degenerates
+ * (measured: at 0.2 spacings the spline wiggle returns and the horizon
+ * side-change rate triples back to pivot levels) — this value sits above
+ * that cliff with margin. The hard never-collide guarantee for any turn
+ * angle or leg length is {@link CORNER_MAX_LEG_FRACTION}'s.
  */
-export const CORNER_TURN_RADIUS = TOWER_SPACING * 0.45
+export const CORNER_TURN_RADIUS = TOWER_SPACING * 0.25
 
 /**
  * The hard cap on how far along either adjacent leg a corner's tangent
@@ -482,9 +513,9 @@ export const CORNER_TURN_RADIUS = TOWER_SPACING * 0.45
  * always leave a nonzero straight remnant between their control points
  * (0.49, not 0.5 — offsets meeting exactly at a leg's midpoint would place
  * coincident control points, which degenerate a Catmull-Rom tangent). This —
- * not {@link CORNER_TURN_RADIUS}'s 0.45 — is the guard that *enforces*
- * no-collision; the design radius merely stays inside it for the standard
- * lattice geometry.
+ * not the design radius {@link CORNER_TURN_RADIUS} — is the guard that
+ * *enforces* no-collision; the design radius merely stays inside it for the
+ * standard lattice geometry.
  */
 const CORNER_MAX_LEG_FRACTION = 0.49
 
@@ -494,13 +525,13 @@ const CORNER_MAX_LEG_FRACTION = 0.49
  * clamp shrinks the inscribed radius, and an "arc" this small collapses
  * into near-coincident control points beside full-length legs — the
  * tiny-chord regime that produces spline cusps (see
- * {@link CORNER_ARC_MAX_STEP}'s history). Being a *radius* floor (not an
+ * {@link CORNER_ARC_TARGET_CHORD}'s history). Being a *radius* floor (not an
  * angle cutoff — deliberately, so sharp-but-roundable turns on long legs
  * still get their arc), it catches every route that degenerates the radius:
  * near-hairpin turns (tan(θ/2) → ∞ — dead-end backtracks on 1×N clusters,
  * pathological activation angles), but also ordinary-angle corners whose
  * adjacent leg is very short — a 90° corner needs a leg of at least
- * `CORNER_MIN_TURN_RADIUS / CORNER_MAX_LEG_FRACTION` ≈ 0.92 world units to
+ * `CORNER_MIN_TURN_RADIUS / CORNER_MAX_LEG_FRACTION` ≈ 0.51 world units to
  * clear the floor, while a takeoff leg is only gated at
  * {@link TAKEOFF_MIN_DISTANCE} (0.5). In practice that short-leg case has
  * not been observed to fire (the walk's approach-alignment filter keeps
@@ -577,7 +608,7 @@ export const BANK_YAW_RATE_DEADBAND = 0.06
  * ~10° opposite bank demand, and {@link BANK_YAW_RATE_DEADBAND} only
  * suppresses wiggles near *zero* heading rate, not sign changes after a real
  * corner). Smoothing the rate over a quarter second erases sub-corner-scale
- * sign flips while a genuine corner (~0.6-0.8 s of sustained single-signed
+ * sign flips while a genuine corner (~0.4-1s of sustained single-signed
  * turn) still drives an essentially full bank demand — measured, it roughly
  * halves the bank-target sign-change rate at unchanged corner banking.
  */
@@ -1159,25 +1190,29 @@ function applyGlance(
 type SplineWindow = readonly Vector3[]
 
 /**
- * The densest the on-arc control points of a rounded corner are placed: one
- * per this much turn (see {@link expandWaypoint}). Fine enough that the
- * Catmull-Rom through them hugs the circular arc (chords of ~half a turn
- * radius, with near-tangent-matched neighbours) — an early chamfer-pair-only
- * variant left the spline free to overshoot between a corner's exit and the
- * next corner's entry (a 0.4-unit chord flanked by 2.5-unit chords whipped
- * the tangent at up to ~100 rad/s of heading — a worse cusp than the sharp
- * corners it replaced).
+ * The chord length a rounded corner's on-arc control points aim for (#105
+ * iteration 3 — replacing a fixed angular step): the spacing at which a
+ * centripetal Catmull-Rom demonstrably hugs an arc without wiggling. A fixed
+ * angular step made chord length *scale with the radius and turn angle*
+ * (chord = 2·r·sin(step/2)), so small radii or small turn angles produced
+ * tiny chords flanked by full-length canyon legs — the exact unequal-chord
+ * regime that whips the CR tangent (measured: a 45° takeoff corner's 0.55u
+ * chords spiked the heading rate to ~6 rad/s at activation; an early
+ * chamfer-pair variant with a 0.4u chord hit ~100 rad/s). Targeting a fixed
+ * *chord length* instead keeps the sampling in the proven-stable scale at
+ * every radius and angle — down to a single apex point for small turns,
+ * which an open CR rounds smoothly by itself.
  */
-const CORNER_ARC_MAX_STEP = Math.PI / 6
+const CORNER_ARC_TARGET_CHORD = TOWER_SPACING * 0.2
 
 /**
  * Expands one raw walk waypoint into its spline control points (#105
  * iteration 2 — the corner rounding {@link CORNER_TURN_RADIUS} documents).
  * Straight-through waypoints pass through unchanged. A corner is replaced by
  * points sampled on the exact inscribed circular arc of radius
- * {@link CORNER_TURN_RADIUS} tangent to both legs — one on-arc point per
- * {@link CORNER_ARC_MAX_STEP} of turn — shrunk where a leg is too short for
- * the tangent offset ({@link CORNER_MAX_LEG_FRACTION}, so neighbouring
+ * {@link CORNER_TURN_RADIUS} tangent to both legs — spaced to chords of
+ * roughly {@link CORNER_ARC_TARGET_CHORD} — shrunk where a leg is too short
+ * for the tangent offset ({@link CORNER_MAX_LEG_FRACTION}, so neighbouring
  * corners' points never collide or reorder). A turn so sharp that the
  * shrunken radius falls below {@link CORNER_MIN_TURN_RADIUS} (a near-exact
  * hairpin) keeps its sharp node. All points carry the waypoint's own drawn
@@ -1228,7 +1263,12 @@ function expandWaypoint(previous: Vector3, current: Vector3, next: Vector3): Vec
   const side = Math.sign(cross)
   const centerX = entryX + side * -uInZ * radius
   const centerZ = entryZ + side * uInX * radius
-  const steps = Math.max(2, Math.ceil(turnAngle / CORNER_ARC_MAX_STEP))
+  // The angular step that yields chords of ~CORNER_ARC_TARGET_CHORD at this
+  // radius (chord = 2·r·sin(step/2)); rounded — not ceiled — to the nearest
+  // whole number of steps so the realized chords stay as close to the target
+  // as the turn allows, with a single apex point as the small-turn floor.
+  const idealStep = 2 * Math.asin(Math.min(1, CORNER_ARC_TARGET_CHORD / (2 * radius)))
+  const steps = Math.max(1, Math.round(turnAngle / idealStep))
   const points: Vector3[] = []
   // Rotate the centre->entry spoke through the signed turn, sampling at the
   // *midpoints* of the angular steps (never the tangent endpoints): when two
