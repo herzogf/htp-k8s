@@ -39,7 +39,9 @@ if (!args['out-dir'] || !args.output) {
 
 const OUT_DIR = args['out-dir']
 const OUTPUT_WEBM = args.output
-const FFMPEG = process.env.FFMPEG_PATH ?? resolveFfmpeg()
+// resolveFfmpeg() itself checks FFMPEG_PATH first (see lib/ffmpeg.mjs) — no
+// need to duplicate that check here.
+const FFMPEG = resolveFfmpeg()
 
 const FPS = 60
 

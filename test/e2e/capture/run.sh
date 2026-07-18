@@ -38,14 +38,17 @@ PORT="${HTP_K8S_CAPTURE_PORT:-8080}"
 CLUSTER_NAME="${HTP_K8S_CAPTURE_CLUSTER_NAME:-htp-k8s-capture}"
 
 while [ $# -gt 0 ]; do
+  # "${2:?...}" fails with a clear message if $2 is missing/empty, rather
+  # than a flag with no value falling through to `set -u`'s raw "unbound
+  # variable" error.
   case "$1" in
-    --out-dir) OUT_DIR="$2"; shift 2 ;;
-    --seed) SEED="$2"; shift 2 ;;
-    --duration-ms) DURATION_MS="$2"; shift 2 ;;
-    --width) WIDTH="$2"; shift 2 ;;
-    --height) HEIGHT="$2"; shift 2 ;;
-    --port) PORT="$2"; shift 2 ;;
-    --cluster-name) CLUSTER_NAME="$2"; shift 2 ;;
+    --out-dir) OUT_DIR="${2:?--out-dir requires a value}"; shift 2 ;;
+    --seed) SEED="${2:?--seed requires a value}"; shift 2 ;;
+    --duration-ms) DURATION_MS="${2:?--duration-ms requires a value}"; shift 2 ;;
+    --width) WIDTH="${2:?--width requires a value}"; shift 2 ;;
+    --height) HEIGHT="${2:?--height requires a value}"; shift 2 ;;
+    --port) PORT="${2:?--port requires a value}"; shift 2 ;;
+    --cluster-name) CLUSTER_NAME="${2:?--cluster-name requires a value}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -110,7 +113,7 @@ fi
 # early-failure, or an interrupt) reaches the same real verification.
 # ---------------------------------------------------------------------------
 APP_PID=""
-CLUSTER_CREATED=0
+CAPTURE_PID=""
 
 # stop_app: idempotent. Only clears APP_PID once the process is CONFIRMED
 # gone (kill -0 fails) — never on faith just because a kill signal was sent.
@@ -140,20 +143,76 @@ stop_app() {
   return 0
 }
 
-# delete_cluster: idempotent. Only clears CLUSTER_CREATED once `kind get
-# clusters` confirms the cluster is actually gone.
+# stop_capture: same verify+escalate discipline as stop_app, for the
+# backgrounded capture.mjs (node + its headless Chromium child). Deliberately
+# run FIRST in cleanup() (see below): a targeted `kill <run.sh PID>` (as
+# opposed to Ctrl-C, which signals the whole process group) can otherwise
+# leave capture.mjs running orphaned while the rest of cleanup proceeds —
+# including delete_frame_cache's rm -rf of the very directory it's still
+# writing frames into (issue #120 review).
+stop_capture() {
+  if [ -z "${CAPTURE_PID}" ]; then
+    return 0
+  fi
+  if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
+    kill "${CAPTURE_PID}" 2>/dev/null || true
+    for _ in $(seq 1 20); do
+      kill -0 "${CAPTURE_PID}" 2>/dev/null || break
+      sleep 0.5
+    done
+    if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
+      echo "WARNING: capture process ${CAPTURE_PID} did not exit on SIGTERM; sending SIGKILL" >&2
+      kill -9 "${CAPTURE_PID}" 2>/dev/null || true
+      sleep 0.5
+    fi
+  fi
+  if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
+    echo "ERROR: capture process ${CAPTURE_PID} is still alive after cleanup — giving up" >&2
+    return 1
+  fi
+  CAPTURE_PID=""
+  return 0
+}
+
+# delete_cluster: idempotent, and queries kind directly for the cluster's
+# actual existence rather than gating on a "did we get far enough to set a
+# flag" bookkeeping variable — a Ctrl-C during the 60-90s `kind create
+# cluster` window could otherwise leave a partially-created cluster behind
+# despite never reaching the line that used to set that flag (issue #120
+# review).
+#
+# IMPORTANT: `kind get clusters` takes NO --kubeconfig flag (unlike `kind
+# create`/`delete cluster`, which do and are correctly passed one below) —
+# it enumerates clusters via Docker container labels, independent of any
+# kubeconfig. An earlier version of this script passed --kubeconfig here;
+# kind rejected it with "unknown flag" on stderr (swallowed by 2>/dev/null)
+# and exited non-zero with EMPTY stdout, so the "is it still there?" grep
+# never matched and this function silently reported success even when
+# `kind delete cluster` had failed. `grep -Fqx` (fixed string, not `-qx`)
+# because CLUSTER_NAME can contain "." — regex metacharacter otherwise.
 delete_cluster() {
-  if [ "${CLUSTER_CREATED}" -ne 1 ]; then
+  if ! kind get clusters 2>/dev/null | grep -Fqx "${CLUSTER_NAME}"; then
     return 0
   fi
   kind delete cluster --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" || true
-  if kind get clusters --kubeconfig "${KUBECONFIG}" 2>/dev/null | grep -qx "${CLUSTER_NAME}"; then
+  if kind get clusters 2>/dev/null | grep -Fqx "${CLUSTER_NAME}"; then
     echo "ERROR: kind cluster ${CLUSTER_NAME} is still present after delete" >&2
     return 1
   fi
   echo "Verified: kind cluster ${CLUSTER_NAME} is gone."
-  CLUSTER_CREATED=0
   return 0
+}
+
+# delete_kubeconfig: idempotent. Harmless once the cluster is gone (just a
+# stale reference), but --out-dir can point somewhere that isn't
+# git-ignored, and curating stills into docs/ from an out-dir is a plausible
+# workflow — no reason to leave cluster CA/client cert material sitting on
+# disk once we're done with it (issue #120 review).
+delete_kubeconfig() {
+  if [ -f "${KUBECONFIG}" ]; then
+    rm -f "${KUBECONFIG}"
+    echo "Deleted isolated kubeconfig (${KUBECONFIG})."
+  fi
 }
 
 # delete_frame_cache: idempotent, and — deliberately unlike an earlier
@@ -187,10 +246,15 @@ remove_symlink() {
 
 cleanup() {
   local status=$?
-  log "Cleanup: tearing down the app process, the kind cluster, and the frame cache"
+  log "Cleanup: tearing down the capture process, the app, the kind cluster, and the frame cache"
+  # stop_capture FIRST: if capture.mjs is still running (targeted `kill
+  # <run.sh PID>` rather than Ctrl-C — see stop_capture's comment), it must
+  # stop writing into frames/ before delete_frame_cache below rm -rf's it.
+  stop_capture || true
   remove_symlink
   stop_app || true
   delete_cluster || true
+  delete_kubeconfig
   delete_frame_cache || true
   exit "${status}"
 }
@@ -213,7 +277,6 @@ log "Building the binary (task build)"
 # ---------------------------------------------------------------------------
 log "Creating kind cluster '${CLUSTER_NAME}'"
 kind create cluster --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}"
-CLUSTER_CREATED=1
 kubectl cluster-info
 kubectl get nodes
 
@@ -251,12 +314,21 @@ echo "App is healthy."
 # ---------------------------------------------------------------------------
 log "Capturing (${DURATION_MS}ms @ ${WIDTH}x${HEIGHT})"
 ln -sfn "${REPO_ROOT}/web/node_modules" "${CAPTURE_NODE_MODULES_LINK}"
+# Backgrounded (rather than run synchronously in the foreground) so
+# CAPTURE_PID is tracked and stop_capture can kill it from cleanup() if this
+# script is interrupted mid-capture (issue #120 review) — `wait` below still
+# blocks until it finishes and propagates its exit status under `set -e`,
+# so this has the same "capture failure aborts the script" behavior as a
+# plain foreground invocation.
 node "${SCRIPT_DIR}/capture.mjs" \
   --out-dir "${OUT_DIR}" \
   --duration-ms "${DURATION_MS}" \
   --base-url "${BASE_URL}" \
   --width "${WIDTH}" \
-  --height "${HEIGHT}"
+  --height "${HEIGHT}" &
+CAPTURE_PID=$!
+wait "${CAPTURE_PID}"
+CAPTURE_PID=""
 remove_symlink
 
 # App and cluster are no longer needed once the capture is on disk — stop
@@ -310,4 +382,4 @@ echo "Video:      ${OUTPUT_WEBM}"
 echo "Analysis:   ${OUT_DIR}/pose-analysis.json"
 echo "Proximity:  ${OUT_DIR}/tower-proximity-analysis.json"
 echo "Stills:     ${OUT_DIR}/stills/ (manifest: ${OUT_DIR}/stills-manifest.json)"
-echo "Kubeconfig: ${KUBECONFIG} (now stale — the cluster it pointed at is deleted)"
+echo "(the isolated kubeconfig for this run is about to be deleted along with the cluster it pointed to — see below)"
