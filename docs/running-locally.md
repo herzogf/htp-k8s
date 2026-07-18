@@ -135,7 +135,7 @@ The binary takes a few flags (each also has an `HTP_K8S_*` environment fallback)
 
 | Flag | Env | Purpose |
 | --- | --- | --- |
-| `-addr` | `HTP_K8S_ADDR` | Listen address; default `:8080`. See the port gotcha below. |
+| `-addr` | `HTP_K8S_ADDR` | Listen address; default `127.0.0.1:8080` (**loopback only** — issue #127: there's no auth layer, so nothing is reachable off this machine unless you opt in). Pass `-addr :8080` to widen it. See the port gotcha below. |
 | `-demo` | `HTP_K8S_DEMO` | Auto-start Demo Mode at launch — handy for unattended showcase runs. |
 | `-demo-seed` | `HTP_K8S_DEMO_SEED` | Fix the canyon-tour PRNG seed so a flight is reproducible (ADR-0010). A random seed is chosen and logged otherwise. |
 | `-namespace-filter` | `HTP_K8S_NAMESPACE_FILTER` | Preset a name-pattern Namespace/Project filter (shell wildcards, e.g. `openshift-*`). |
@@ -155,10 +155,11 @@ Tower arrangement — the tour is a deterministic function of the seed plus the 
 
 - **The `/ws` URL is baked in at build time.** The frontend defaults to
   `ws://localhost:8080/ws` (`DEFAULT_WS_URL` in `web/src/config.ts`), so **run on
-  `:8080`** or the UI won't find the backend. To serve elsewhere, rebuild with the
-  address baked in: `VITE_WS_URL=ws://host:port/ws task build` (the `/api` origin is
-  derived from it, or overridden with `VITE_API_URL`). Passing `-addr` alone moves
-  the server but not the URL the already-built frontend dials.
+  port 8080** (the default) or the UI won't find the backend. To serve elsewhere,
+  rebuild with the address baked in: `VITE_WS_URL=ws://host:port/ws task build`
+  (the `/api` origin is derived from it, or overridden with `VITE_API_URL`).
+  Passing `-addr` alone moves the server but not the URL the already-built
+  frontend dials.
 - **No cluster, no start.** The binary probes the cluster on startup and **exits
   non-zero if the API server is unreachable** (implemented for issue #9). A cluster
   that's reachable but where you can't list Nodes doesn't fail — it degrades to

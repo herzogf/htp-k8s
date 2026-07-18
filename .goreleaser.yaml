@@ -141,10 +141,12 @@ release:
   # (explicit `-e KUBECONFIG`, plus the README's `# then open
   # http://localhost:8080` follow-up so the reader has a next step); issue
   # #113 may change the KUBECONFIG default. Deliberately NOT copying the
-  # README's `--network host` local-kind caveat here — a release-notes reader
-  # is more likely pointing at a remote/real cluster than a local kind
-  # cluster on the same host, so it'd be noise for the likelier reader here
-  # (unlike the README's Quickstart, which leads with a local kind cluster).
+  # README's "Pointing the container at a local cluster" recipes
+  # (`--network kind`+`--internal` for kind, `--network host` for
+  # k3d/minikube/Docker Desktop) here — a release-notes reader is more likely
+  # pointing at a remote/real cluster than a local one on the same host, so
+  # it'd be noise for the likelier reader here (unlike the README's
+  # Quickstart, which leads with a local kind cluster).
   #
   # DOES copy the README's `--user "$(id -u):$(id -g)"` flag (issue #128): a
   # standard kind/kubectl-written kubeconfig is mode 0600, and this footer's
@@ -154,15 +156,22 @@ release:
   # needs the same fix. Same bash-only caveat as the README applies here too
   # (not repeated in this footer's prose to keep it short; see README.md).
   #
-  # UNLIKE the README, this binds `-p 127.0.0.1:8080:8080` (loopback), not a
-  # bare `-p 8080:8080` (all interfaces). There's no auth layer anywhere in
-  # internal/server/ (defaultAddr in cmd/htp-k8s/main.go is a bare `:8080`),
-  # and the same command mounts the operator's kubeconfig read-only into the
-  # container — a bare `-p 8080:8080` hands anyone who can reach that port
-  # read access to the cluster under the operator's own credentials. This
-  # footer is the copy-paste surface for every release reader, so it gets the
-  # safer form even though the README (fixed separately, via #113) doesn't
-  # yet. Zero usability cost: the next line already says
+  # This binds `-p 127.0.0.1:8080:8080` (loopback), not a bare `-p
+  # 8080:8080` (all interfaces): there's no auth layer anywhere in
+  # internal/server/, and this command mounts the operator's kubeconfig
+  # read-only into the container — a bare `-p 8080:8080` hands anyone who
+  # can reach that port read access to the cluster under the operator's own
+  # credentials. Since issue #127, `defaultAddr` in cmd/htp-k8s/main.go is
+  # loopback-only (`127.0.0.1:8080`) for the SAME reason, so `-e
+  # HTP_K8S_ADDR=:8080` is now required here too — Docker's `-p` forwards to
+  # the container's own interface address, never to its loopback, so a
+  # container left on the loopback-only default would never see that
+  # forwarded traffic at all. The `-p` host-side binding above is what
+  # actually restricts access (verified: the host listener really is
+  # loopback-only, not merely labeled that way); the container has to bind
+  # wider *inside its own network namespace* for the forwarding to reach it.
+  # This footer is the copy-paste surface for every release reader, so it
+  # gets the safer form. Zero usability cost: the next line already says
   # `http://localhost:8080`.
   #
   # `--signer-workflow` on both `gh attestation verify` calls: `--repo` alone
@@ -210,12 +219,13 @@ release:
     docker run --rm -p 127.0.0.1:8080:8080 \
       --user "$(id -u):$(id -g)" \
       -e KUBECONFIG=/kube/config \
+      -e HTP_K8S_ADDR=:8080 \
       -v "$HOME/.kube/config:/kube/config:ro" \
       ghcr.io/herzogf/htp-k8s:{{ .Tag }}
     # then open http://localhost:8080
     ```
 
-    (`--user "$(id -u):$(id -g)"` lets the container read your kubeconfig — a standard `kind`/`kubectl`-written one is mode `0600`. Bash/zsh syntax; on Windows, drop the flag and see the README for the caveat. Run this from your normal shell, not as root — `$(id -u)` expands to `0` there, silently handing the container root instead of your uid.)
+    (`--user "$(id -u):$(id -g)"` lets the container read your kubeconfig — a standard `kind`/`kubectl`-written one is mode `0600`. Bash/zsh syntax; on Windows, drop the flag and see the README for the caveat. Run this from your normal shell, not as root — `$(id -u)` expands to `0` there, silently handing the container root instead of your uid. `-e HTP_K8S_ADDR=:8080` is required: htp-k8s listens on loopback only by default — there's no authentication layer in front of it — but a container bound to its own loopback would never see the traffic `-p` forwards to it, so the container has to bind wider *inside its own network namespace*; the `-p 127.0.0.1:8080:8080` above is what actually keeps this off your network.)
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.

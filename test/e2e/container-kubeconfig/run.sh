@@ -13,26 +13,26 @@
 #
 # Reuses the e2e job's already-provisioned kind cluster (ADR-0004's "don't
 # spin up a redundant cluster" guidance) — it just needs a real, reachable
-# API server and a kubeconfig for it, which that job already has by the time
-# this runs. Requires: IMAGE (a local `ko build --local` image reference)
-# and KUBECONFIG (a working kubeconfig for a reachable cluster) in the
-# environment, plus docker and curl on PATH.
+# API server, which that job already has by the time this runs. Requires:
+# IMAGE (a local `ko build --local` image reference) and CLUSTER_NAME (the
+# name of that already-provisioned, reachable kind cluster) in the
+# environment, plus docker, curl, and kind on PATH.
 #
-#   IMAGE=ko.local/htp-k8s-... KUBECONFIG=$HOME/.kube/config \
+#   IMAGE=ko.local/htp-k8s-... CLUSTER_NAME=htp-k8s-e2e \
 #     ./test/e2e/container-kubeconfig/run.sh
 #
 # Covers:
-#   1. The documented recipe, run EXACTLY as documented, against KUBECONFIG
-#      UNCHANGED (issue #128): mount at /kube/config with `--user
+#   1. The documented recipe, run EXACTLY as documented, against a real 0600
+#      kubeconfig (issue #128): mount at /kube/config with `--user
 #      "$(id -u):$(id -g)"`, no -e KUBECONFIG -> the app starts and actually
 #      serves (GET /api/config), not merely "didn't exit". This is the real
-#      regression test for #128 — a kind/kubectl-written kubeconfig is mode
-#      0600 (asserted below, so this test can't silently pass against a
-#      permissive file), and prior to #128 this exact invocation, minus
+#      regression test for #128 — the kubeconfig is asserted mode 0600 below
+#      (see INTERNAL_KUBECONFIG), so this test can't silently pass against a
+#      permissive file, and prior to #128 this exact invocation, minus
 #      --user, failed with "permission denied" on every real Linux Docker
 #      host.
 #   2. The permission diagnostic (issue #128): the SAME real 0600
-#      KUBECONFIG, mounted at /kube/config, but WITHOUT --user — the failure
+#      kubeconfig, mounted at /kube/config, but WITHOUT --user — the failure
 #      mode users actually hit (the pre-#128 documented recipe). Must fail
 #      fast (exit 1) with a diagnostic naming --user "$(id -u):$(id -g)",
 #      distinct from the missing-mount diagnostic in test 4.
@@ -47,34 +47,57 @@
 #      silently, since nobody manually re-checks an error message on every
 #      base-image bump.
 #
-# Formerly worked around #128 by mounting a chmod-644 COPY of KUBECONFIG
-# rather than the real 0600 file (see the git history of this file for that
+# Formerly worked around #128 by mounting a chmod-644 COPY of the kubeconfig
+# rather than a real 0600 file (see the git history of this file for that
 # version, and issue #129 for the gap it flagged). #128 fixed the underlying
 # permission failure with `--user "$(id -u):$(id -g)"` (see README.md and
-# internal/kube/client.go), so this script now exercises the real documented
-# recipe against the real, unmodified, 0600 KUBECONFIG throughout — no copy,
-# no chmod, nothing that could mask a real permission regression.
+# internal/kube/client.go), so this script exercises the real documented
+# recipe against a real 0600 kubeconfig throughout.
+#
+# NETWORKING (issue #127): this script does NOT use `--network host`. Under
+# host networking, Docker's `-p` publish mapping is silently ignored — a
+# container bound to a port under `--network host` is bound to that port on
+# the HOST, across every interface, regardless of what `-p` says, which is
+# exactly the exposure #127 exists to close. Instead every container here
+# joins kind's own `kind` Docker network (`--network kind`, created
+# automatically by `kind create cluster`) and is handed kind's *internal*
+# kubeconfig (`kind get kubeconfig --internal`, which points at
+# `https://<cluster>-control-plane:6443` — resolvable from another container
+# on that same network — rather than the externally-published
+# `https://127.0.0.1:<port>` a normal kubeconfig carries, which is
+# meaningless from inside a bridge-networked container). Verified
+# empirically against a real kind cluster and a real ko-built image while
+# implementing #127: ordinary bridge networking + `-p 127.0.0.1:<port>:8080`
+# reaches the cluster and serves end-to-end this way, with the *host*
+# listener staying genuinely loopback-only (confirmed with `ss -ltn` and a
+# failed connection attempt from the host's real LAN IP).
 set -euo pipefail
 
 : "${IMAGE:?IMAGE must be set to a local image reference (e.g. from ko build --local)}"
-: "${KUBECONFIG:?KUBECONFIG must be set to a working kubeconfig for a reachable cluster}"
+: "${CLUSTER_NAME:?CLUSTER_NAME must be set to the name of a reachable kind cluster}"
 
 log() { printf '\n=== [container-kubeconfig] %s\n' "$*"; }
 
-# This whole script's value rests on KUBECONFIG being genuinely
-# owner-read-only, exactly as kind/kubectl/most cloud CLIs write it (issue
-# #128's actual failure mode). Assert it rather than silently testing
-# something weaker if the environment ever hands us a more permissive file.
-kc_mode="$(stat -c '%a' "${KUBECONFIG}")"
+# kind's *internal* kubeconfig — see the NETWORKING note above for why this,
+# not the externally-published one, is what a container on the `kind`
+# network needs. `kind get kubeconfig --internal` writes to stdout with no
+# fixed mode, so this script imposes 0600 itself: this whole script's value
+# rests on the mounted kubeconfig being genuinely owner-read-only, exactly as
+# kind/kubectl/most cloud CLIs write their own kubeconfigs (issue #128's
+# actual failure mode) — a more permissive file would let tests 1-3 pass for
+# the wrong reason.
+SCRATCH_DIR="$(mktemp -d)"
+INTERNAL_KUBECONFIG="${SCRATCH_DIR}/kubeconfig-internal"
+kind get kubeconfig --internal --name "${CLUSTER_NAME}" > "${INTERNAL_KUBECONFIG}"
+chmod 600 "${INTERNAL_KUBECONFIG}"
+kc_mode="$(stat -c '%a' "${INTERNAL_KUBECONFIG}")"
 if [ "${kc_mode}" != "600" ]; then
-  echo "FAIL: KUBECONFIG (${KUBECONFIG}) is mode ${kc_mode}, expected 600 — this script exists to test the real permission failure/fix from issue #128 against a standard kind/kubectl-written kubeconfig; a more permissive file would let tests 1-3 pass for the wrong reason." >&2
+  echo "FAIL: INTERNAL_KUBECONFIG (${INTERNAL_KUBECONFIG}) is mode ${kc_mode} after chmod 600 — this script exists to test the real permission failure/fix from issue #128 against a standard kind/kubectl-written kubeconfig; a more permissive file would let tests 1-3 pass for the wrong reason." >&2
   exit 1
 fi
 
 # Track every container name so cleanup can force-remove all of them
-# regardless of which subtest fails. No scratch copy of KUBECONFIG is made
-# anywhere in this script (see the header note above) — every test below
-# mounts the real file.
+# regardless of which subtest fails.
 CONTAINERS=()
 
 cleanup() {
@@ -83,22 +106,24 @@ cleanup() {
   for name in "${CONTAINERS[@]:-}"; do
     [ -n "${name}" ] && docker rm -f "${name}" >/dev/null 2>&1 || true
   done
+  rm -rf "${SCRATCH_DIR}"
   exit "${rc}"
 }
 trap cleanup EXIT INT TERM
 
 # --user "$(id -u):$(id -g)": issue #128's fix — makes the container read the
-# real 0600 KUBECONFIG mount as the host user instead of its fixed non-root
+# real 0600 kubeconfig mount as the host user instead of its fixed non-root
 # uid. Computed once so every "with --user" docker run below stays in sync.
 HOST_USER="$(id -u):$(id -g)"
 
-# port_is_free/pick_free_port: tests 1 and 3a run with --network host and
-# actually bind, so a hardcoded port risks colliding with anything else
-# already listening on the host — another job, another agent's app, a
-# developer's own process (docker's own port-publish couldn't have picked
-# one for us here, since --network host bypasses that entirely). Pick a
-# random candidate in the ephemeral range and probe it with bash's own
-# /dev/tcp (no extra tool dependency), retrying on collision.
+# port_is_free/pick_free_port: tests 1 and 3a publish the container's fixed
+# internal :8080 (see the NETWORKING note above and their -e
+# HTP_K8S_ADDR=:8080, matching the documented recipe exactly) to a HOST port
+# via `-p 127.0.0.1:<port>:8080`, so a hardcoded port risks colliding with
+# anything else already listening on the host — another job, another agent's
+# process, a developer's own process. Pick a random candidate in the
+# ephemeral range and probe it with bash's own /dev/tcp (no extra tool
+# dependency), retrying on collision.
 port_is_free() {
   local port="$1"
   if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
@@ -142,14 +167,15 @@ wait_http_200() {
 #    KUBECONFIG: -v ...:/kube/config:ro, --user "$(id -u):$(id -g)", no -e
 #    KUBECONFIG. This is the exact scenario issues #113 and #128 exist for.
 # ---------------------------------------------------------------------------
-log "Test 1: documented recipe (--user + real 0600 KUBECONFIG, no -e KUBECONFIG)"
+log "Test 1: documented recipe (--user + real 0600 kubeconfig, no -e KUBECONFIG)"
 name="htpk8s-fallback-default"
 CONTAINERS+=("${name}")
 port1="$(pick_free_port)"
-docker run -d --name "${name}" --network host \
+docker run -d --name "${name}" --network kind \
   --user "${HOST_USER}" \
-  -v "${KUBECONFIG}:/kube/config:ro" \
-  -e HTP_K8S_ADDR=":${port1}" \
+  -p "127.0.0.1:${port1}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
+  -e HTP_K8S_ADDR=:8080 \
   "${IMAGE}" >/dev/null
 
 if ! wait_http_200 "${port1}" /api/config 20; then
@@ -181,12 +207,12 @@ echo "OK: the documented recipe served a real GET /api/config response against a
 #    diagnostic (which would be actively misleading here — a file IS
 #    mounted).
 # ---------------------------------------------------------------------------
-log "Test 2: permission diagnostic (real 0600 KUBECONFIG mounted, --user omitted)"
+log "Test 2: permission diagnostic (real 0600 kubeconfig mounted, --user omitted)"
 name="htpk8s-permission-denied"
 CONTAINERS+=("${name}")
 set +e
-out="$(docker run --name "${name}" --network host \
-  -v "${KUBECONFIG}:/kube/config:ro" \
+out="$(docker run --name "${name}" --network kind \
+  -v "${INTERNAL_KUBECONFIG}:/kube/config:ro" \
   "${IMAGE}" 2>&1)"
 rc=$?
 set -e
@@ -226,11 +252,12 @@ log "Test 3a: explicit KUBECONFIG is honoured (mounted elsewhere, nothing at /ku
 name="htpk8s-fallback-explicit"
 CONTAINERS+=("${name}")
 port3a="$(pick_free_port)"
-docker run -d --name "${name}" --network host \
+docker run -d --name "${name}" --network kind \
   --user "${HOST_USER}" \
-  -v "${KUBECONFIG}:/custom/kubeconfig:ro" \
+  -p "127.0.0.1:${port3a}:8080" \
+  -v "${INTERNAL_KUBECONFIG}:/custom/kubeconfig:ro" \
   -e KUBECONFIG=/custom/kubeconfig \
-  -e HTP_K8S_ADDR=":${port3a}" \
+  -e HTP_K8S_ADDR=:8080 \
   "${IMAGE}" >/dev/null
 
 if ! wait_http_200 "${port3a}" /api/config 20; then
@@ -253,7 +280,7 @@ log "Test 3b: explicit KUBECONFIG with nothing mounted there is never redirected
 name="htpk8s-fallback-explicit-missing"
 CONTAINERS+=("${name}")
 set +e
-out="$(docker run --name "${name}" --network host \
+out="$(docker run --name "${name}" --network kind \
   -e KUBECONFIG=/custom/kubeconfig \
   "${IMAGE}" 2>&1)"
 rc=$?
@@ -305,7 +332,7 @@ log "Test 4: missing mount fails fast with the actionable diagnostic"
 name="htpk8s-fallback-missing-mount"
 CONTAINERS+=("${name}")
 set +e
-out="$(docker run --name "${name}" --network host "${IMAGE}" 2>&1)"
+out="$(docker run --name "${name}" --network kind "${IMAGE}" 2>&1)"
 rc=$?
 set -e
 if [ "${rc}" -ne 1 ]; then
