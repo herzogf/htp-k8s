@@ -20,6 +20,10 @@ Single-context layout — `CONTEXT.md` + `docs/adr/` at the repo root. See `docs
 
 `docs/agents/code-review.md` is the **repo-owned** source of truth for the review axes (Standards, Spec, Integration/Coherence), the code-smell baseline, and the security-triage criteria that the `code-reviewer` subagent applies. It's deliberately kept in-repo (not in the external `/code-review` skill) so it survives skill updates. The external `/code-review` skill remains available for ad-hoc manual reviews (two axes).
 
+### Documentation proportionality
+
+How much to write and in which artifact — README vs. detail doc vs. ADR vs. release notes. See `docs/agents/documentation-proportionality.md`.
+
 ## AI development team
 
 This project is built entirely by AI, directed by the user rather than hand-written — this applies to future features too, not just v1. See ADR-0006 for the full rationale.
