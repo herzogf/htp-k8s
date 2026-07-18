@@ -368,17 +368,19 @@ const VIEW_RESPONSE_TIME = 0.4
  *
  * Retuned by #105 iteration 3 against the layer-1 *framing* metrics (the
  * maintainer's "black frames" report, measured as the share of frames with
- * no Tower within 35° of frame centre): the old calibration
- * (NEAR 0.6 / FAR 3.0 spacings, max 0.6) treated a perimeter-ring forward
- * point — ~3.6 units from the outer Tower faces — as barely deficient
- * (pull ≈ 0.1), so on ring legs and ring turns the aim tracked the empty
- * path ahead while the Towers slid to the frame edge: roughly *half* of a
- * tour's frames on the 7-Tower demo scene were Tower-less by the framing
- * metric, on `main` and iteration 2 alike. The new window spans "clearly
- * inside a canyon" (NEAR 1.4 — an interior canyon's forward point sits at
- * ~1.2, still pulled ≈ 0) to "fully deficient" (FAR 4.5 — reached just past
- * the ring distance), with a stronger cap (0.85) so a deficient aim really
- * centres a Tower rather than splitting the difference. Measured across
+ * no Tower within 35° of frame centre): the old calibration — NEAR 0.6 /
+ * FAR 3.0 Tower spacings (2.4 / 12 world units), max 0.6 — treated a
+ * perimeter-ring forward point — ~3.6 world units from the outer Tower
+ * faces — as barely deficient (pull ≈ 0.1), so on ring legs and ring turns
+ * the aim tracked the empty path ahead while the Towers slid to the frame
+ * edge: roughly *half* of a tour's frames on the 7-Tower demo scene were
+ * Tower-less by the framing metric, on `main` and iteration 2 alike. The
+ * new, tighter window — NEAR 0.35 / FAR 1.125 spacings (1.4 / 4.5 world
+ * units) — spans "clearly inside a canyon" (an interior canyon's forward
+ * point sits at ~1.2 world units of clearance, still pulled ≈ 0) to "fully
+ * deficient" (reached just past the ring distance), with a stronger cap
+ * (0.85) so a deficient aim really centres a Tower rather than splitting
+ * the difference. Measured across
  * 5 seeds x 3 grids: Tower-less frames 0.47 → 0.28 (7-Tower scene),
  * 0.31 → 0.19 (5x5), 0.48 → 0.29 (4x2), with the roll pipeline untouched
  * and pan-rate saturation still far below the per-waypoint-rhythm regime.
@@ -1203,7 +1205,7 @@ type SplineWindow = readonly Vector3[]
  * every radius and angle — down to a single apex point for small turns,
  * which an open CR rounds smoothly by itself.
  */
-const CORNER_ARC_TARGET_CHORD = TOWER_SPACING * 0.2
+export const CORNER_ARC_TARGET_CHORD = TOWER_SPACING * 0.2
 
 /**
  * Expands one raw walk waypoint into its spline control points (#105
