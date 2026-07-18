@@ -7,8 +7,9 @@
 
 # ADR-0011 layer-3 video capture harness (issue #120): captured video/JPEG
 # frames/pose-analysis output, and the runtime-only node_modules symlink
-# run.sh creates onto web/node_modules (its scripts have no dependencies of
-# their own — see test/e2e/capture/run.sh).
+# run.sh (and the `test` task's permanent pure-math Vitest suite) creates
+# onto web/node_modules (these scripts have no dependencies of their own —
+# see test/e2e/capture/run.sh and Taskfile.yml).
 /test/e2e/capture/out/
 /test/e2e/capture/node_modules
 

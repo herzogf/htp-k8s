@@ -203,6 +203,23 @@ jobs:
       - name: Test
         run: task test
 
+      # The ADR-0011 layer-3 video capture harness's pure math (frame-timing,
+      # pose-trace analysis, quaternion/yaw — issue #120) has its own small
+      # Vitest suite under test/e2e/capture, kept separate from web/'s own
+      # `npm test` above because Vite's dev-server file-serving guard refuses
+      # to transform test files living outside a project's root (see
+      # test/e2e/capture/vitest.config.mjs's comment) — so it gets its own
+      # step here rather than folding into the "Test" step above. It reuses
+      # web/node_modules (already installed by the steps above) via the same
+      # symlink `task capture:record` uses, so no extra install step is
+      # needed; it is plain Node math with no browser/cluster involved, so it
+      # stays cheap (well under a second) even though it runs on every PR,
+      # unlike `task capture:record` itself (never run in CI — see that
+      # task's description).
+      - name: Capture harness pure-math tests (test/e2e/capture)
+        working-directory: test/e2e/capture
+        run: task test
+
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. npm audit's default
       # exit code already fails on any reported vulnerability.

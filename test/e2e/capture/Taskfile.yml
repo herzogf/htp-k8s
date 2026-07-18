@@ -8,6 +8,32 @@ version: '3'
 silent: true
 
 tasks:
+  test:
+    desc: >
+      Run the permanent Vitest regression suite for this tool's pure math
+      (issue #120): frame-timing (no playback-speed drift), pose-trace
+      analysis (strongest turns, the required 0.3s saturation-cluster merge,
+      fixture-pinned against a real recorded capture), and quaternion
+      yaw/unwrap (wrap-around correctness). Unlike `record`, this IS part of
+      the regular test suite and DOES run in CI (see .github/workflows/build.yml's
+      Frontend (Node) job) — it's plain Node math with no browser/cluster
+      involved, so it's cheap enough to run on every PR.
+      Reuses web/node_modules via the same runtime-only symlink `record` (via
+      run.sh) creates, since these scripts have no dependencies of their own;
+      requires `task web:install` (or `npm ci` in web/) to have been run
+      first.
+    cmds:
+      - |
+        set -euo pipefail
+        WEB_NODE_MODULES="{{.TASKFILE_DIR}}/../../../web/node_modules"
+        if [ ! -d "${WEB_NODE_MODULES}" ]; then
+          echo "ERROR: ${WEB_NODE_MODULES} not found — run 'npm ci' in web/ (or 'task web:install') first." >&2
+          exit 1
+        fi
+        ln -sfn "$(cd "${WEB_NODE_MODULES}" && pwd)" "{{.TASKFILE_DIR}}/node_modules"
+        cd "{{.TASKFILE_DIR}}"
+        node_modules/.bin/vitest run
+
   record:
     desc: >
       ADR-0011 layer-3 authoritative video capture: builds the real binary,
