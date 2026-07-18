@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
 # CI coverage for the published container image's kubeconfig fallback
-# (issue #113): the ONE piece of that change that unit tests structurally
-# cannot reach, since it lives in the real ko/Chainguard-static image's real
-# non-root process, not in anything an unprivileged `go test` can fake.
-# internal/kube/client_test.go already covers the decision function
-# (usesContainerKubeconfigDefault) exhaustively; this script covers the
-# container behavior itself: build the real image, actually `docker run` it
-# three ways, and assert on the real, observable outcome each documents.
+# (issue #113) AND its permission diagnostic (issue #128): the ONE piece of
+# that behavior structurally unreachable from an unprivileged `go test` —
+# it needs a real, permission-bearing kubeconfig file read by the real
+# ko/Chainguard-static image's real non-root process, not anything an
+# in-process unit test can fake. internal/kube/client_test.go already covers
+# the decision function (usesContainerKubeconfigDefault) exhaustively; this
+# script covers the container behavior itself: build the real image, actually
+# `docker run` it several ways, and assert on the real, observable outcome
+# each documents.
 #
 # Reuses the e2e job's already-provisioned kind cluster (ADR-0004's "don't
 # spin up a redundant cluster" guidance) — it just needs a real, reachable
@@ -20,40 +22,38 @@
 #     ./test/e2e/container-kubeconfig/run.sh
 #
 # Covers:
-#   1. Default fallback: mount at /kube/config, no -e KUBECONFIG -> the app
-#      starts and actually serves (GET /api/config), not merely "didn't
-#      exit".
-#   2. An explicit -e KUBECONFIG is never redirected to /kube/config: mounted
-#      at a DIFFERENT path with a matching -e KUBECONFIG still serves; the
-#      same env var pointed at a path with nothing mounted there fails with
-#      the plain client-go error, not the container-default hint (proving
-#      the retry truly never fires once KUBECONFIG is set).
-#   3. A missing mount fails fast (exit 1) with the actionable diagnostic
+#   1. The documented recipe, run EXACTLY as documented, against KUBECONFIG
+#      UNCHANGED (issue #128): mount at /kube/config with `--user
+#      "$(id -u):$(id -g)"`, no -e KUBECONFIG -> the app starts and actually
+#      serves (GET /api/config), not merely "didn't exit". This is the real
+#      regression test for #128 — a kind/kubectl-written kubeconfig is mode
+#      0600 (asserted below, so this test can't silently pass against a
+#      permissive file), and prior to #128 this exact invocation, minus
+#      --user, failed with "permission denied" on every real Linux Docker
+#      host.
+#   2. The permission diagnostic (issue #128): the SAME real 0600
+#      KUBECONFIG, mounted at /kube/config, but WITHOUT --user — the failure
+#      mode users actually hit (the pre-#128 documented recipe). Must fail
+#      fast (exit 1) with a diagnostic naming --user "$(id -u):$(id -g)",
+#      distinct from the missing-mount diagnostic in test 4.
+#   3. An explicit -e KUBECONFIG is never redirected to /kube/config: mounted
+#      at a DIFFERENT path (with --user, so a real 0600 file works there
+#      too) with a matching -e KUBECONFIG still serves; the same env var
+#      pointed at a path with nothing mounted there fails with the plain
+#      client-go error, not the container-default hint (proving the retry
+#      truly never fires once KUBECONFIG is set).
+#   4. A missing mount fails fast (exit 1) with the actionable diagnostic
 #      naming /kube/config and the -v flag — the case most likely to rot
 #      silently, since nobody manually re-checks an error message on every
 #      base-image bump.
 #
-# KNOWN GAP this script works around, NOT one it hides (flagged for the
-# maintainer, not fixed here — internal/kube/client.go and README are out of
-# scope for this change): client-go's own clientcmd.WriteToFile — which is
-# what `kind`/kubectl/most cloud-provider CLIs use to write a kubeconfig —
-# defaults to mode 0600. The container's fixed non-root uid (65532, ko's
-# Chainguard-static default) can't read a 0600 file it doesn't own; a plain
-# `docker run -v "$HOME/.kube/config:/kube/config:ro"` — the README's exact
-# documented invocation, unchanged by issue #113 — fails with "permission
-# denied" against a completely standard kubeconfig on any real Linux Docker
-# host (verified locally: a bare `docker run --user 65532:65532 -v
-# 0600-file:/f:ro busybox cat /f` reproduces this with zero htp-k8s code
-# involved). client.go itself handles this correctly (a permission error
-# does not match errors.Is(err, fs.ErrNotExist), so it does NOT show the
-# misleading "run with -v" hint for an already-mounted-but-unreadable file)
-# — this is a docs/packaging gap, not a client.go bug. Tests 1 and 2 below
-# mount a copy of KUBECONFIG with the group/other read bit added so they
-# exercise the real, settled KUBECONFIG-resolution logic end-to-end (real
-# non-root container, real network hop, real API server) without being
-# blocked by this orthogonal permission gap. Test 3 (missing mount) needs no
-# such workaround: a mount that isn't there at all fails on ErrNotExist
-# regardless of permissions, so it reflects the documented command exactly.
+# Formerly worked around #128 by mounting a chmod-644 COPY of KUBECONFIG
+# rather than the real 0600 file (see the git history of this file for that
+# version, and issue #129 for the gap it flagged). #128 fixed the underlying
+# permission failure with `--user "$(id -u):$(id -g)"` (see README.md and
+# internal/kube/client.go), so this script now exercises the real documented
+# recipe against the real, unmodified, 0600 KUBECONFIG throughout — no copy,
+# no chmod, nothing that could mask a real permission regression.
 set -euo pipefail
 
 : "${IMAGE:?IMAGE must be set to a local image reference (e.g. from ko build --local)}"
@@ -61,11 +61,21 @@ set -euo pipefail
 
 log() { printf '\n=== [container-kubeconfig] %s\n' "$*"; }
 
-# Track every container name we start so cleanup can force-remove all of them
-# regardless of which subtest fails, and a scratch dir for the read-permission
-# workaround copy (see the KNOWN GAP note above).
+# This whole script's value rests on KUBECONFIG being genuinely
+# owner-read-only, exactly as kind/kubectl/most cloud CLIs write it (issue
+# #128's actual failure mode). Assert it rather than silently testing
+# something weaker if the environment ever hands us a more permissive file.
+kc_mode="$(stat -c '%a' "${KUBECONFIG}")"
+if [ "${kc_mode}" != "600" ]; then
+  echo "FAIL: KUBECONFIG (${KUBECONFIG}) is mode ${kc_mode}, expected 600 — this script exists to test the real permission failure/fix from issue #128 against a standard kind/kubectl-written kubeconfig; a more permissive file would let tests 1-3 pass for the wrong reason." >&2
+  exit 1
+fi
+
+# Track every container name so cleanup can force-remove all of them
+# regardless of which subtest fails. No scratch copy of KUBECONFIG is made
+# anywhere in this script (see the header note above) — every test below
+# mounts the real file.
 CONTAINERS=()
-SCRATCH_DIR="$(mktemp -d)"
 
 cleanup() {
   local rc=$?
@@ -73,18 +83,16 @@ cleanup() {
   for name in "${CONTAINERS[@]:-}"; do
     [ -n "${name}" ] && docker rm -f "${name}" >/dev/null 2>&1 || true
   done
-  rm -rf "${SCRATCH_DIR}"
   exit "${rc}"
 }
 trap cleanup EXIT INT TERM
 
-# Readable copy of KUBECONFIG for tests 1/2 (see KNOWN GAP above) — a COPY,
-# never the original, so this script never mutates a file it doesn't own.
-READABLE_KUBECONFIG="${SCRATCH_DIR}/kubeconfig"
-cp "${KUBECONFIG}" "${READABLE_KUBECONFIG}"
-chmod 0644 "${READABLE_KUBECONFIG}"
+# --user "$(id -u):$(id -g)": issue #128's fix — makes the container read the
+# real 0600 KUBECONFIG mount as the host user instead of its fixed non-root
+# uid. Computed once so every "with --user" docker run below stays in sync.
+HOST_USER="$(id -u):$(id -g)"
 
-# port_is_free/pick_free_port: tests 1 and 2a run with --network host and
+# port_is_free/pick_free_port: tests 1 and 3a run with --network host and
 # actually bind, so a hardcoded port risks colliding with anything else
 # already listening on the host — another job, another agent's app, a
 # developer's own process (docker's own port-publish couldn't have picked
@@ -130,20 +138,22 @@ wait_http_200() {
 }
 
 # ---------------------------------------------------------------------------
-# 1. Default fallback: -v ...:/kube/config:ro, NO -e KUBECONFIG. This is the
-#    exact scenario issue #113 exists for.
+# 1. The documented recipe, exactly as documented, against the real 0600
+#    KUBECONFIG: -v ...:/kube/config:ro, --user "$(id -u):$(id -g)", no -e
+#    KUBECONFIG. This is the exact scenario issues #113 and #128 exist for.
 # ---------------------------------------------------------------------------
-log "Test 1: default fallback (mount /kube/config, no -e KUBECONFIG)"
+log "Test 1: documented recipe (--user + real 0600 KUBECONFIG, no -e KUBECONFIG)"
 name="htpk8s-fallback-default"
 CONTAINERS+=("${name}")
 port1="$(pick_free_port)"
 docker run -d --name "${name}" --network host \
-  -v "${READABLE_KUBECONFIG}:/kube/config:ro" \
+  --user "${HOST_USER}" \
+  -v "${KUBECONFIG}:/kube/config:ro" \
   -e HTP_K8S_ADDR=":${port1}" \
   "${IMAGE}" >/dev/null
 
 if ! wait_http_200 "${port1}" /api/config 20; then
-  echo "FAIL: default fallback did not serve GET /api/config within 20s. Container log:" >&2
+  echo "FAIL: documented recipe did not serve GET /api/config within 20s. Container log:" >&2
   docker logs "${name}" >&2 || true
   exit 1
 fi
@@ -161,25 +171,69 @@ if ! docker logs "${name}" 2>&1 | grep -q "detected view mode:"; then
   exit 1
 fi
 docker rm -f "${name}" >/dev/null 2>&1
-echo "OK: default fallback served a real GET /api/config response with no -e KUBECONFIG."
+echo "OK: the documented recipe served a real GET /api/config response against a real 0600 kubeconfig."
 
 # ---------------------------------------------------------------------------
-# 2a. An explicit KUBECONFIG still wins: mounted at a path OTHER than
-#     /kube/config (nothing is mounted at /kube/config at all in this run),
-#     with a matching -e KUBECONFIG. If the fallback ever redirected an
-#     explicit KUBECONFIG to /kube/config, this would fail (nothing there).
+# 2. Issue #128's permission diagnostic: the SAME real 0600 KUBECONFIG,
+#    mounted at /kube/config, but WITHOUT --user — the pre-#128 documented
+#    recipe, and the failure mode users actually hit. Must fail fast with a
+#    diagnostic naming --user "$(id -u):$(id -g)", not the missing-mount
+#    diagnostic (which would be actively misleading here — a file IS
+#    mounted).
 # ---------------------------------------------------------------------------
-log "Test 2a: explicit KUBECONFIG is honoured (mounted elsewhere, nothing at /kube/config)"
+log "Test 2: permission diagnostic (real 0600 KUBECONFIG mounted, --user omitted)"
+name="htpk8s-permission-denied"
+CONTAINERS+=("${name}")
+set +e
+out="$(docker run --name "${name}" --network host \
+  -v "${KUBECONFIG}:/kube/config:ro" \
+  "${IMAGE}" 2>&1)"
+rc=$?
+set -e
+if [ "${rc}" -ne 1 ]; then
+  echo "FAIL: expected exit code 1 when --user is omitted against a 0600 kubeconfig, got ${rc}. Output:" >&2
+  echo "${out}" >&2
+  exit 1
+fi
+if ! echo "${out}" | grep -q "permission denied"; then
+  echo "FAIL: expected a permission-denied failure (0600 kubeconfig, no --user), got a different error. Output:" >&2
+  echo "${out}" >&2
+  exit 1
+fi
+if ! echo "${out}" | grep -q -- '--user "\$(id -u):\$(id -g)"'; then
+  echo "FAIL: permission diagnostic does not name --user \"\$(id -u):\$(id -g)\". Output:" >&2
+  echo "${out}" >&2
+  exit 1
+fi
+# Must NOT be confused with the missing-mount diagnostic (test 4) — a file IS
+# mounted here, so that wording would be actively misleading.
+if echo "${out}" | grep -q "run with -v"; then
+  echo "FAIL: got the missing-mount diagnostic for a file that IS mounted (just unreadable). Output:" >&2
+  echo "${out}" >&2
+  exit 1
+fi
+docker rm -f "${name}" >/dev/null 2>&1
+echo "OK: a 0600 kubeconfig mounted without --user fails with the actionable --user hint, distinct from the missing-mount diagnostic."
+
+# ---------------------------------------------------------------------------
+# 3a. An explicit KUBECONFIG still wins: mounted at a path OTHER than
+#     /kube/config (nothing is mounted at /kube/config at all in this run),
+#     with a matching -e KUBECONFIG and --user (so the real 0600 file is
+#     readable). If the fallback ever redirected an explicit KUBECONFIG to
+#     /kube/config, this would fail (nothing there).
+# ---------------------------------------------------------------------------
+log "Test 3a: explicit KUBECONFIG is honoured (mounted elsewhere, nothing at /kube/config)"
 name="htpk8s-fallback-explicit"
 CONTAINERS+=("${name}")
-port2a="$(pick_free_port)"
+port3a="$(pick_free_port)"
 docker run -d --name "${name}" --network host \
-  -v "${READABLE_KUBECONFIG}:/custom/kubeconfig:ro" \
+  --user "${HOST_USER}" \
+  -v "${KUBECONFIG}:/custom/kubeconfig:ro" \
   -e KUBECONFIG=/custom/kubeconfig \
-  -e HTP_K8S_ADDR=":${port2a}" \
+  -e HTP_K8S_ADDR=":${port3a}" \
   "${IMAGE}" >/dev/null
 
-if ! wait_http_200 "${port2a}" /api/config 20; then
+if ! wait_http_200 "${port3a}" /api/config 20; then
   echo "FAIL: explicit KUBECONFIG=/custom/kubeconfig did not serve GET /api/config within 20s. Container log:" >&2
   docker logs "${name}" >&2 || true
   exit 1
@@ -188,14 +242,14 @@ docker rm -f "${name}" >/dev/null 2>&1
 echo "OK: an explicit KUBECONFIG mounted away from /kube/config still works."
 
 # ---------------------------------------------------------------------------
-# 2b. The converse: an explicit KUBECONFIG pointed at a path with NOTHING
+# 3b. The converse: an explicit KUBECONFIG pointed at a path with NOTHING
 #     mounted there must fail with the plain client-go error, never the
 #     container-default hint — proving the retry genuinely never fires once
 #     KUBECONFIG is set (matches
 #     TestRestConfig_ExplicitKUBECONFIG_NeverRedirected's unit coverage, but
 #     against the real container).
 # ---------------------------------------------------------------------------
-log "Test 2b: explicit KUBECONFIG with nothing mounted there is never redirected to /kube/config"
+log "Test 3b: explicit KUBECONFIG with nothing mounted there is never redirected to /kube/config"
 name="htpk8s-fallback-explicit-missing"
 CONTAINERS+=("${name}")
 set +e
@@ -232,11 +286,13 @@ docker rm -f "${name}" >/dev/null 2>&1
 echo "OK: an explicit KUBECONFIG pointing at nothing mounted fails with the plain error, not the container hint."
 
 # ---------------------------------------------------------------------------
-# 3. Priority case: a forgotten mount (no -v, no -e KUBECONFIG) fails fast
+# 4. Priority case: a forgotten mount (no -v, no -e KUBECONFIG) fails fast
 #    with the actionable diagnostic naming /kube/config and the -v flag —
 #    the case most likely to rot silently across a base-image or ko change.
+#    Distinct from test 2's permission diagnostic (no file is mounted at all
+#    here, vs. test 2's mounted-but-unreadable file).
 #
-#    No -e HTP_K8S_ADDR here (unlike tests 1/2a): kube.NewClients() runs
+#    No -e HTP_K8S_ADDR here (unlike tests 1/3a): kube.NewClients() runs
 #    BEFORE the process ever attempts to bind a listen socket (see
 #    cmd/htp-k8s/main.go's run()), so this container never reaches the
 #    default :8080 either way — it can't collide with, or be masked by,
@@ -245,7 +301,7 @@ echo "OK: an explicit KUBECONFIG pointing at nothing mounted fails with the plai
 #    failure here can't accidentally pass "for the wrong reason" (e.g. an
 #    unrelated port-bind failure producing the same exit code).
 # ---------------------------------------------------------------------------
-log "Test 3: missing mount fails fast with the actionable diagnostic"
+log "Test 4: missing mount fails fast with the actionable diagnostic"
 name="htpk8s-fallback-missing-mount"
 CONTAINERS+=("${name}")
 set +e
@@ -264,6 +320,11 @@ if ! echo "${out}" | grep -q "/kube/config"; then
 fi
 if ! echo "${out}" | grep -q -- "-v \$HOME/.kube/config:/kube/config:ro"; then
   echo "FAIL: diagnostic does not name the -v flag to run with. Output:" >&2
+  echo "${out}" >&2
+  exit 1
+fi
+if echo "${out}" | grep -q -- '--user'; then
+  echo "FAIL: got the permission diagnostic for a mount that doesn't exist at all. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
