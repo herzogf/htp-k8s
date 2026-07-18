@@ -84,6 +84,35 @@ READABLE_KUBECONFIG="${SCRATCH_DIR}/kubeconfig"
 cp "${KUBECONFIG}" "${READABLE_KUBECONFIG}"
 chmod 0644 "${READABLE_KUBECONFIG}"
 
+# port_is_free/pick_free_port: tests 1 and 2a run with --network host and
+# actually bind, so a hardcoded port risks colliding with anything else
+# already listening on the host — another job, another agent's app, a
+# developer's own process (docker's own port-publish couldn't have picked
+# one for us here, since --network host bypasses that entirely). Pick a
+# random candidate in the ephemeral range and probe it with bash's own
+# /dev/tcp (no extra tool dependency), retrying on collision.
+port_is_free() {
+  local port="$1"
+  if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+    exec 3>&- 2>/dev/null || true
+    return 1 # connected -> something is already listening
+  fi
+  return 0 # connection refused/failed -> free
+}
+
+pick_free_port() {
+  local port attempt
+  for attempt in $(seq 1 20); do
+    port=$(((RANDOM % 20000) + 20000))
+    if port_is_free "${port}"; then
+      echo "${port}"
+      return 0
+    fi
+  done
+  echo "pick_free_port: could not find a free port after 20 attempts" >&2
+  return 1
+}
+
 # wait_http_200 <port> <path> <timeout-seconds>: polls until the given
 # localhost path answers 200, or fails loudly once the timeout elapses.
 wait_http_200() {
@@ -107,17 +136,18 @@ wait_http_200() {
 log "Test 1: default fallback (mount /kube/config, no -e KUBECONFIG)"
 name="htpk8s-fallback-default"
 CONTAINERS+=("${name}")
+port1="$(pick_free_port)"
 docker run -d --name "${name}" --network host \
   -v "${READABLE_KUBECONFIG}:/kube/config:ro" \
-  -e HTP_K8S_ADDR=:18081 \
+  -e HTP_K8S_ADDR=":${port1}" \
   "${IMAGE}" >/dev/null
 
-if ! wait_http_200 18081 /api/config 20; then
+if ! wait_http_200 "${port1}" /api/config 20; then
   echo "FAIL: default fallback did not serve GET /api/config within 20s. Container log:" >&2
   docker logs "${name}" >&2 || true
   exit 1
 fi
-resp="$(curl -sS -m 5 "http://127.0.0.1:18081/api/config")"
+resp="$(curl -sS -m 5 "http://127.0.0.1:${port1}/api/config")"
 case "${resp}" in
 *'"demoSeed"'*) : ;;
 *)
@@ -142,13 +172,14 @@ echo "OK: default fallback served a real GET /api/config response with no -e KUB
 log "Test 2a: explicit KUBECONFIG is honoured (mounted elsewhere, nothing at /kube/config)"
 name="htpk8s-fallback-explicit"
 CONTAINERS+=("${name}")
+port2a="$(pick_free_port)"
 docker run -d --name "${name}" --network host \
   -v "${READABLE_KUBECONFIG}:/custom/kubeconfig:ro" \
   -e KUBECONFIG=/custom/kubeconfig \
-  -e HTP_K8S_ADDR=:18082 \
+  -e HTP_K8S_ADDR=":${port2a}" \
   "${IMAGE}" >/dev/null
 
-if ! wait_http_200 18082 /api/config 20; then
+if ! wait_http_200 "${port2a}" /api/config 20; then
   echo "FAIL: explicit KUBECONFIG=/custom/kubeconfig did not serve GET /api/config within 20s. Container log:" >&2
   docker logs "${name}" >&2 || true
   exit 1
@@ -204,6 +235,15 @@ echo "OK: an explicit KUBECONFIG pointing at nothing mounted fails with the plai
 # 3. Priority case: a forgotten mount (no -v, no -e KUBECONFIG) fails fast
 #    with the actionable diagnostic naming /kube/config and the -v flag —
 #    the case most likely to rot silently across a base-image or ko change.
+#
+#    No -e HTP_K8S_ADDR here (unlike tests 1/2a): kube.NewClients() runs
+#    BEFORE the process ever attempts to bind a listen socket (see
+#    cmd/htp-k8s/main.go's run()), so this container never reaches the
+#    default :8080 either way — it can't collide with, or be masked by,
+#    anything else already using that port on a shared host. The assertions
+#    below are on the actual diagnostic text, not merely the exit code, so a
+#    failure here can't accidentally pass "for the wrong reason" (e.g. an
+#    unrelated port-bind failure producing the same exit code).
 # ---------------------------------------------------------------------------
 log "Test 3: missing mount fails fast with the actionable diagnostic"
 name="htpk8s-fallback-missing-mount"
