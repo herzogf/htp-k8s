@@ -727,11 +727,12 @@ describe.each(GRIDS)(
         // framing()'s doc comment for the definition's deliberate limits and
         // its validation against the real captures). Calibrated per grid,
         // re-tightened by iteration 4 (whose level gaze improved framing
-        // again): observed 0.14-0.28 across all seeds/grids (iteration 3
-        // measured 0.15-0.32; pre-iteration-3 `main` 0.29-0.51). Bounds sit
-        // ~1.25-1.4x above the per-grid worst observation and below every
-        // pre-iteration-3 per-seed value on the same grid, so a regression
-        // to pre-retune framing fails on every seed, not merely on average.
+        // again). Observed per grid: 5x5 0.14-0.16 (bound 0.22, 1.38x
+        // headroom), 4x2 0.21-0.28 (bound 0.33, 1.18x), kwok7 0.18-0.24
+        // (bound 0.32, 1.33x). (Iteration 3 measured 0.15-0.32;
+        // pre-iteration-3 `main` 0.29-0.51.) Each bound sits below every
+        // pre-iteration-3 per-seed value on its grid, so a regression to
+        // pre-retune framing fails on every seed, not merely on average.
         let voidFrames = 0
         for (const pose of poses) {
           if (!framing(pose, placements).framed) voidFrames++

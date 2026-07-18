@@ -576,10 +576,12 @@ describe('wide overview episodes swing the perimeter waypoints outward (#105 ite
     //   OVERVIEW_WIDE_START_WAYPOINT's doc comment: 2 waypoints clear the
     //   roofline from the median canyon start altitude, derived from
     //   MAX_CLIMB_GRADIENT — asserted against that derivation, not a bare
-    //   literal);
+    //   literal; ceil, because a fractional waypoint of climb still needs
+    //   the whole next leg to complete — floor would round the required
+    //   lead-in down to 1 and this half of the guard would never bite);
     const medianCanyonStart = (CANYON_ALTITUDE_MIN + CANYON_ALTITUDE_MAX) / 2
     const climbWaypoints = (TOWER_HEIGHT - medianCanyonStart) / (MAX_CLIMB_GRADIENT * TOWER_SPACING)
-    expect(OVERVIEW_WIDE_START_WAYPOINT).toBeGreaterThanOrEqual(Math.floor(climbWaypoints))
+    expect(OVERVIEW_WIDE_START_WAYPOINT).toBeGreaterThanOrEqual(Math.ceil(climbWaypoints))
     // - and the wide/tight split must actually split: the refund keeps wide
     //   episodes strictly shorter, and the shallow-apex gate strictly inside
     //   the overview band (a gate at/above the band top widens every
