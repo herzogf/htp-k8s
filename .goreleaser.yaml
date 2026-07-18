@@ -219,7 +219,7 @@ release:
     # then open http://localhost:8080
     ```
 
-    (`--user "$(id -u):$(id -g)"` reads your `0600` kubeconfig; `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats: [README](https://github.com/herzogf/htp-k8s#quickstart), [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-secure-by-default-network-binding.md).)
+    (`--user "$(id -u):$(id -g)"` reads your `0600` kubeconfig; `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats (Windows, root shells): [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image); design reasoning: [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-secure-by-default-network-binding.md).)
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.
