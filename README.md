@@ -26,7 +26,7 @@ tar -xzf htp-k8s_0.2.0_linux_amd64.tar.gz
 **Or run the container image:**
 
 ```bash
-docker run --rm -p 8080:8080 \
+docker run --rm -p 127.0.0.1:8080:8080 \
   -v "$HOME/.kube/config:/kube/config:ro" \
   ghcr.io/herzogf/htp-k8s:v0.2.0
 # then open http://localhost:8080

@@ -10,11 +10,11 @@ import (
 
 // TestUsesContainerKubeconfigDefault covers the decision restConfig makes
 // about whether to retry against the container's /kube/config default. It is
-// tested as a pure function (kubeconfigEnv, uid, resolveErr) -> bool rather
-// than end-to-end through restConfig(), because the real container signal —
-// the process uid — can't be faked from an unprivileged test process; the
-// container path is instead exercised for real in a built image (see the PR
-// description for the docker-run verification).
+// tested as a pure function (kubeconfigEnv, resolveErr) -> bool: true only
+// when KUBECONFIG is unset AND the normal resolution found nothing at all —
+// so it can never fire while a working native resolution exists (the normal
+// attempt already ran, unmodified, and failed empty before this is even
+// consulted).
 func TestUsesContainerKubeconfigDefault(t *testing.T) {
 	emptyConfigErr := clientcmd.ErrEmptyConfig
 	otherErr := errors.New("some other resolution failure")
@@ -22,45 +22,34 @@ func TestUsesContainerKubeconfigDefault(t *testing.T) {
 	tests := []struct {
 		name          string
 		kubeconfigEnv string
-		uid           int
 		resolveErr    error
 		want          bool
 	}{
 		{
-			name:          "container uid, nothing found, no KUBECONFIG: retry",
+			name:          "nothing found, no KUBECONFIG: retry",
 			kubeconfigEnv: "",
-			uid:           containerUID,
 			resolveErr:    emptyConfigErr,
 			want:          true,
 		},
 		{
-			name:          "non-container uid: never retry, even if nothing found",
-			kubeconfigEnv: "",
-			uid:           1000,
-			resolveErr:    emptyConfigErr,
-			want:          false,
-		},
-		{
-			name:          "container uid but KUBECONFIG set: an explicit KUBECONFIG is never second-guessed",
+			name:          "KUBECONFIG set: an explicit KUBECONFIG is never second-guessed",
 			kubeconfigEnv: "/somewhere/config",
-			uid:           containerUID,
 			resolveErr:    emptyConfigErr,
 			want:          false,
 		},
 		{
-			name:          "container uid but the failure isn't an empty-config failure: don't mask a different error",
+			name:          "the failure isn't an empty-config failure: don't mask a different error",
 			kubeconfigEnv: "",
-			uid:           containerUID,
 			resolveErr:    otherErr,
 			want:          false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := usesContainerKubeconfigDefault(tt.kubeconfigEnv, tt.uid, tt.resolveErr)
+			got := usesContainerKubeconfigDefault(tt.kubeconfigEnv, tt.resolveErr)
 			if got != tt.want {
-				t.Errorf("usesContainerKubeconfigDefault(%q, %d, %v) = %v, want %v",
-					tt.kubeconfigEnv, tt.uid, tt.resolveErr, got, tt.want)
+				t.Errorf("usesContainerKubeconfigDefault(%q, %v) = %v, want %v",
+					tt.kubeconfigEnv, tt.resolveErr, got, tt.want)
 			}
 		})
 	}
