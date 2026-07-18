@@ -490,16 +490,22 @@ const CORNER_MAX_LEG_FRACTION = 0.49
 
 /**
  * Below this arc radius a corner is not meaningfully roundable and keeps its
- * sharp node instead (the pre-rounding pivot behaviour): as a turn
- * approaches a hairpin, the leg-fraction clamp shrinks the inscribed radius
- * toward zero, and an "arc" that small collapses into near-coincident
- * control points beside full-length legs — the tiny-chord regime that
- * produces spline cusps (see {@link CORNER_ARC_MAX_STEP}'s history). In
- * practice only dead-end backtracks (1×N clusters) and pathological
- * activation angles land here: the walk's approach-alignment filter keeps
- * ordinary entry corners at ≤ 90°, and lattice corners are exactly 90°.
- * Expressed as a radius floor rather than an angle cutoff so sharp-but-
- * roundable turns on long legs still get their arc.
+ * sharp node instead (the pre-rounding pivot behaviour): the leg-fraction
+ * clamp shrinks the inscribed radius, and an "arc" this small collapses
+ * into near-coincident control points beside full-length legs — the
+ * tiny-chord regime that produces spline cusps (see
+ * {@link CORNER_ARC_MAX_STEP}'s history). Being a *radius* floor (not an
+ * angle cutoff — deliberately, so sharp-but-roundable turns on long legs
+ * still get their arc), it catches every route that degenerates the radius:
+ * near-hairpin turns (tan(θ/2) → ∞ — dead-end backtracks on 1×N clusters,
+ * pathological activation angles), but also ordinary-angle corners whose
+ * adjacent leg is very short — a 90° corner needs a leg of at least
+ * `CORNER_MIN_TURN_RADIUS / CORNER_MAX_LEG_FRACTION` ≈ 0.92 world units to
+ * clear the floor, while a takeoff leg is only gated at
+ * {@link TAKEOFF_MIN_DISTANCE} (0.5). In practice that short-leg case has
+ * not been observed to fire (the walk's approach-alignment filter keeps
+ * ordinary entry corners at ≤ 90° and lattice legs are ≥ one
+ * {@link TOWER_SPACING}), but it is covered by design, not by accident.
  */
 const CORNER_MIN_TURN_RADIUS = CORNER_TURN_RADIUS / 4
 
