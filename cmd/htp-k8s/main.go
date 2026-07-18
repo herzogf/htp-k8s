@@ -31,26 +31,43 @@ import (
 // for that case and costs real exposure for everyone else. -addr/HTP_K8S_ADDR
 // is the explicit opt-in to expose (e.g. `-addr :8080`).
 //
-// This is a BREAKING CHANGE from htp-k8s's earlier bare `:8080` (all
-// interfaces) default: anyone relying on remote access loses it silently on
-// upgrade unless they add -addr/HTP_K8S_ADDR. See run()'s startup log line,
-// which always states the listen address and, when it's loopback, exactly
-// how to widen it — the operator finds out from the log, not by discovering
-// the app is unreachable from elsewhere.
+// BREAKING CHANGE, but narrower than it first looks: this does NOT newly
+// break the primary "load the page in a browser on another machine" case —
+// that was already broken on the OLD all-interfaces default too, because the
+// released frontend's WebSocket target is baked to ws://localhost:8080/ws
+// regardless of where the page was loaded from (web/src/config.ts's
+// DEFAULT_WS_URL), so a remote browser already got a blank/stalled page
+// there, not a working live scene. What silently breaks on upgrade: anyone
+// reaching /api endpoints directly from another host (curl, custom tooling,
+// monitoring), and anyone who had already rebuilt the frontend with a
+// matching VITE_WS_URL to make real remote viewing work — both now also need
+// -addr/HTP_K8S_ADDR. See run()'s startup log line, which always states the
+// listen address and, when it's loopback, exactly how to widen it — the
+// operator finds out from the log, not by discovering the app is
+// unreachable from elsewhere.
 //
-// The published container image is a deliberate EXCEPTION to this default
-// (see .ko.yaml and README.md's docker run recipe): it sets
-// -e HTP_K8S_ADDR=:8080 explicitly, because Docker's `-p` port publishing
-// forwards to the *container's* interface address, not its loopback — a
-// container that bound its own loopback here would never see traffic `-p`
-// forwards to it, breaking `docker run -p 127.0.0.1:8080:8080 ...` even
-// though that command's host-side loopback binding is what actually
-// restricts access. ko has no supported way to bake a container-runtime env
-// var into the image itself (verified against ko v0.19.1 and GoReleaser
-// v2.17.0's `kos:` pipe while investigating this issue — both only expose a
-// Go *build*-time env, like `.ko.yaml`'s existing `env:` block, never the
-// OCI image's runtime Config.Env), so this has to be an explicit flag in the
-// documented recipe rather than a difference baked into the image.
+// The image BINARY has this same loopback default — it is not an exception.
+// What IS an exception is the documented `docker run` recipe (README.md),
+// which passes -e HTP_K8S_ADDR=:8080 explicitly: Docker's `-p` port
+// publishing forwards to the *container's* interface address, not its
+// loopback, so a container left on the loopback default would never see
+// traffic `-p` forwards to it, breaking `docker run -p 127.0.0.1:8080:8080
+// ...` even though that command's host-side loopback binding is what
+// actually restricts access. Baking a wider default into the image binary
+// itself (rather than the recipe) IS mechanically possible via an
+// image-only `-X main.defaultAddr=...` ldflag in .ko.yaml (which already
+// has its own ldflags block, distinct from GoReleaser's) — deliberately not
+// done, because it would make the --network host fallback recipe
+// (README.md) fail OPEN: forgetting -e HTP_K8S_ADDR=127.0.0.1:8080 there
+// would silently expose every host interface instead of just losing
+// connectivity. Every other way to forget a flag in this design fails
+// closed (see main_test.go and README.md); this is the one shape that
+// wouldn't, so it stays a recipe-level flag instead. (ko itself has no
+// supported way to set a container-*runtime* env var — verified against ko
+// v0.19.1 and GoReleaser v2.17.0's `kos:` pipe while investigating this
+// issue; both only expose Go *build*-time env, never the OCI image's
+// runtime Config.Env — but that's a different question from the ldflag
+// option above, which doesn't go through either.)
 const defaultAddr = "127.0.0.1:8080"
 
 // Build metadata. These defaults apply to plain `go build` / `go run` dev
@@ -287,7 +304,7 @@ func run(args []string, env func(string) string) error {
 func logListenAddr(addr string) {
 	log.Printf("htp-k8s backend listening on %s", addr)
 	if isLoopbackAddr(addr) {
-		log.Printf("bound to loopback only — reachable from this machine, not from other hosts. To expose it, set -addr :8080 or HTP_K8S_ADDR=:8080 (see README.md for the security implications of doing so)")
+		log.Printf("bound to loopback only — reachable from this machine, not from other hosts. To expose it, set -addr :8080 or HTP_K8S_ADDR=:8080 (see README.md for the security implications and what a remote browser additionally needs)")
 		return
 	}
 	log.Printf("WARNING: bound to %s (not loopback-only) with no authentication — anyone who can reach this port gets read-only access to your cluster under your credentials", addr)

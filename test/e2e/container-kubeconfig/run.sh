@@ -14,11 +14,13 @@
 # Reuses the e2e job's already-provisioned kind cluster (ADR-0004's "don't
 # spin up a redundant cluster" guidance) — it just needs a real, reachable
 # API server, which that job already has by the time this runs. Requires:
-# IMAGE (a local `ko build --local` image reference) and CLUSTER_NAME (the
-# name of that already-provisioned, reachable kind cluster) in the
-# environment, plus docker, curl, and kind on PATH.
+# IMAGE (a local `ko build --local` image reference), CLUSTER_NAME (the name
+# of that already-provisioned, reachable kind cluster), and KUBECONFIG (the
+# real kubeconfig kind/kind-action wrote for it, e.g. $HOME/.kube/config —
+# used only to assert the real-world 0600 premise below, never mounted into
+# any container) in the environment, plus docker, curl, and kind on PATH.
 #
-#   IMAGE=ko.local/htp-k8s-... CLUSTER_NAME=htp-k8s-e2e \
+#   IMAGE=ko.local/htp-k8s-... CLUSTER_NAME=htp-k8s-e2e KUBECONFIG=$HOME/.kube/config \
 #     ./test/e2e/container-kubeconfig/run.sh
 #
 # Covers:
@@ -26,11 +28,10 @@
 #      kubeconfig (issue #128): mount at /kube/config with `--user
 #      "$(id -u):$(id -g)"`, no -e KUBECONFIG -> the app starts and actually
 #      serves (GET /api/config), not merely "didn't exit". This is the real
-#      regression test for #128 — the kubeconfig is asserted mode 0600 below
-#      (see INTERNAL_KUBECONFIG), so this test can't silently pass against a
-#      permissive file, and prior to #128 this exact invocation, minus
-#      --user, failed with "permission denied" on every real Linux Docker
-#      host.
+#      regression test for #128 — KUBECONFIG is asserted mode 0600 below, so
+#      this test can't silently pass against a permissive file, and prior to
+#      #128 this exact invocation, minus --user, failed with "permission
+#      denied" on every real Linux Docker host.
 #   2. The permission diagnostic (issue #128): the SAME real 0600
 #      kubeconfig, mounted at /kube/config, but WITHOUT --user — the failure
 #      mode users actually hit (the pre-#128 documented recipe). Must fail
@@ -75,30 +76,32 @@ set -euo pipefail
 
 : "${IMAGE:?IMAGE must be set to a local image reference (e.g. from ko build --local)}"
 : "${CLUSTER_NAME:?CLUSTER_NAME must be set to the name of a reachable kind cluster}"
+: "${KUBECONFIG:?KUBECONFIG must be set to a real, naturally-written kubeconfig for that cluster (e.g. \$HOME/.kube/config) — used only to assert the issue #128 premise below, not mounted into any container}"
 
 log() { printf '\n=== [container-kubeconfig] %s\n' "$*"; }
 
-# kind's *internal* kubeconfig — see the NETWORKING note above for why this,
-# not the externally-published one, is what a container on the `kind`
-# network needs. `kind get kubeconfig --internal` writes to stdout with no
-# fixed mode, so this script imposes 0600 itself: this whole script's value
-# rests on the mounted kubeconfig being genuinely owner-read-only, exactly as
-# kind/kubectl/most cloud CLIs write their own kubeconfigs (issue #128's
-# actual failure mode) — a more permissive file would let tests 1-3 pass for
-# the wrong reason.
-SCRATCH_DIR="$(mktemp -d)"
-INTERNAL_KUBECONFIG="${SCRATCH_DIR}/kubeconfig-internal"
-kind get kubeconfig --internal --name "${CLUSTER_NAME}" > "${INTERNAL_KUBECONFIG}"
-chmod 600 "${INTERNAL_KUBECONFIG}"
-kc_mode="$(stat -c '%a' "${INTERNAL_KUBECONFIG}")"
+# This whole script's value rests on a real kind/kubectl-written kubeconfig
+# being genuinely owner-read-only (issue #128's actual failure mode) — assert
+# that against KUBECONFIG, the kubeconfig kind/kind-action actually wrote via
+# its normal client-go path (clientcmd.WriteToFile, mode 0600), rather than
+# against a file THIS script chmods itself below (asserting a self-imposed
+# mode right after imposing it is a no-op that can never fail — caught in
+# review of an earlier version of this script; this checks the real,
+# independently-produced artifact instead).
+kc_mode="$(stat -c '%a' "${KUBECONFIG}")"
 if [ "${kc_mode}" != "600" ]; then
-  echo "FAIL: INTERNAL_KUBECONFIG (${INTERNAL_KUBECONFIG}) is mode ${kc_mode} after chmod 600 — this script exists to test the real permission failure/fix from issue #128 against a standard kind/kubectl-written kubeconfig; a more permissive file would let tests 1-3 pass for the wrong reason." >&2
+  echo "FAIL: KUBECONFIG (${KUBECONFIG}) is mode ${kc_mode}, expected 600 — this script exists to test the real permission failure/fix from issue #128 against a standard kind/kubectl-written kubeconfig; a more permissive file would mean the environment itself no longer reflects the real-world case this script is for." >&2
   exit 1
 fi
 
-# Track every container name so cleanup can force-remove all of them
-# regardless of which subtest fails.
+# Track every container name, and the scratch dir below, so cleanup can
+# remove them regardless of which subtest fails. Both declared AND the trap
+# installed before anything that could need cleaning up is created — a
+# failure between "mktemp succeeds" and "the trap line runs" would otherwise
+# leak the scratch dir (and, worse, the kubeconfig about to be written into
+# it) with no cleanup registered to catch it.
 CONTAINERS=()
+SCRATCH_DIR=""
 
 cleanup() {
   local rc=$?
@@ -106,10 +109,27 @@ cleanup() {
   for name in "${CONTAINERS[@]:-}"; do
     [ -n "${name}" ] && docker rm -f "${name}" >/dev/null 2>&1 || true
   done
-  rm -rf "${SCRATCH_DIR}"
+  [ -n "${SCRATCH_DIR}" ] && rm -rf "${SCRATCH_DIR}"
   exit "${rc}"
 }
 trap cleanup EXIT INT TERM
+
+# kind's *internal* kubeconfig — see the NETWORKING note above for why this,
+# not the externally-published one, is what a container on the `kind`
+# network needs. Created AFTER the trap above is installed (so a failure
+# here still gets cleaned up) and written with `umask 077` wrapping the
+# redirect itself, rather than a default-mode write followed by a separate
+# `chmod 600`: `kind get kubeconfig --internal` writes to stdout with no
+# fixed mode, and a plain `> file` would briefly leave a real cluster
+# credential file at the shell's ambient (often world-readable) umask before
+# a later chmod tightened it — the umask subshell means the file is 0600
+# from its very first byte, no window at all. (No follow-up mode assertion
+# here — asserting a mode this same block just imposed can never fail; the
+# KUBECONFIG assertion above is what actually proves the 0600 premise, against
+# an independently-written real kubeconfig.)
+SCRATCH_DIR="$(mktemp -d)"
+INTERNAL_KUBECONFIG="${SCRATCH_DIR}/kubeconfig-internal"
+( umask 077 && kind get kubeconfig --internal --name "${CLUSTER_NAME}" > "${INTERNAL_KUBECONFIG}" )
 
 # --user "$(id -u):$(id -g)": issue #128's fix — makes the container read the
 # real 0600 kubeconfig mount as the host user instead of its fixed non-root
