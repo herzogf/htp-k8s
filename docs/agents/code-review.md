@@ -9,6 +9,11 @@ Review along three deliberately separate axes; don't let one mask another. A cha
 ### 1. Standards
 Does the code follow this repo's documented standards, and is it free of code smells? Apply any repo standards docs (e.g. a `CODING_STANDARDS.md` / `CONTRIBUTING.md` if present), **plus the smell baseline below**. Documented repo standards override the baseline; baseline smells are always judgement calls; skip anything tooling already enforces.
 
+**Documentation proportionality — applies to every doc hunk in the diff, and asks a question the other axes don't.** The three axes all ask _is this correct_; correct prose still bloats an artifact past what its reader can use, and that has shipped here twice. So for any change to `README.md`, `docs/**`, an ADR, or the `.goreleaser.yaml` release-notes footer, judge it against `docs/agents/documentation-proportionality.md` and flag:
+- **Sized for its reader** — is this the right artifact for this content, at this length? A README that explains *why* where a command would do, an ADR carrying a tutorial, or a section that grew past what a newcomer will read is a finding **even when every sentence is accurate**. Review the section's resulting size, not just the diff.
+- **Detail referenced, not inlined** — caveats, platform edge cases, and rationale belong in the detail doc with a cross-link, not in the README.
+- **One claim, one home** — is any claim now stated in two artifacts? Flag the duplicate and name which copy should be the home.
+
 ### 2. Spec
 Does the diff faithfully implement the originating issue? Report (a) requirements missing or partial, (b) behaviour not asked for (scope creep), (c) requirements that look implemented but wrong. Quote the spec line for each finding.
 

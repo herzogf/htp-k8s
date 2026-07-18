@@ -59,6 +59,8 @@ The test suites run on **every** PR in CI (unit + the PR-blocking integration ti
 
 Any PR that changes user-visible behaviour updates the relevant docs (README, `docs/running-locally.md`, etc.) **in the same PR**. This is enforced by review (the `code-reviewer`'s Integration/Coherence axis checks it), not by tooling, with the pre-release media/content check (#108) as a backstop.
 
+*How much* to write, and in which artifact, is governed by `docs/agents/documentation-proportionality.md` — read it before writing docs. The `code-reviewer`'s Standards axis checks it.
+
 ### Issue lifecycle
 
 Issues close **on PR merge, not on PR open.** Put `Closes #<n>` in the PR body and let GitHub auto-close the issue when it merges to `main`; leave the issue open until then, and don't `gh issue close` it manually. See `docs/agents/issue-tracker.md`. This keeps the native dependency graph honest — a downstream ticket only becomes unblocked once its blocker's code is actually on `main` (the orchestrator gates the frontier on "blocker PR merged," not "issue closed").
