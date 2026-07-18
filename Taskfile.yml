@@ -4,6 +4,9 @@ includes:
   web:
     taskfile: ./web/Taskfile.yml
     dir: ./web
+  capture:
+    taskfile: ./test/e2e/capture/Taskfile.yml
+    dir: ./test/e2e/capture
 
 tasks:
   build:
@@ -40,6 +43,10 @@ tasks:
     desc: Run the frontend and backend test suites.
     cmds:
       - task: web:test
+      # The ADR-0011 capture harness's pure-math suite (issue #120) — run
+      # after web:test so web/node_modules (which it borrows via a symlink)
+      # already exists.
+      - task: capture:test
       # Scoped to our own Go packages rather than "./...": once web:test has
       # run `npm ci`, web/node_modules exists and can itself contain stray
       # vendored .go files (e.g. the "flatted" package does) that "./..."

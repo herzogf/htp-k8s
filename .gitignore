@@ -5,6 +5,14 @@
 # GoReleaser build output (issue #30).
 /dist/
 
+# ADR-0011 layer-3 video capture harness (issue #120): captured video/JPEG
+# frames/pose-analysis output, and the runtime-only node_modules symlink
+# run.sh (and the `test` task's permanent pure-math Vitest suite) creates
+# onto web/node_modules (these scripts have no dependencies of their own —
+# see test/e2e/capture/run.sh and Taskfile.yml).
+/test/e2e/capture/out/
+/test/e2e/capture/node_modules
+
 # Claude Code: commit shared subagent definitions (.claude/agents/), but not
 # transient worktrees, personal settings, or environment-provided skills.
 /.claude/worktrees/

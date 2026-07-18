@@ -177,3 +177,107 @@ kind delete cluster --name htp-demo
 
 That removes the cluster node container and everything seeded into it — nothing else
 persists.
+
+## Layer-3 authoritative video capture (feel-changing PRs)
+
+ADR-0011 verifies motion/animation quality in three layers; the third — **one
+authoritative video capture per feel-changing PR** (camera or animation
+choreography, aesthetics) — is a **merge gate**, reviewed by a human, because
+choreography and aesthetics are irreducibly human judgments no automated check
+can certify. `task capture:record` produces that capture:
+
+```bash
+task capture:record
+```
+
+This builds the binary and spins up its own throwaway kind+KWOK cluster under
+an **isolated kubeconfig** (`test/e2e/capture/out/<timestamp>/kubeconfig`, via
+`$KUBECONFIG`) — it never reads or writes your default `~/.kube/config` or
+touches its current-context at all, so it's safe to run alongside a cluster
+you already have selected. It then starts the app with Demo Mode auto-flying
+on a fixed seed, and:
+
+- **captures** a raw CDP `Page.startScreencast` screen recording (JPEG
+  quality 100, native resolution, every frame) instead of Playwright's
+  built-in `recordVideo`. The built-in recorder's internal ffmpeg preset
+  (`-deadline realtime -speed 8 -crf 8 -b:v 1M`, scaled to fit 800x800) is a
+  fast/cheap preset for routine CI artifacts — fine for the ADR-0011 layer-2
+  e2e suite, but it downscales below the capture viewport and compresses away
+  exactly the fine roll/yaw micro-motion layer 3 exists to judge. It cannot
+  carry a feel verdict.
+- **encodes** the captured frames offline (not in real time) into a
+  `libvpx`/VP8 `.webm` at ~7x the bitrate and 2.4x the frame rate of the
+  built-in recorder's preset, with no downscale. `Page.startScreencast` has no
+  frame-rate control — it delivers frames as fast as the renderer paints and
+  the ack loop allows, and that rate varies run to run (5.6fps-29fps observed
+  on the same machine across different captures). The encode step holds each
+  captured frame for its true observed on-screen duration (expanded onto an
+  exact 60fps timeline with cumulative rounding, so repeat counts never
+  drift), which is what keeps the output's *playback speed* correct
+  regardless of capture rate — a naive fixed-rate concatenation would produce
+  a subtly wrong-speed video, which is precisely the kind of error that can
+  silently corrupt a feel review without looking broken.
+- **analyzes** the parallel pose trace (position + camera quaternion, sampled
+  alongside every captured frame): the strongest turns (yaw-rate maxima),
+  sustained yaw-rate saturation events (full-resolution finite difference
+  thresholded at 0.98x the flight's max yaw rate, with samples within 0.3s
+  merged into one cluster — required, or capture/async-evaluate jitter
+  fragments one visually-continuous pan into dozens of meaningless blips),
+  tower-proximity events, and a set of labeled interval stills. Yaw is
+  derived from the *rendered* camera quaternion, deliberately independent of
+  Demo Mode's internal deterministic pose-stream model
+  (`web/src/scene/demoMode.ts`) — that independence is what makes the
+  analysis evidence a feel review can trust, rather than a restatement of the
+  model under test.
+
+Output lands under `test/e2e/capture/out/<timestamp>/` by default: the
+`.webm`, `pose-samples.json`, `pose-analysis.json`,
+`tower-proximity-analysis.json`, `stills/` (labeled JPEGs), `stills-manifest.json`,
+`towers.json`, and the isolated `kubeconfig` mentioned above. The raw JPEG
+frame cache (596-755 MB observed for a 2-minute capture) is always deleted —
+unconditionally, on every exit path, not just the success path, since it has
+no value once written and this project has repeatedly leaked kind clusters,
+app processes, and frame caches from ad-hoc capture scripts.
+`test/e2e/capture/run.sh` runs its cleanup (app process, kind cluster, frame
+cache) from a trap on normal exit *and* on interrupt (Ctrl-C/SIGTERM/SIGHUP),
+and each step **verifies** its own result (checks the process/cluster is
+actually gone, not just that a kill/delete command was issued) before
+reporting success.
+
+Override the defaults with `HTP_K8S_CAPTURE_*` env vars (seed, duration,
+viewport, output directory, port, cluster name) — see the header comment in
+`test/e2e/capture/run.sh` for the full list, e.g.:
+
+```bash
+HTP_K8S_CAPTURE_SEED=42 HTP_K8S_CAPTURE_DURATION_MS=60000 task capture:record
+```
+
+Every step except `capture.mjs` itself is runnable standalone with plain
+`node`, against an existing capture directory: `analyze.mjs`, `proximity.mjs`,
+and `stills.mjs` are pure-JSON, no cluster/app/browser/ffmpeg involved —
+useful for re-running just the analysis on a prior clip, e.g. to validate a
+change to the analysis math against a known result before trusting it on new
+footage:
+
+```bash
+node test/e2e/capture/analyze.mjs --pose-samples path/to/pose-samples.json --label mylabel
+```
+
+`encode.mjs` is also standalone-runnable (it needs only the Playwright-bundled
+ffmpeg, auto-detected from the Playwright browsers cache — override with
+`FFMPEG_PATH` if yours lives somewhere nonstandard):
+
+```bash
+node test/e2e/capture/encode.mjs --out-dir path/to/capture/dir --output out.webm
+```
+
+`capture.mjs` is the one exception: it imports `@playwright/test`, which only
+resolves via the `web/node_modules` symlink `run.sh` creates for the
+duration of the capture step (see that script's comments) — invoke it
+through `run.sh`/`task capture:record` rather than directly.
+
+This tool is **not** part of the automated test suite and is never run in
+CI — it is a manual step for whoever is preparing a feel-changing PR for
+review, run once at the end (ADR-0011: capture video once, after iterating
+against the fast layer-1 pose-stream math invariants — not as the iteration
+loop itself).
