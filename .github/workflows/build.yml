@@ -203,6 +203,23 @@ jobs:
       - name: Test
         run: task test
 
+      # The ADR-0011 layer-3 video capture harness's pure math (frame-timing,
+      # pose-trace analysis, quaternion/yaw — issue #120) has its own small
+      # Vitest suite under test/e2e/capture, kept separate from web/'s own
+      # `npm test` above because Vite's dev-server file-serving guard refuses
+      # to transform test files living outside a project's root (see
+      # test/e2e/capture/vitest.config.mjs's comment) — so it gets its own
+      # step here rather than folding into the "Test" step above. It reuses
+      # web/node_modules (already installed by the steps above) via the same
+      # symlink `task capture:record` uses, so no extra install step is
+      # needed; it is plain Node math with no browser/cluster involved, so it
+      # stays cheap (well under a second) even though it runs on every PR,
+      # unlike `task capture:record` itself (never run in CI — see that
+      # task's description).
+      - name: Capture harness pure-math tests (test/e2e/capture)
+        working-directory: test/e2e/capture
+        run: task test
+
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. npm audit's default
       # exit code already fails on any reported vulnerability.
@@ -330,6 +347,38 @@ jobs:
           echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
           kubectl cluster-info
           kubectl get nodes
+
+      # Container-behavior coverage for the published image's kubeconfig
+      # fallback (issue #113/PR #124). This is the one piece of that change no
+      # unit test can reach (internal/kube/client_test.go covers the decision
+      # function; this covers the real ko/Chainguard-static image's real
+      # non-root process). Reuses THIS job's already-provisioned kind cluster
+      # rather than spinning up a redundant one (ADR-0004) — it only needs a
+      # real, reachable kubeconfig, which the step above just verified. Runs
+      # before KWOK seeding so a regression here fails fast without paying for
+      # the seed step first.
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+
+      # Bare build (no frontend embed) is enough here — these checks only need
+      # the backend's kubeconfig-loading path, not real UI content. Same
+      # rationale as the Container scan (Trivy) job's local image build (see
+      # docs/agents/findings.md): the committed placeholder
+      # internal/server/dist/index.html lets `ko build --local` succeed without
+      # a frontend build.
+      - name: Build local container image (ko)
+        id: build-fallback-test-image
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: |
+          image="$(ko build --local ./cmd/htp-k8s)"
+          echo "Built image: ${image}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Container kubeconfig fallback (docker)
+        env:
+          IMAGE: ${{ steps.build-fallback-test-image.outputs.image }}
+        run: ./test/e2e/container-kubeconfig/run.sh
 
       # ADR-0004's "modest" tier: layer a KWOK controller plus a handful of fake
       # Nodes and ~30 fake Pods (varied phases) onto the single real kind node,
