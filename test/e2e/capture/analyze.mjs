@@ -1,34 +1,20 @@
 #!/usr/bin/env node
-// ADR-0011 layer-3 pose-trace analysis (issue #120).
+// ADR-0011 layer-3 pose-trace analysis CLI (issue #120). The actual math
+// lives in lib/analysis.mjs (pure, unit-testable); this is a thin
+// read-JSON / call / write-JSON wrapper.
 //
-// Methodology (matches the #118-iter2/iter3 capture's validated analysis):
-//  - yaw derived from the *rendered* camera quaternion: forward = quat *
-//    (0,0,-1) (three.js convention, scalar-last [x,y,z,w]) — see lib/quat.mjs
-//    for why this is deliberately independent of Demo Mode's internal
-//    pose-stream model.
-//  - "Strongest turns": raw trace downsampled to nearest-real-sample at a
-//    fixed ~178ms cadence (matching the #116 baseline capture's native
-//    average frame spacing, chosen so turn-strength numbers stay comparable
-//    across captures taken at different CDP screencast delivery rates), then
-//    simple per-sample finite difference of unwrapped yaw, with non-max
-//    suppression (>=1s apart) so one physical turn isn't reported as several
-//    downsampled points.
-//  - "Sustained yaw-rate saturation events": full-resolution raw per-sample
-//    finite difference, thresholded at 0.98*VIEW_YAW_MAX_RATE (1.47 rad/s,
-//    web/src/scene/demoMode.ts). Individual over-threshold samples within
-//    0.3s of each other are merged into one cluster/event — REQUIRED: at
-//    full resolution, per-sample capture/async-evaluate jitter otherwise
-//    fragments one visually-continuous pan into dozens of sub-frame blips.
-//
-// Validated against the #116 baseline capture's pose trace: run this on
-// /home/flo/Videos/htp-k8s-pr116-demo-flight-105/pose-samples.json and its
-// strongest_turns/saturation_clusters output reproduces the #118 harness's
-// prior analysis of the same file byte-for-byte (see the PR description for
-// #120 for the diff proving that).
+// Validated against the #118-iter3 baseline capture's pose trace: running
+// this on that capture's pose-samples.json reproduces its recorded
+// pose-analysis.json (strongest_turns/saturation_clusters, timestamps and
+// yaw rates to full float precision — see the #120 PR discussion). Also
+// spot-checked against the earlier #116 baseline's pose-samples.json (that
+// directory has no recorded pose-analysis.json to diff against, but the
+// output's turn timestamps land within ~0.1s of the maintainer's
+// independently-reported 7.6s/51.5s/54.6s turns for that clip).
 
 import fs from 'node:fs'
 import { parseArgs } from 'node:util'
-import { unwrap, yawFromQuaternion } from './lib/quat.mjs'
+import { analyzePoseTrace } from './lib/analysis.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -36,7 +22,15 @@ const { values: args } = parseArgs({
     label: { type: 'string' },
     out: { type: 'string' },
     cadence: { type: 'string', default: '0.178' },
-    threshold: { type: 'string', default: '1.47' },
+    // The saturation threshold is deliberately NOT a single hardcoded
+    // number: it's derived from Demo Mode's max yaw rate (VIEW_YAW_MAX_RATE,
+    // web/src/scene/demoMode.ts — currently 1.5 rad/s) times a "how close to
+    // the cap counts as saturated" fraction, so this tool doesn't silently
+    // go stale the next time that constant changes. This tool gates PRs
+    // that touch that exact constant — pass --max-yaw-rate to match it if
+    // it's moved since this default was last updated.
+    'max-yaw-rate': { type: 'string', default: '1.5' },
+    'saturation-fraction': { type: 'string', default: '0.98' },
     'gap-merge': { type: 'string', default: '0.3' },
     'top-n': { type: 'string', default: '15' },
   },
@@ -44,115 +38,23 @@ const { values: args } = parseArgs({
 
 if (!args['pose-samples']) {
   console.error(
-    'Usage: analyze.mjs --pose-samples <pose-samples.json> [--label <label>] [--out <pose-analysis.json>]',
+    'Usage: analyze.mjs --pose-samples <pose-samples.json> [--label <label>] [--out <pose-analysis.json>] ' +
+      '[--max-yaw-rate 1.5] [--saturation-fraction 0.98]',
   )
   process.exit(1)
 }
 
-function buildSeries(samples) {
-  const ts = samples.map((s) => s.elapsedMs / 1000)
-  const rawYaw = samples.map((s) => yawFromQuaternion(s.quat))
-  const yaw = unwrap(rawYaw)
-  return { ts, yaw }
-}
-
-function downsample(ts, yaw, cadence) {
-  const duration = ts[ts.length - 1]
-  const outT = []
-  const outY = []
-  let j = 0
-  const nSteps = Math.floor(duration / cadence) + 1
-  for (let k = 0; k <= nSteps; k++) {
-    const target = k * cadence
-    if (target > duration) break
-    while (j + 1 < ts.length && Math.abs(ts[j + 1] - target) <= Math.abs(ts[j] - target)) j++
-    if (outT.length === 0 || ts[j] !== outT[outT.length - 1]) {
-      outT.push(ts[j])
-      outY.push(yaw[j])
-    }
-  }
-  return { t: outT, y: outY }
-}
-
-function rates(ts, yaw) {
-  const out = []
-  for (let i = 1; i < ts.length; i++) {
-    const dt = ts[i] - ts[i - 1]
-    if (dt <= 0) continue
-    out.push([ts[i], (yaw[i] - yaw[i - 1]) / dt])
-  }
-  return out
-}
-
-/** Non-max suppression: strongest |rate| samples, no two within minGapS of each other. */
-function strongestTurns(ts, yaw, topN, minGapS) {
-  const allRates = rates(ts, yaw).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-  const picked = []
-  for (const [t, r] of allRates) {
-    if (picked.every(([pt]) => Math.abs(t - pt) >= minGapS)) {
-      picked.push([t, r])
-    }
-    if (picked.length >= topN) break
-  }
-  picked.sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-  return picked
-}
-
-function saturationClusters(rateSeries, threshold, gapMerge) {
-  const over = rateSeries.filter(([, r]) => Math.abs(r) >= threshold)
-  const clusters = []
-  let cur = []
-  for (const sample of over) {
-    if (cur.length > 0 && sample[0] - cur[cur.length - 1][0] > gapMerge) {
-      clusters.push(cur)
-      cur = []
-    }
-    cur.push(sample)
-  }
-  if (cur.length > 0) clusters.push(cur)
-  return clusters.map((c) => {
-    const ts = c.map(([t]) => t)
-    const peak = Math.max(...c.map(([, r]) => Math.abs(r)))
-    return {
-      start: round3(ts[0]),
-      end: round3(ts[ts.length - 1]),
-      duration: round3(ts[ts.length - 1] - ts[0]),
-      n: c.length,
-      peak,
-    }
-  })
-}
-
-function round3(n) {
-  return Math.round(n * 1000) / 1000
-}
-
 const samples = JSON.parse(fs.readFileSync(args['pose-samples'], 'utf8'))
-const { ts, yaw } = buildSeries(samples)
-const duration = ts[ts.length - 1]
+const threshold = Number(args['max-yaw-rate']) * Number(args['saturation-fraction'])
 
-const cadence = Number(args.cadence)
-const threshold = Number(args.threshold)
-const gapMerge = Number(args['gap-merge'])
-const topN = Number(args['top-n'])
-
-const { t: dt, y: dy } = downsample(ts, yaw, cadence)
-const turns = strongestTurns(dt, dy, topN, 1.0)
-
-const fullResRates = rates(ts, yaw)
-const clusters = saturationClusters(fullResRates, threshold, gapMerge)
-
-const result = {
-  label: args.label ?? args['pose-samples'],
+const result = analyzePoseTrace(samples, {
+  label: args.label,
   source: args['pose-samples'],
-  n_samples: samples.length,
-  duration_s: round3(duration),
-  avg_native_spacing_ms: Math.round(((1000 * duration) / (samples.length - 1)) * 100) / 100,
-  downsampled_n: dt.length,
-  strongest_turns: turns.map(([t, r]) => ({ t: round3(t), yaw_rate: r })),
-  saturation_clusters: clusters,
-  n_saturation_clusters: clusters.length,
-}
+  cadence: Number(args.cadence),
+  threshold,
+  gapMerge: Number(args['gap-merge']),
+  topN: Number(args['top-n']),
+})
 
 const json = JSON.stringify(result, null, 2)
 if (args.out) {

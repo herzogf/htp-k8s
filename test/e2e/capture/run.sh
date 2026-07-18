@@ -53,6 +53,19 @@ done
 BASE_URL="http://localhost:${PORT}"
 OUTPUT_WEBM="${OUT_DIR}/htp-k8s-demo-flight-seed${SEED}.webm"
 
+mkdir -p "${OUT_DIR}"
+
+# Isolated kubeconfig, scoped to this run (issue #120 review): `kind create
+# cluster` would otherwise rewrite the user's default kubeconfig
+# (~/.kube/config) and switch its current-context, and `kind delete cluster`
+# does NOT restore whatever context was active before — it just removes the
+# entry, leaving current-context unset. Pointing KUBECONFIG at a file inside
+# OUT_DIR instead means this tool never touches the developer's own
+# kubeconfig at all, and is safe to run alongside a cluster they already have
+# selected. kubectl, test/e2e/kwok/seed.sh, and the app binary (client-go's
+# default loading rules honor $KUBECONFIG) all inherit this via export.
+export KUBECONFIG="${OUT_DIR}/kubeconfig"
+
 # capture.mjs is the only script here that imports a package (@playwright/test,
 # for its CDP-capable Chromium launcher). Node's ESM resolver looks for
 # node_modules starting at the *importing file's own directory* and walking
@@ -66,74 +79,126 @@ CAPTURE_NODE_MODULES_LINK="${SCRIPT_DIR}/node_modules"
 
 log() { printf '\n=== [capture] %s\n' "$*"; }
 
-mkdir -p "${OUT_DIR}"
 log "Output directory: ${OUT_DIR}"
+log "Kubeconfig (isolated to this run): ${KUBECONFIG}"
+
+# Fail fast, BEFORE the ~2-minute build+cluster-create below, rather than
+# opaquely mid-capture (issue #120 review):
+#   - web/node_modules must exist for the symlink trick above to work at all.
+#   - CAPTURE_NODE_MODULES_LINK must not already exist as something other
+#     than a symlink we manage — `ln -sfn` silently nests the new symlink
+#     INSIDE a pre-existing real directory of that name instead of erroring,
+#     which would both fail to expose @playwright/test and leave the trap's
+#     `[ -L ... ]` cleanup guard unable to recognise (and thus not clean up)
+#     the mess.
+if [ ! -d "${REPO_ROOT}/web/node_modules" ]; then
+  echo "ERROR: ${REPO_ROOT}/web/node_modules not found — run 'npm ci' in web/ (or 'task web:install') first." >&2
+  exit 1
+fi
+if [ -e "${CAPTURE_NODE_MODULES_LINK}" ] && [ ! -L "${CAPTURE_NODE_MODULES_LINK}" ]; then
+  echo "ERROR: ${CAPTURE_NODE_MODULES_LINK} exists and is not a symlink this tool manages — remove it manually and re-run." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Cleanup discipline (issue #120: "this project has repeatedly leaked
 # clusters and app processes" — see docs/agents/findings.md, worktree &
-# resource cleanup). Runs on ANY exit (success, failure, or interrupt), is
-# idempotent, and VERIFIES rather than just attempts each teardown step, so a
-# silent failure here doesn't look like a clean exit.
+# resource cleanup). Each teardown step is its own idempotent, VERIFYING
+# function (not just "attempt and hope") — called explicitly once the
+# capture is safely on disk (so encode/analyze don't hold the app/cluster
+# alive for no reason) AND from the trap, so every exit path (normal,
+# early-failure, or an interrupt) reaches the same real verification.
 # ---------------------------------------------------------------------------
 APP_PID=""
 CLUSTER_CREATED=0
 
-cleanup() {
-  local status=$?
-  log "Cleanup: tearing down the app process and the kind cluster"
-
-  if [ -L "${CAPTURE_NODE_MODULES_LINK}" ]; then
-    rm -f "${CAPTURE_NODE_MODULES_LINK}"
+# stop_app: idempotent. Only clears APP_PID once the process is CONFIRMED
+# gone (kill -0 fails) — never on faith just because a kill signal was sent.
+# Escalates to SIGKILL if SIGTERM doesn't land within ~10s.
+stop_app() {
+  if [ -z "${APP_PID}" ]; then
+    return 0
   fi
-
-  if [ -n "${APP_PID}" ] && kill -0 "${APP_PID}" 2>/dev/null; then
+  if kill -0 "${APP_PID}" 2>/dev/null; then
     kill "${APP_PID}" 2>/dev/null || true
     for _ in $(seq 1 20); do
       kill -0 "${APP_PID}" 2>/dev/null || break
       sleep 0.5
     done
     if kill -0 "${APP_PID}" 2>/dev/null; then
-      echo "WARNING: app process ${APP_PID} did not exit; sending SIGKILL" >&2
+      echo "WARNING: app process ${APP_PID} did not exit on SIGTERM; sending SIGKILL" >&2
       kill -9 "${APP_PID}" 2>/dev/null || true
+      sleep 0.5
     fi
   fi
-  if [ -n "${APP_PID}" ] && kill -0 "${APP_PID}" 2>/dev/null; then
-    echo "ERROR: app process ${APP_PID} is still alive after cleanup" >&2
-  elif [ -n "${APP_PID}" ]; then
-    echo "Verified: app process ${APP_PID} is gone."
+  if kill -0 "${APP_PID}" 2>/dev/null; then
+    echo "ERROR: app process ${APP_PID} is still alive after cleanup — giving up" >&2
+    return 1
   fi
+  echo "Verified: app process ${APP_PID} is gone."
+  APP_PID=""
+  return 0
+}
 
-  if [ "${CLUSTER_CREATED}" -eq 1 ]; then
-    kind delete cluster --name "${CLUSTER_NAME}" || true
-    if kind get clusters 2>/dev/null | grep -qx "${CLUSTER_NAME}"; then
-      echo "ERROR: kind cluster ${CLUSTER_NAME} is still present after delete" >&2
-    else
-      echo "Verified: kind cluster ${CLUSTER_NAME} is gone."
-    fi
+# delete_cluster: idempotent. Only clears CLUSTER_CREATED once `kind get
+# clusters` confirms the cluster is actually gone.
+delete_cluster() {
+  if [ "${CLUSTER_CREATED}" -ne 1 ]; then
+    return 0
   fi
-
-  # The raw JPEG frame cache is the thing worth deleting on every path
-  # (success or failure) — it's 596-755 MB for a 2-minute capture and has no
-  # value once encode.mjs/stills.mjs have consumed it. Only delete it if
-  # those steps ran (i.e. we're past the capture step and not aborting a
-  # half-finished capture someone may want to inspect) — CAPTURE_DONE is set
-  # right before this trap would otherwise be the only cleanup a failed
-  # mid-capture run gets.
-  if [ "${FRAMES_CONSUMED:-0}" -eq 1 ] && [ -d "${OUT_DIR}/frames" ]; then
-    local reclaimed
-    reclaimed="$(du -sh "${OUT_DIR}/frames" 2>/dev/null | cut -f1)"
-    rm -rf "${OUT_DIR}/frames"
-    if [ -d "${OUT_DIR}/frames" ]; then
-      echo "ERROR: failed to delete ${OUT_DIR}/frames" >&2
-    else
-      echo "Verified: raw JPEG frame cache deleted (reclaimed ${reclaimed:-?})."
-    fi
+  kind delete cluster --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}" || true
+  if kind get clusters --kubeconfig "${KUBECONFIG}" 2>/dev/null | grep -qx "${CLUSTER_NAME}"; then
+    echo "ERROR: kind cluster ${CLUSTER_NAME} is still present after delete" >&2
+    return 1
   fi
+  echo "Verified: kind cluster ${CLUSTER_NAME} is gone."
+  CLUSTER_CREATED=0
+  return 0
+}
 
+# delete_frame_cache: idempotent, and — deliberately unlike an earlier
+# version of this script — unconditional. The raw JPEG frame cache (596-755
+# MB for a 2-minute capture) has no value once written; it must not survive
+# ANY exit path, success or failure (issue #120 review: a failure between
+# capture and the analysis steps must not leak it silently).
+delete_frame_cache() {
+  if [ ! -d "${OUT_DIR}/frames" ]; then
+    return 0
+  fi
+  local reclaimed
+  reclaimed="$(du -sh "${OUT_DIR}/frames" 2>/dev/null | cut -f1)"
+  rm -rf "${OUT_DIR}/frames"
+  if [ -d "${OUT_DIR}/frames" ]; then
+    echo "ERROR: failed to delete ${OUT_DIR}/frames (still present, ~${reclaimed:-unknown size})" >&2
+    return 1
+  fi
+  echo "Verified: raw JPEG frame cache deleted (reclaimed ${reclaimed:-an unknown amount})."
+  return 0
+}
+
+# remove_symlink: idempotent. Only ever removes something WE created (a
+# symlink at this exact path) — never a real directory, even one accidentally
+# left at this path by something else.
+remove_symlink() {
+  if [ -L "${CAPTURE_NODE_MODULES_LINK}" ]; then
+    rm -f "${CAPTURE_NODE_MODULES_LINK}"
+  fi
+}
+
+cleanup() {
+  local status=$?
+  log "Cleanup: tearing down the app process, the kind cluster, and the frame cache"
+  remove_symlink
+  stop_app || true
+  delete_cluster || true
+  delete_frame_cache || true
   exit "${status}"
 }
-trap cleanup EXIT
+# INT/TERM/HUP (not just EXIT) so a Ctrl-C or a killed parent process still
+# runs this — bash does not run EXIT-only traps on a signal that kills it
+# outright, which is exactly the kind of interrupt that has leaked clusters
+# from this project before.
+trap cleanup EXIT INT TERM HUP
 
 # ---------------------------------------------------------------------------
 # 1. Build the real single binary (ADR-0001) — the same `task build` docs/
@@ -147,7 +212,7 @@ log "Building the binary (task build)"
 #    docs/running-locally.md's dev recipe and the E2E CI job.
 # ---------------------------------------------------------------------------
 log "Creating kind cluster '${CLUSTER_NAME}'"
-kind create cluster --name "${CLUSTER_NAME}"
+kind create cluster --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG}"
 CLUSTER_CREATED=1
 kubectl cluster-info
 kubectl get nodes
@@ -192,23 +257,16 @@ node "${SCRIPT_DIR}/capture.mjs" \
   --base-url "${BASE_URL}" \
   --width "${WIDTH}" \
   --height "${HEIGHT}"
-rm -f "${CAPTURE_NODE_MODULES_LINK}"
+remove_symlink
 
 # App and cluster are no longer needed once the capture is on disk — stop
-# them now rather than waiting for the trap, so encode/analyze don't hold
-# them alive for no reason. The trap's cleanup is idempotent (kill -0/kind
-# get clusters guards), so this is safe to also run at exit.
+# them now (via the same verifying functions the trap uses, not a
+# duplicated/weaker check) rather than waiting for the trap, so encode/
+# analyze don't hold them alive for no reason. Both functions are idempotent,
+# so it's safe for the trap to also run them at final exit.
 log "Stopping the app and deleting the cluster (capture complete)"
-kill "${APP_PID}" 2>/dev/null || true
-wait "${APP_PID}" 2>/dev/null || true
-APP_PID=""
-kind delete cluster --name "${CLUSTER_NAME}" || true
-if kind get clusters 2>/dev/null | grep -qx "${CLUSTER_NAME}"; then
-  echo "ERROR: kind cluster ${CLUSTER_NAME} is still present after delete" >&2
-  exit 1
-fi
-CLUSTER_CREATED=0
-echo "Verified: app stopped and kind cluster deleted."
+stop_app
+delete_cluster
 
 # ---------------------------------------------------------------------------
 # 5. Encode (offline, non-realtime — see encode.mjs's doc comment on why
@@ -220,7 +278,8 @@ node "${SCRIPT_DIR}/encode.mjs" --out-dir "${OUT_DIR}" --output "${OUTPUT_WEBM}"
 # ---------------------------------------------------------------------------
 # 6. Analysis: pose-trace (strongest turns + yaw-rate saturation clusters),
 #    tower proximity, and labeled stills — the last of which must run BEFORE
-#    the frame cache is deleted below.
+#    the frame cache is deleted (the trap's delete_frame_cache, or the
+#    explicit call below on the success path).
 # ---------------------------------------------------------------------------
 log "Analyzing pose trace"
 node "${SCRIPT_DIR}/analyze.mjs" \
@@ -229,6 +288,10 @@ node "${SCRIPT_DIR}/analyze.mjs" \
   --out "${OUT_DIR}/pose-analysis.json"
 
 log "Analyzing tower proximity"
+# 2.5 here is deliberately looser than proximity.mjs's own 1.6 CLI default —
+# see that file's --near-threshold comment: this picks out more/broader
+# "flew near a tower" moments for stills.mjs's picker below, not just
+# genuinely tight squeezes.
 node "${SCRIPT_DIR}/proximity.mjs" \
   --pose-samples "${OUT_DIR}/pose-samples.json" \
   --towers "${OUT_DIR}/towers.json" \
@@ -240,11 +303,11 @@ node "${SCRIPT_DIR}/stills.mjs" \
   --out-dir "${OUT_DIR}" \
   --proximity "${OUT_DIR}/tower-proximity-analysis.json"
 
-# Frame cache is now fully consumed (encode + stills); the trap deletes it.
-FRAMES_CONSUMED=1
+delete_frame_cache
 
 log "Done."
-echo "Video:     ${OUTPUT_WEBM}"
-echo "Analysis:  ${OUT_DIR}/pose-analysis.json"
-echo "Proximity: ${OUT_DIR}/tower-proximity-analysis.json"
-echo "Stills:    ${OUT_DIR}/stills/ (manifest: ${OUT_DIR}/stills-manifest.json)"
+echo "Video:      ${OUTPUT_WEBM}"
+echo "Analysis:   ${OUT_DIR}/pose-analysis.json"
+echo "Proximity:  ${OUT_DIR}/tower-proximity-analysis.json"
+echo "Stills:     ${OUT_DIR}/stills/ (manifest: ${OUT_DIR}/stills-manifest.json)"
+echo "Kubeconfig: ${KUBECONFIG} (now stale — the cluster it pointed at is deleted)"

@@ -66,6 +66,18 @@ let stopping = false
 
 async function main() {
   const browser = await chromium.launch({ headless: true })
+  // Everything from here on can throw (bounded waits below, Demo Mode not
+  // active, ffmpeg/CDP errors) — always close the browser on the way out so
+  // a failed capture doesn't leave an orphaned headless Chromium process
+  // behind on top of whatever cluster/app cleanup the caller (run.sh) does.
+  try {
+    await captureFlight(browser)
+  } finally {
+    await browser.close().catch(() => {})
+  }
+}
+
+async function captureFlight(browser) {
   const context = await browser.newContext({
     viewport: { width: WIDTH, height: HEIGHT },
     deviceScaleFactor: 1,
@@ -79,7 +91,20 @@ async function main() {
 
   // Learn the real Tower layout from the /ws SceneState snapshot (same frame
   // web/e2e/demo-canyon-tour.spec.ts reads), for proximity.mjs/stills.mjs.
-  const sceneStateFrame = new Promise((resolve) => {
+  // Bounded like every other wait in this script (the __htpCameraTest wait
+  // below, healthz in run.sh): if the /ws snapshot never arrives, this must
+  // fail loudly rather than hang forever holding the caller's kind cluster
+  // and app process open.
+  const SCENE_STATE_TIMEOUT_MS = 30_000
+  const sceneStateFrame = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          `Timed out after ${SCENE_STATE_TIMEOUT_MS}ms waiting for the /ws SceneState snapshot ` +
+            `(no frame with a "towers" array arrived) — is the app connected to a reachable cluster?`,
+        ),
+      )
+    }, SCENE_STATE_TIMEOUT_MS)
     page.on('websocket', (ws) => {
       ws.on('framereceived', ({ payload }) => {
         if (typeof payload !== 'string') return
@@ -89,7 +114,10 @@ async function main() {
         } catch {
           return
         }
-        if (Array.isArray(frame.towers)) resolve(frame.towers)
+        if (Array.isArray(frame.towers)) {
+          clearTimeout(timer)
+          resolve(frame.towers)
+        }
       })
     })
   })
@@ -170,8 +198,6 @@ async function main() {
   // Let any in-flight evaluate()/writeFile() calls settle.
   await new Promise((resolve) => setTimeout(resolve, 1000))
   await Promise.allSettled(framePromises)
-
-  await browser.close()
 
   frameMeta.sort((a, b) => a.elapsedMs - b.elapsedMs)
   poseSamples.sort((a, b) => a.elapsedMs - b.elapsedMs)

@@ -190,10 +190,12 @@ can certify. `task capture:record` produces that capture:
 task capture:record
 ```
 
-This builds the binary, spins up its own throwaway kind+KWOK cluster (separate
-from any cluster you already have — it cleans up after itself and never
-touches your kubeconfig's current context beyond the duration of the run),
-starts the app with Demo Mode auto-flying on a fixed seed, and:
+This builds the binary and spins up its own throwaway kind+KWOK cluster under
+an **isolated kubeconfig** (`test/e2e/capture/out/<timestamp>/kubeconfig`, via
+`$KUBECONFIG`) — it never reads or writes your default `~/.kube/config` or
+touches its current-context at all, so it's safe to run alongside a cluster
+you already have selected. It then starts the app with Demo Mode auto-flying
+on a fixed seed, and:
 
 - **captures** a raw CDP `Page.startScreencast` screen recording (JPEG
   quality 100, native resolution, every frame) instead of Playwright's
@@ -230,14 +232,17 @@ starts the app with Demo Mode auto-flying on a fixed seed, and:
 
 Output lands under `test/e2e/capture/out/<timestamp>/` by default: the
 `.webm`, `pose-samples.json`, `pose-analysis.json`,
-`tower-proximity-analysis.json`, `stills/` (labeled JPEGs) plus
-`stills-manifest.json`, and `towers.json`. The raw JPEG frame cache
-(596-755 MB observed for a 2-minute capture) is deleted automatically once
-the encode and stills steps have consumed it — this project has repeatedly
-leaked kind clusters, app processes, and frame caches from ad-hoc capture
-scripts, so `test/e2e/capture/run.sh` verifies (not just attempts) that the
-app process is gone, the kind cluster is deleted, and the frame cache is
-reclaimed, on every exit path (success, failure, or interrupt).
+`tower-proximity-analysis.json`, `stills/` (labeled JPEGs), `stills-manifest.json`,
+`towers.json`, and the isolated `kubeconfig` mentioned above. The raw JPEG
+frame cache (596-755 MB observed for a 2-minute capture) is always deleted —
+unconditionally, on every exit path, not just the success path, since it has
+no value once written and this project has repeatedly leaked kind clusters,
+app processes, and frame caches from ad-hoc capture scripts.
+`test/e2e/capture/run.sh` runs its cleanup (app process, kind cluster, frame
+cache) from a trap on normal exit *and* on interrupt (Ctrl-C/SIGTERM/SIGHUP),
+and each step **verifies** its own result (checks the process/cluster is
+actually gone, not just that a kill/delete command was issued) before
+reporting success.
 
 Override the defaults with `HTP_K8S_CAPTURE_*` env vars (seed, duration,
 viewport, output directory, port, cluster name) — see the header comment in
@@ -247,15 +252,29 @@ viewport, output directory, port, cluster name) — see the header comment in
 HTP_K8S_CAPTURE_SEED=42 HTP_K8S_CAPTURE_DURATION_MS=60000 task capture:record
 ```
 
-The individual steps (`capture.mjs`, `encode.mjs`, `analyze.mjs`,
-`proximity.mjs`, `stills.mjs`) are also runnable standalone against an
-existing capture directory — useful for re-running just the analysis on a
-prior clip, e.g. to validate a change to the analysis math against a known
-result before trusting it on new footage:
+Every step except `capture.mjs` itself is runnable standalone with plain
+`node`, against an existing capture directory: `analyze.mjs`, `proximity.mjs`,
+and `stills.mjs` are pure-JSON, no cluster/app/browser/ffmpeg involved —
+useful for re-running just the analysis on a prior clip, e.g. to validate a
+change to the analysis math against a known result before trusting it on new
+footage:
 
 ```bash
 node test/e2e/capture/analyze.mjs --pose-samples path/to/pose-samples.json --label mylabel
 ```
+
+`encode.mjs` is also standalone-runnable (it needs only the Playwright-bundled
+ffmpeg, auto-detected from the Playwright browsers cache — override with
+`FFMPEG_PATH` if yours lives somewhere nonstandard):
+
+```bash
+node test/e2e/capture/encode.mjs --out-dir path/to/capture/dir --output out.webm
+```
+
+`capture.mjs` is the one exception: it imports `@playwright/test`, which only
+resolves via the `web/node_modules` symlink `run.sh` creates for the
+duration of the capture step (see that script's comments) — invoke it
+through `run.sh`/`task capture:record` rather than directly.
 
 This tool is **not** part of the automated test suite and is never run in
 CI — it is a manual step for whoever is preparing a feel-changing PR for

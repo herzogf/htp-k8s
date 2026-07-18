@@ -28,6 +28,12 @@ const { values: args } = parseArgs({
   options: {
     'pose-samples': { type: 'string' },
     towers: { type: 'string' },
+    // 1.6 is a tight default — close to TOWER_FOOTPRINT, i.e. "almost
+    // brushing the tower". run.sh deliberately passes a looser 2.5 instead,
+    // to pick out more/broader "flew near a tower" moments across a whole
+    // flight for stills.mjs's picker; this CLI default stays tight so a
+    // standalone `node proximity.mjs` run (no --near-threshold) reports only
+    // genuinely close passes.
     'near-threshold': { type: 'string', default: '1.6' },
     out: { type: 'string' },
   },

@@ -5,6 +5,11 @@
 // package's public `exports`), so this walks the browsers cache directory
 // it's known to unpack into instead. Overridable via FFMPEG_PATH for anyone
 // whose cache lives somewhere nonstandard.
+//
+// This tool (bash orchestration, `kind`/`kubectl` on PATH — see
+// docs/running-locally.md) is a Linux/macOS local-dev step; Windows isn't a
+// supported platform for it, so only those two are handled here rather than
+// guessing at an untested win32 branch.
 
 import fs from 'node:fs'
 import os from 'node:os'
@@ -15,14 +20,9 @@ function browsersPath() {
     return process.env.PLAYWRIGHT_BROWSERS_PATH
   }
   const home = os.homedir()
-  switch (process.platform) {
-    case 'darwin':
-      return path.join(home, 'Library', 'Caches', 'ms-playwright')
-    case 'win32':
-      return path.join(process.env.LOCALAPPDATA ?? home, 'ms-playwright')
-    default:
-      return path.join(home, '.cache', 'ms-playwright')
-  }
+  return process.platform === 'darwin'
+    ? path.join(home, 'Library', 'Caches', 'ms-playwright')
+    : path.join(home, '.cache', 'ms-playwright')
 }
 
 /** @returns {string} absolute path to the Playwright-bundled ffmpeg executable. */
@@ -31,10 +31,7 @@ export function resolveFfmpeg() {
     return process.env.FFMPEG_PATH
   }
   const root = browsersPath()
-  const executableName =
-    process.platform === 'win32'
-      ? 'ffmpeg.exe'
-      : `ffmpeg-${process.platform === 'darwin' ? 'mac' : 'linux'}`
+  const executableName = process.platform === 'darwin' ? 'ffmpeg-mac' : 'ffmpeg-linux'
   let entries
   try {
     entries = fs.readdirSync(root, { withFileTypes: true })
@@ -44,14 +41,17 @@ export function resolveFfmpeg() {
         `Run "npx playwright install" in web/ first, or set FFMPEG_PATH explicitly.`,
     )
   }
+  // Directory names are "ffmpeg-<revision>" with a purely numeric revision
+  // (e.g. "ffmpeg-1011") — sort numerically, not lexicographically
+  // (localeCompare would put "ffmpeg-999" ahead of "ffmpeg-1011").
   const ffmpegDir = entries
-    .filter((entry) => entry.isDirectory() && entry.name.startsWith('ffmpeg-'))
-    .sort((a, b) => b.name.localeCompare(a.name)) // newest revision first
+    .filter((entry) => entry.isDirectory() && /^ffmpeg-\d+$/.test(entry.name))
+    .sort((a, b) => Number(b.name.slice('ffmpeg-'.length)) - Number(a.name.slice('ffmpeg-'.length)))
     .at(0)
   if (!ffmpegDir) {
     throw new Error(
-      `No ffmpeg-* directory found under ${root}. Run "npx playwright install" in web/ ` +
-        `first, or set FFMPEG_PATH explicitly.`,
+      `No ffmpeg-<revision> directory found under ${root}. Run "npx playwright install" in ` +
+        `web/ first, or set FFMPEG_PATH explicitly.`,
     )
   }
   const candidate = path.join(root, ffmpegDir.name, executableName)

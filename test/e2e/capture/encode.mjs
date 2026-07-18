@@ -12,17 +12,18 @@
 // fast as the renderer paints and the ack loop allows, and that rate varies
 // run to run (observed 5.6fps-29fps on the same machine across the #116/#118
 // captures). Naively concatenating captured frames at a fixed output rate
-// would therefore produce a subtly WRONG-SPEED video. Instead, frame i is
-// held for output-frame ticks round(elapsedMs[i+1]/FRAME_MS) -
-// round(elapsedMs[i]/FRAME_MS) — the boundary-rounding (not
-// round(duration/FRAME_MS) applied per-frame) is what keeps rounding error
-// from accumulating across a multi-thousand-frame capture.
+// would therefore produce a subtly WRONG-SPEED video. Instead, the repeat
+// count for each frame is computed by lib/frameTiming.mjs's
+// computeFrameRepeats — pure, unit-tested math extracted so this property
+// (the single most important one this tool has to preserve) can be verified
+// by a permanent regression test rather than just a one-off check.
 
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { parseArgs } from 'node:util'
 import { resolveFfmpeg } from './lib/ffmpeg.mjs'
+import { computeFrameRepeats } from './lib/frameTiming.mjs'
 
 const { values: args } = parseArgs({
   options: {
@@ -41,27 +42,11 @@ const OUTPUT_WEBM = args.output
 const FFMPEG = process.env.FFMPEG_PATH ?? resolveFfmpeg()
 
 const FPS = 60
-const FRAME_MS = 1000 / FPS
 
 const frameMeta = JSON.parse(fs.readFileSync(path.join(OUT_DIR, 'frame-meta.json'), 'utf8'))
 frameMeta.sort((a, b) => a.elapsedMs - b.elapsedMs)
 
-// Cumulative-rounding repeat-count algorithm: frame i covers wall-clock time
-// [elapsedMs[i], elapsedMs[i+1]) (last frame gets one 1/FPS tick). Convert
-// each frame's boundary to the nearest output-frame index and take the
-// difference, so per-frame rounding error never accumulates across the clip
-// (exact total output-frame count == round(total duration / FRAME_MS)).
-let totalOutputFrames = 0
-const repeats = []
-for (let i = 0; i < frameMeta.length; i++) {
-  const startMs = frameMeta[i].elapsedMs
-  const endMs = i + 1 < frameMeta.length ? frameMeta[i + 1].elapsedMs : startMs + FRAME_MS
-  const startTick = Math.round(startMs / FRAME_MS)
-  const endTick = Math.round(endMs / FRAME_MS)
-  const n = Math.max(1, endTick - startTick)
-  repeats.push(n)
-  totalOutputFrames += n
-}
+const { repeats, totalOutputFrames } = computeFrameRepeats(frameMeta, FPS)
 
 const totalDurationSec = totalOutputFrames / FPS
 console.log(
