@@ -215,7 +215,7 @@ release:
     # then open http://localhost:8080
     ```
 
-    (`--user "$(id -u):$(id -g)"` lets the container read your kubeconfig — a standard `kind`/`kubectl`-written one is mode `0600`. Bash/zsh syntax; on Windows, drop the flag and see the README for the caveat.)
+    (`--user "$(id -u):$(id -g)"` lets the container read your kubeconfig — a standard `kind`/`kubectl`-written one is mode `0600`. Bash/zsh syntax; on Windows, drop the flag and see the README for the caveat. Run this from your normal shell, not as root — `$(id -u)` expands to `0` there, silently handing the container root instead of your uid.)
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.
