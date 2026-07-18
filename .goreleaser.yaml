@@ -146,11 +146,34 @@ release:
   # cluster on the same host, so it'd be noise for the likelier reader here
   # (unlike the README's Quickstart, which leads with a local kind cluster).
   #
+  # UNLIKE the README, this binds `-p 127.0.0.1:8080:8080` (loopback), not a
+  # bare `-p 8080:8080` (all interfaces). There's no auth layer anywhere in
+  # internal/server/ (defaultAddr in cmd/htp-k8s/main.go is a bare `:8080`),
+  # and the same command mounts the operator's kubeconfig read-only into the
+  # container — a bare `-p 8080:8080` hands anyone who can reach that port
+  # read access to the cluster under the operator's own credentials. This
+  # footer is the copy-paste surface for every release reader, so it gets the
+  # safer form even though the README (fixed separately, via #113) doesn't
+  # yet. Zero usability cost: the next line already says
+  # `http://localhost:8080`.
+  #
   # `--signer-workflow` on both `gh attestation verify` calls: `--repo` alone
   # only proves SOME workflow in this repo produced the attestation, not
   # specifically `release.yml` — the prose right below the commands claims the
   # latter, so the flag is there to make that claim actually true, not just
   # plausible.
+  #
+  # Verification is by TAG, which resolves at verify time — a pass proves "an
+  # artifact built by this repo's release.yml", not "the artifact THIS
+  # release described" (that would need the tag to be immutable, which it
+  # only is by convention). Narrow in practice (exploiting it needs GHCR
+  # `packages: write`, and only permits repointing to another legitimately
+  # attested htp-k8s build, i.e. a downgrade) and acceptable for an exact
+  # version tag — but worth one sentence pointing a reader who wants the
+  # stronger guarantee at the digest both commands print. Do NOT copy this
+  # tag-based pattern onto a moving tag (e.g. a future `major`/`major.minor`
+  # tag, issue #64) without a digest-pinning instruction — there, tag
+  # mutability is the norm, not a convention-backed exception.
   # NOTE the leading blank line: GoReleaser's body template joins the
   # changelog and this footer with exactly ONE newline (see
   # internal/pipe/release/body.go), so a footer starting directly with `---`
@@ -176,7 +199,7 @@ release:
     Run it:
 
     ```bash
-    docker run --rm -p 8080:8080 \
+    docker run --rm -p 127.0.0.1:8080:8080 \
       -e KUBECONFIG=/kube/config \
       -v "$HOME/.kube/config:/kube/config:ro" \
       ghcr.io/herzogf/htp-k8s:{{ .Tag }}
@@ -193,10 +216,10 @@ release:
     gh attestation verify oci://ghcr.io/herzogf/htp-k8s:{{ .Tag }} --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
 
     # adjust the filename to the platform you downloaded
-    gh attestation verify htp-k8s_{{ trimprefix .Tag "v" }}_linux_amd64.tar.gz --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
+    gh attestation verify htp-k8s_{{ .Version }}_linux_amd64.tar.gz --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
     ```
 
-    A passing check means the artifact was built by this repo's `release.yml` workflow and hasn't been tampered with since. More on the posture: [ADR-0005](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0005-supply-chain-security-posture.md).
+    A passing check means the artifact was built by this repo's `release.yml` workflow and hasn't been tampered with since. Both commands print the resolved digest — pin `@sha256:…` instead of the tag if you need that guarantee to hold even if this tag were ever repointed. More on the posture: [ADR-0005](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0005-supply-chain-security-posture.md).
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
