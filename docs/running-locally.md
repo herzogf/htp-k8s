@@ -97,8 +97,21 @@ Quick sanity check without a browser:
 
 ```bash
 curl -s http://localhost:8080/api/config                 # {"demoSeed":...,"demoAutostart":false}
-curl -s http://localhost:8080/api/towers/kwok-node-0     # tower detail, podCount 5
+curl -s http://localhost:8080/api/towers/kwok-node-0     # tower detail, podCount 7
 ```
+
+`podCount 7`, not 5, is correct: each fake node carries 5 of the 30 seeded pods
+*plus* the two DaemonSet pods a default kind cluster runs on every node
+(`kindnet`, `kube-proxy`). The fake nodes do carry a
+`kwok.x-k8s.io/node=fake:NoSchedule` taint to keep ordinary workloads off them,
+but both of those DaemonSets ship with a blanket `tolerations: [{operator:
+Exists}]`, so the taint doesn't exclude them. The detail endpoint then counts
+every pod bound to the Node in any Namespace (`countPodsOnNode` lists
+`NamespaceAll`), so they land in `podCount` — and the Namespace filter flags
+below don't change it.
+
+`5` is the *seeded*-pod count — 30 pods over 6 fake nodes — which is not what
+this endpoint reports.
 
 ## Controls
 
