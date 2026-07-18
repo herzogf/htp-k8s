@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   BANK_YAW_RATE_DEADBAND,
   CANYON_TRAVEL_SPEED,
+  CORNER_ARC_TARGET_CHORD,
+  CORNER_TURN_RADIUS,
   createDemoTour,
   DEMO_BANK_MAX,
   DEMO_ROLL_MAX_ACCEL,
@@ -10,6 +12,7 @@ import {
   demoIntroSpeedFactor,
   type DemoPose,
   type DemoTourState,
+  LOOKAT_AIM_FLOOR,
   sampleDemoIntro,
   sampleDemoTourPose,
   stepDemoTour,
@@ -19,7 +22,13 @@ import {
   VIEW_YAW_MAX_RATE,
 } from './demoMode'
 import { focusLookAngles, type Pose } from './focus'
-import { towerPlacements, type TowerPlacement } from './towerLayout'
+import {
+  TOWER_FOOTPRINT,
+  TOWER_HEIGHT,
+  TOWER_SPACING,
+  towerPlacements,
+  type TowerPlacement,
+} from './towerLayout'
 import { type Tower } from '../generated/scenestate'
 import { makeTower } from '../test-support/sceneFixtures'
 
@@ -38,16 +47,22 @@ import { makeTower } from '../test-support/sceneFixtures'
  *
  * Two kinds of bounds live here:
  *
- * - **Exact bounds** re-assert limits the implementation enforces by
- *   construction (roll rate ≤ DEMO_ROLL_MAX_RATE, roll acceleration ≤
- *   DEMO_ROLL_MAX_ACCEL, |roll| ≤ DEMO_BANK_MAX, view yaw rate ≤
- *   VIEW_YAW_MAX_RATE): these hold with only floating-point slack.
- * - **Calibrated bounds** (the ground-speed window, 3D acceleration, the
- *   activation speed factor, the view pitch margin for the aim-window
- *   clamp) are set with ~1.5x headroom above the maximum observed across all
- *   seeds/grids at the time of writing — far below what the pre-fix code
- *   produced — so they catch a regression to snappy behaviour without
- *   flaking on benign tuning.
+ * - **Exact (construction-guard) bounds** re-assert limits the implementation
+ *   enforces by construction (roll rate ≤ DEMO_ROLL_MAX_RATE, roll
+ *   acceleration ≤ DEMO_ROLL_MAX_ACCEL, |roll| ≤ DEMO_BANK_MAX, view yaw
+ *   rate ≤ VIEW_YAW_MAX_RATE, view yaw acceleration ≤ VIEW_YAW_MAX_ACCEL,
+ *   and — outside the aim-window-clamp frames, which are mechanically
+ *   identified per frame — the view pitch rate/acceleration caps): these
+ *   hold with only floating-point slack, and a violation means the
+ *   enforcement mechanism itself broke.
+ * - **Calibrated (tuning-guard) bounds** (the ground-speed window, 3D
+ *   acceleration, the activation speed factor, the roll sign-change rate,
+ *   the peak heading rate, the pan-saturation event budget, and the view
+ *   pitch slack *on* clamp frames) are set with stated headroom above the
+ *   maximum observed across all seeds/grids at the time of writing — and
+ *   below what the known-bad prior behaviour produced, which each bound's
+ *   comment records — so they catch a regression to the complained-about
+ *   behaviour without flaking on benign tuning.
  */
 
 /** A `cols` x `rows` grid of Towers, placed exactly as the real layout would. */
@@ -61,23 +76,71 @@ function grid(cols: number, rows: number): TowerPlacement[] {
   return towerPlacements(towers)
 }
 
+/** The exact 7-Tower KWOK demo scene the maintainer's layer-3 captures fly: a 3-wide grid filled 3+3+1 (backend `gridWidth` = ceil(sqrt(7))). */
+function kwok7(): TowerPlacement[] {
+  const slots: Array<[number, number]> = [
+    [0, 0],
+    [1, 0],
+    [2, 0],
+    [0, 1],
+    [1, 1],
+    [2, 1],
+    [0, 2],
+  ]
+  return towerPlacements(
+    slots.map(([col, row]) => makeTower({ name: `t-${col}-${row}`, grid: { col, row } })),
+  )
+}
+
 const DT = 1 / 60
 const TOUR_SECONDS = 90
 const SEEDS = [42424242, 1, 7, 13, 99]
 /**
- * The 5x5 reference grid plus a small 4x2 — close to the 7-Tower KWOK scene
- * the maintainer reviews on. `expectStraightCruise` marks grids whose lattice
- * has avenues long enough that the walk reliably flies a full settle-window
- * dead straight within the recorded tours: the 4x2's avenues are short and
- * its edge-pull bias keeps the walk weaving, so the wings-level property is
- * only *guaranteed exercised* on the larger grid (it still holds — vacuously
- * or not — on the small one).
+ * The 5x5 reference grid, a small 4x2, and (since #105 iteration 3) the
+ * exact 7-Tower KWOK scene the layer-3 video captures fly — the shape the
+ * maintainer actually judges, and the one where perimeter behaviour
+ * dominates (its lattice is 12 ring nodes to 4 interior ones).
+ *
+ * `expectStraightCruise` marks grids whose lattice has avenues long enough
+ * that the walk reliably flies a full settle-window dead straight within the
+ * recorded tours: the 4x2's and kwok7's avenues are short and their
+ * edge-pull bias keeps the walk weaving, so the wings-level property is only
+ * *guaranteed exercised* on the larger grid (it still holds — vacuously or
+ * not — on the small ones).
+ *
+ * `maxVoidFraction` / `minCanyonFraction` are the framing/dynamism bounds
+ * (#105 iteration 3) — see the "keeps the Towers on screen" and "stays in
+ * among the Towers" invariants for the metric definitions and calibration.
  */
-const GRIDS: Array<{ name: string; placements: TowerPlacement[]; expectStraightCruise: boolean }> =
-  [
-    { name: '5x5', placements: grid(5, 5), expectStraightCruise: true },
-    { name: '4x2', placements: grid(4, 2), expectStraightCruise: false },
-  ]
+const GRIDS: Array<{
+  name: string
+  placements: TowerPlacement[]
+  expectStraightCruise: boolean
+  maxVoidFraction: number
+  minCanyonFraction: number
+}> = [
+  {
+    name: '5x5',
+    placements: grid(5, 5),
+    expectStraightCruise: true,
+    maxVoidFraction: 0.27,
+    minCanyonFraction: 0.65,
+  },
+  {
+    name: '4x2',
+    placements: grid(4, 2),
+    expectStraightCruise: false,
+    maxVoidFraction: 0.4,
+    minCanyonFraction: 0.6,
+  },
+  {
+    name: 'kwok7',
+    placements: kwok7(),
+    expectStraightCruise: false,
+    maxVoidFraction: 0.4,
+    minCanyonFraction: 0.55,
+  },
+]
 
 const ENTRY: Pose = { position: [0, 5, 0], target: [0, 5, -1] }
 
@@ -112,6 +175,86 @@ function wrapAngle(d: number): number {
   return w
 }
 
+/** The nearest point of a Tower's bounding prism to `p` (the standard per-axis clamp). */
+function nearestTowerBoxPoint(
+  p: readonly [number, number, number],
+  t: TowerPlacement,
+): [number, number, number] {
+  const half = TOWER_FOOTPRINT / 2
+  return [
+    Math.min(Math.max(p[0], t.position[0] - half), t.position[0] + half),
+    Math.min(Math.max(p[1], 0), TOWER_HEIGHT),
+    Math.min(Math.max(p[2], t.position[2] - half), t.position[2] + half),
+  ]
+}
+
+/**
+ * The framing-metric cone half-angle: a Tower whose nearest point lies
+ * within this of the view axis counts as "on screen near frame centre"
+ * (the camera's vertical FOV is 50°, horizontal ≈ 79° at 16:9 — 35° is the
+ * central meat of the frame). Deliberately Tower-only: Floor-Lane glow is
+ * ignored, so absolute values overstate perceived darkness — the metric is
+ * for *relative* regression guarding, validated against the two real
+ * layer-3 captures where it reproduced the maintainer's differential
+ * black-frame report (pr116 capture 0.354 vs judged iter2 capture 0.592).
+ */
+const FRAMING_CONE_DEG = 35
+
+/** Whether any Tower sits within the framing cone of the pose's view axis, plus the distance to the nearest Tower prism. */
+function framing(
+  pose: DemoPose,
+  placements: readonly TowerPlacement[],
+): { framed: boolean; nearest: number } {
+  const [px, py, pz] = pose.position
+  const fx = pose.target[0] - px
+  const fy = pose.target[1] - py
+  const fz = pose.target[2] - pz
+  const fl = Math.hypot(fx, fy, fz)
+  let framed = false
+  let nearest = Infinity
+  for (const t of placements) {
+    const [cx, cy, cz] = nearestTowerBoxPoint(pose.position, t)
+    const dx = cx - px
+    const dy = cy - py
+    const dz = cz - pz
+    const d = Math.hypot(dx, dy, dz)
+    nearest = Math.min(nearest, d)
+    if (d < 1e-6) {
+      framed = true
+      continue
+    }
+    const cos = (dx * fx + dy * fy + dz * fz) / (d * fl)
+    const deg = (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI
+    if (deg <= FRAMING_CONE_DEG) {
+      framed = true
+    }
+  }
+  return { framed, nearest }
+}
+
+/**
+ * Whether sampleDemoTourPose's aim-window clamp (the rendered target's
+ * altitude pinned to the canyon floor / roofline bound) is engaged on any of
+ * the frames a finite-difference at index `i` reaches back over (`span` = 1
+ * for a rate, 2 for an acceleration). The clamp is the one mechanism that
+ * legitimately adds rendered pitch motion on top of the eased view triplet —
+ * identifying its frames mechanically lets the pitch invariants hold the
+ * *exact* follower caps everywhere else.
+ */
+function aimClampEngaged(pose: DemoPose): boolean {
+  const y = pose.target[1]
+  return y <= LOOKAT_AIM_FLOOR + 1e-6 || y >= TOWER_HEIGHT - 1e-6
+}
+
+function aimClampEngagedNear(poses: DemoPose[], i: number, span: number): boolean {
+  for (let j = Math.max(0, i - span); j <= i; j++) {
+    if (aimClampEngaged(poses[j])) {
+      return true
+    }
+  }
+  return false
+}
+
 /**
  * Marks each frame of a pose stream as "settled straight flight": the
  * horizontal travel heading's rate has stayed below the bank deadband for the
@@ -141,7 +284,7 @@ function straightFlightFrames(poses: DemoPose[]): boolean[] {
 
 describe.each(GRIDS)(
   'Demo Mode pose-stream smoothness on a $name grid',
-  ({ name, placements, expectStraightCruise }) => {
+  ({ name, placements, expectStraightCruise, maxVoidFraction, minCanyonFraction }) => {
     describe.each(SEEDS)('seed %i', (seed) => {
       const poses = recordedTour(name, seed, placements)
 
@@ -225,23 +368,31 @@ describe.each(GRIDS)(
 
       it('sweeps its aim smoothly: per-frame view yaw/pitch rates stay within the view rate caps (no aim snap)', () => {
         // The yaw bound is exact — the view triplet easing enforces it by
-        // construction. The pitch bound is the triplet's cap plus the
-        // aim-window clamp's worst contribution: the clamp (never above the
-        // roofline / below the canyon floor) pins the target's altitude while
-        // the camera itself climbs/descends, which re-derives the rendered
-        // pitch at up to verticalRate / horizontalReach =
-        // (MAX_CLIMB_GRADIENT x cruise) / LOOKAT_MIN_HORIZONTAL_DISTANCE
-        // ~ 0.42 x 4.4 / 4 ~ 0.47 rad/s on top of the eased triplet's own.
+        // construction. The pitch bound is exact too *except* on frames where
+        // the aim-window clamp is engaged (mechanically identifiable: the
+        // rendered target's altitude sits pinned at the clamp boundary —
+        // never above the roofline / below the canyon floor): there the clamp
+        // pins the target's altitude while the camera itself climbs/descends,
+        // re-deriving the rendered pitch at up to verticalRate /
+        // horizontalReach = (MAX_CLIMB_GRADIENT x cruise) /
+        // LOOKAT_MIN_HORIZONTAL_DISTANCE ~ 0.42 x 4.4 / 4 ~ 0.47 rad/s on
+        // top of the eased triplet's own — a derived mechanism ceiling, not
+        // a loosened blanket (the #116 review flagged the old
+        // clamp-slack-for-every-frame bound as weakly guarding).
         const MAX_YAW_RATE = VIEW_YAW_MAX_RATE + 1e-6
-        const MAX_PITCH_RATE = VIEW_PITCH_MAX_RATE + 0.47
+        const MAX_PITCH_RATE = VIEW_PITCH_MAX_RATE + 1e-6
+        const MAX_PITCH_RATE_CLAMPED = VIEW_PITCH_MAX_RATE + 0.47
         let previous = focusLookAngles(poses[0].position, poses[0].target)
         for (let i = 1; i < poses.length; i++) {
           const angles = focusLookAngles(poses[i].position, poses[i].target)
           expect(Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT).toBeLessThanOrEqual(
             MAX_YAW_RATE,
           )
+          const pitchBound = aimClampEngagedNear(poses, i, 1)
+            ? MAX_PITCH_RATE_CLAMPED
+            : MAX_PITCH_RATE
           expect(Math.abs(wrapAngle(angles.pitch - previous.pitch)) / DT).toBeLessThanOrEqual(
-            MAX_PITCH_RATE,
+            pitchBound,
           )
           previous = angles
         }
@@ -258,63 +409,233 @@ describe.each(GRIDS)(
         // construction, exactly as the roll invariants above do for the bank.
         //
         // The yaw bound is exact (the rendered yaw is the eased triplet's yaw
-        // verbatim). The pitch bound carries a calibrated slack on top of the
-        // follower's cap: sampleDemoTourPose's aim-window clamp (never above
-        // the roofline / below the canyon floor) pins the target's altitude
-        // while the camera itself climbs/descends, and the clamp's
-        // engagement/release re-keys the rendered pitch rate by up to
-        // ~verticalSpeed / horizontalReach in a frame — a rare, brief kink
-        // (observed ≤ ~9.6 rad/s² across all seeds/grids, ~a dozen frames
-        // per 450s of recorded flight) far below the pre-#105 rate-limiter
-        // snaps (up to 96 rad/s² of pitch), bounded here with ~1.5x headroom.
+        // verbatim). The pitch bound is exact except on aim-window-clamp
+        // frames (see the rate test above for the mechanism), which carry
+        // *two* bounds, one of each of this file's kinds:
+        //
+        // - a construction guard at the derived mechanism ceiling: the
+        //   clamp's engagement/release re-keys the rendered pitch rate by up
+        //   to verticalSpeed / minHorizontalReach ≈ 0.47 rad/s within ~a
+        //   frame ⇒ 0.47/DT ≈ 28 rad/s². Nothing the aim tuning does can
+        //   legitimately exceed this; crossing it means the clamp mechanism
+        //   itself changed.
+        // - a calibrated drift guard well below it: observed clamp-frame
+        //   values move with aim tuning (≤ 5.5 with iteration 2's weak
+        //   pull, ≤ 14.7 with iteration 3's strong roofline pull — the one
+        //   smoothness metric that rose this iteration, on a handful of
+        //   frames per tour), bounded at 18 (~1.25x observed) so a further
+        //   drift toward the ceiling fails loudly instead of hiding under
+        //   it — this is the dimension ("no abrupt jitters") the maintainer
+        //   praised in #116, so quiet growth here is not acceptable.
+        //
+        // The pre-#105 rate-limiter snaps (up to 96 rad/s² of pitch) sit far
+        // above both. The exception stays narrow via the clamp-share
+        // invariant below (clamp frames ≤ 15% of the tour), and the exact
+        // cap guards every ordinary frame (the #116 review flagged the old
+        // blanket 6x slack as weakly guarding).
         const MAX_YAW_ACCEL = VIEW_YAW_MAX_ACCEL + 1e-6
-        const MAX_PITCH_ACCEL = VIEW_PITCH_MAX_ACCEL + 12.5
+        const MAX_PITCH_ACCEL = VIEW_PITCH_MAX_ACCEL + 1e-6
+        const MAX_PITCH_ACCEL_CLAMPED_CEILING = 28
+        const MAX_PITCH_ACCEL_CLAMPED_DRIFT = 18
         let previous = focusLookAngles(poses[0].position, poses[0].target)
         let previousYawRate: number | null = null
         let previousPitchRate: number | null = null
+        let maxClampedPitchAccel = 0
         for (let i = 1; i < poses.length; i++) {
           const angles = focusLookAngles(poses[i].position, poses[i].target)
           const yawRate = wrapAngle(angles.yaw - previous.yaw) / DT
           const pitchRate = wrapAngle(angles.pitch - previous.pitch) / DT
           if (previousYawRate !== null && previousPitchRate !== null) {
             expect(Math.abs(yawRate - previousYawRate) / DT).toBeLessThanOrEqual(MAX_YAW_ACCEL)
-            expect(Math.abs(pitchRate - previousPitchRate) / DT).toBeLessThanOrEqual(
-              MAX_PITCH_ACCEL,
-            )
+            const pitchAccel = Math.abs(pitchRate - previousPitchRate) / DT
+            if (aimClampEngagedNear(poses, i, 2)) {
+              maxClampedPitchAccel = Math.max(maxClampedPitchAccel, pitchAccel)
+              expect(pitchAccel).toBeLessThanOrEqual(MAX_PITCH_ACCEL_CLAMPED_CEILING)
+            } else {
+              expect(pitchAccel).toBeLessThanOrEqual(MAX_PITCH_ACCEL)
+            }
           }
           previousYawRate = yawRate
           previousPitchRate = pitchRate
           previous = angles
         }
+        expect(maxClampedPitchAccel).toBeLessThanOrEqual(MAX_PITCH_ACCEL_CLAMPED_DRIFT)
       })
 
-      it('rarely saturates its pan rate: the aim demand stays continuous across waypoint boundaries (no per-waypoint head-turn rhythm)', () => {
-        // Calibrated bound on how often the rendered yaw runs pinned at its
-        // rate cap. Saturation means the demand outran the deliberate-pan
-        // limit — a head-snap demand. Pre-#105, the forward aim point was
-        // pinned at the arc table's end for ~40% of all frames and teleported
-        // a median ~3.9 world units at *every* segment rollover (the look-
-        // ahead distance exceeds one segment, and the table only spanned one
-        // future segment), so ~18% of all frames panned at the saturated
-        // constant rate — the "several route segments bolted together" feel.
-        // With the sliding window extended so the look-ahead always samples
-        // final-shape spline pieces (see SplineWindow), the demand is
-        // continuous by construction and the only saturation left is a
-        // handful of genuinely sharp 90° corner pans per tour (observed:
-        // 1-6 events of ≤ 0.9s each per 90s tour, per-seed fraction
-        // ≤ ~3.2%, vs ~65 rollovers — an occasional steady head-turn, not a
-        // per-waypoint rhythm; bounded with headroom).
-        const MAX_SATURATION_FRACTION = 0.05
+      it('keeps the aim-window-clamp exception narrow: clamp-engaged frames stay a small share of the tour', () => {
+        // The pitch invariants above hold the exact follower caps on every
+        // frame *except* mechanically identified aim-window-clamp frames.
+        // That exception is only honest while it stays rare: without this
+        // bound, a future change that parks the aim on the clamp (e.g. an
+        // altitude program living at the roofline) would silently move most
+        // frames onto the looser clamp-frame bounds with nothing failing.
+        // Observed across all seeds/grids: 3.8-7.8% of frames engaged.
+        // Calibrated bound: 15% (~2x the observed worst).
+        const MAX_CLAMP_FRACTION = 0.15
+        const engaged = poses.filter(aimClampEngaged).length
+        expect(engaged / poses.length).toBeLessThanOrEqual(MAX_CLAMP_FRACTION)
+      })
+
+      it('pans deliberately: rate-cap saturation only as sustained corner sweeps, never a per-waypoint head-turn rhythm', () => {
+        // Calibrated bounds on the rendered yaw running pinned at its rate
+        // cap. Since corner rounding (#105 iteration 2) a genuine corner is
+        // a wide arc the aim sweeps through — steadily, at up to the
+        // deliberate-pan cap for the corner's duration — so *some* saturated
+        // panning is by design and the raw fraction alone no longer
+        // discriminates good from bad. What distinguishes the two known-bad
+        // regimes is the *event structure*:
+        //
+        // - the pre-#105 demand-pinning bug produced a saturation burst at
+        //   nearly every waypoint boundary (~65 rollovers/90s, ~18% of all
+        //   frames) — an event *count* far above the corner count;
+        // - a corner-geometry regression (pivot corners) would push the
+        //   sustained-pan share back up (pre-rounding: brief rate-capped
+        //   pans at every 90° corner).
+        //
+        // Observed with iteration 3's stronger tower pull (the aim actively
+        // pans between Towers): worst single seed 17 events per 90s tour,
+        // each ≤ 2.4s, worst fraction 0.14. Bounds:
+        //
+        // - events ≤ 24: ~1.4x the observed worst, still far below the
+        //   40-65 of a per-waypoint rhythm — the sharper discriminator;
+        // - fraction ≤ 16%: only ~1.14x the observed worst, *below* this
+        //   file's usual 1.25-1.5x headroom convention — deliberately, and
+        //   documented rather than hidden: the bound is pinned from above
+        //   by the ~18% the pre-#105 pinning bug produced (a looser bound
+        //   would no longer exclude the known-bad regime). The suite's
+        //   seeds are fixed, so this cannot flake; a benign-looking tuning
+        //   change that trips it has genuinely eaten most of the distance
+        //   to known-bad and deserves the look;
+        // - ≤ 3.5s per event (sustained sweeps stay corner-scale).
+        const MAX_SATURATION_FRACTION = 0.16
+        const MAX_SATURATION_EVENTS = 24
+        const MAX_SATURATION_RUN_SECONDS = 3.5
         let saturated = 0
+        let events = 0
+        let run = 0
+        let maxRun = 0
         let previous = focusLookAngles(poses[0].position, poses[0].target)
         for (let i = 1; i < poses.length; i++) {
           const angles = focusLookAngles(poses[i].position, poses[i].target)
           if (Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT > VIEW_YAW_MAX_RATE * 0.98) {
             saturated++
+            run++
+            if (run === 1) events++
+            maxRun = Math.max(maxRun, run)
+          } else {
+            run = 0
           }
           previous = angles
         }
         expect(saturated / (poses.length - 1)).toBeLessThanOrEqual(MAX_SATURATION_FRACTION)
+        expect(events).toBeLessThanOrEqual(MAX_SATURATION_EVENTS)
+        expect(maxRun * DT).toBeLessThanOrEqual(MAX_SATURATION_RUN_SECONDS)
+      })
+
+      it('holds a steady horizon: the rendered roll crosses sides at most a few times a minute (finding A of the #116 review)', () => {
+        // The direct measure of the maintainer's "horizon flip-flops" report:
+        // how often the rendered bank swings from one side to the other
+        // (hysteresis at ±0.03 rad ≈ ±1.7°, so dithering around level does
+        // not count). Pre-iteration-2 the point-pivot corners plus the bank
+        // target tracking the raw instantaneous heading rate produced
+        // 16.7-25.3 side changes per minute across these seeds/grids — a
+        // horizon rocking every 2-4 seconds. With corner rounding
+        // (CORNER_TURN_RADIUS) and the smoothed bank driver
+        // (BANK_YAW_RATE_SMOOTHING), observed ≤ 12/min (4x2 grids ≤ 6/min).
+        // Calibrated bound: 16/min — below every pre-fix observation, ~1.3x
+        // above the worst current one.
+        const HYSTERESIS = 0.03
+        const MAX_SIGN_CHANGES_PER_MINUTE = 16
+        let changes = 0
+        let lastSide = 0
+        for (const pose of poses) {
+          const side = pose.roll > HYSTERESIS ? 1 : pose.roll < -HYSTERESIS ? -1 : 0
+          if (side !== 0) {
+            if (lastSide !== 0 && side !== lastSide) changes++
+            lastSide = side
+          }
+        }
+        expect(changes / (TOUR_SECONDS / 60)).toBeLessThanOrEqual(MAX_SIGN_CHANGES_PER_MINUTE)
+      })
+
+      it('never cusps: the per-frame heading rate stays at flyable-corner scale (the spin/cusp guard)', () => {
+        // At constant ground speed, heading rate *is* curvature. Iteration 2
+        // bounded this at 5.5 rad/s on the theory that tight corners read as
+        // a drone pivot — a premise the maintainer's layer-3 verdict
+        // *falsified*: the merged pivot-tight corners (6.1-9.1 rad/s) are
+        // the "rapid zip" he wants, and what actually made them read badly
+        // was the rocking horizon and the whipping aim, both guarded
+        // elsewhere (the roll side-change invariant; the view-follower
+        // caps). Iteration 3 therefore re-tightened CORNER_TURN_RADIUS to a
+        // quarter spacing (peak ≈ 7.6 rad/s — deliberately at the merged
+        // build's corner pace) and this bound now guards what heading rate
+        // is genuinely pathological: spline cusps and near-spins, the
+        // failure mode found repeatedly during corner-rounding development
+        // (~100-186 rad/s, with visible ground-speed dips; the pre-existing
+        // 2-Tower cusp of #119 measures ~176-188). Calibrated: observed
+        // peak ≤ 7.62 across all seeds/grids, bounded at 9.5 (~1.25x) —
+        // far below any cusp.
+        const MAX_HEADING_RATE = 9.5
+        expect(CANYON_TRAVEL_SPEED / CORNER_TURN_RADIUS).toBeLessThan(MAX_HEADING_RATE)
+        // The geometry-degeneration cliff sits exactly where the turn radius
+        // meets the arc-sampling chord target (a radius-r arc can't be
+        // sampled at chords ≥ ~r without collapsing to near-tangent points;
+        // measured: at CORNER_TURN_RADIUS = CORNER_ARC_TARGET_CHORD the
+        // spline wiggle returns and the horizon side-change rate triples).
+        // Nothing else couples the two constants, so pin the ordering here —
+        // a future chord tweak must not silently walk the geometry off the
+        // cliff.
+        expect(CORNER_TURN_RADIUS).toBeGreaterThan(CORNER_ARC_TARGET_CHORD)
+        let previousHeading: number | null = null
+        for (let i = 1; i < poses.length; i++) {
+          const dx = poses[i].position[0] - poses[i - 1].position[0]
+          const dz = poses[i].position[2] - poses[i - 1].position[2]
+          const heading = Math.atan2(dx, dz)
+          if (previousHeading !== null) {
+            expect(Math.abs(wrapAngle(heading - previousHeading)) / DT).toBeLessThanOrEqual(
+              MAX_HEADING_RATE,
+            )
+          }
+          previousHeading = heading
+        }
+      })
+
+      it('keeps the Towers on screen: the tour is not mostly black frames (the framing guard — finding "black frames" of the iteration-2 video verdict)', () => {
+        // The metric iteration 2 regressed *without any invariant noticing*:
+        // every existing bound measured smoothness, none measured whether
+        // anything was in frame. Void fraction = share of frames with no
+        // Tower inside the FRAMING_CONE_DEG cone of the view axis (see
+        // framing()'s doc comment for the definition's deliberate limits and
+        // its validation against the real captures). Calibrated per grid:
+        // the iteration-3 aim/ring retune measures 0.15-0.32 across all
+        // seeds/grids, `main` measures 0.29-0.34 per seed on 5x5 and
+        // 0.42-0.51 on kwok7/4x2 — each bound sits above the current
+        // observations with ~1.25x headroom and *below main's weakest
+        // (best-framed) seed on its grid* (5x5: bound 0.27 vs main's best
+        // 0.29), so a regression back to main-grade framing fails on every
+        // seed, not merely on average.
+        let voidFrames = 0
+        for (const pose of poses) {
+          if (!framing(pose, placements).framed) voidFrames++
+        }
+        expect(voidFrames / poses.length).toBeLessThanOrEqual(maxVoidFraction)
+      })
+
+      it('stays in among the Towers: a healthy share of the tour is genuine canyon flying (the zip guard — finding "dynamism" of the iteration-2 video verdict)', () => {
+        // Time-in-canyon = share of frames below the roofline within 1.25
+        // Tower spacings of the nearest Tower prism — the "zip through the
+        // urban canyons" sensation, mechanically. Calibrated per grid: the
+        // iteration-3 ring/aim retune measures 0.70-0.84 across all
+        // seeds/grids where `main` measures ~0.40 (kwok7) / ~0.55 (5x5) /
+        // ~0.41 (4x2) — the bounds sit below current observations with
+        // headroom but *above* main's level, so sliding back to a
+        // perimeter-heavy, distant tour fails here.
+        let canyonFrames = 0
+        for (const pose of poses) {
+          const f = framing(pose, placements)
+          if (pose.position[1] < TOWER_HEIGHT && f.nearest <= 1.25 * TOWER_SPACING) canyonFrames++
+        }
+        expect(canyonFrames / poses.length).toBeGreaterThanOrEqual(minCanyonFraction)
       })
     })
 

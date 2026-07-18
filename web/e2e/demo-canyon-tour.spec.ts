@@ -62,7 +62,7 @@ interface TowerFrame {
 // moments and sanity-bound the flight, never to duplicate production logic.
 const TOWER_SPACING = 4
 const TOWER_HEIGHT = 6
-const PERIMETER_OFFSET = TOWER_SPACING * 1.5
+const PERIMETER_OFFSET = TOWER_SPACING * 1.1
 const CANYON_ALTITUDE_MAX = TOWER_HEIGHT * 0.75
 // Lowered by #91's climb-rate tuning pass (was `TOWER_HEIGHT * 1.5`) — see
 // OVERVIEW_ALTITUDE_MIN's doc comment in demoMode.ts.

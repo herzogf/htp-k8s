@@ -51,8 +51,20 @@ export const DEMO_TRANSITION_SECONDS = FOCUS_DURATION_SECONDS
  * DEMO_BANK_MAX caps how far Demo Mode ever banks the camera: a clearly
  * visible tilt into its turns, without ever rolling past a natural-looking
  * angle.
+ *
+ * Lowered from π/6 (30°) by #105 iteration 2: the maintainer's video review
+ * of the first pass flagged the heavy left/right lean as a likely
+ * motion-sickness contributor. 20° is a light aircraft's gentle cruise
+ * turn — still an unmistakable lean into every corner, no longer a
+ * steep-turn wing-drop. The lean is a *cinematic cue*, not flight physics:
+ * per ADR-0003 this is a cinematic viewer, and #105 iteration 3 explicitly
+ * decoupled the bank cap from any bank-coordination constraint on the turn
+ * radius (see {@link CORNER_TURN_RADIUS} — corners turn far faster than a
+ * 20° bank could coordinate, deliberately). What keeps the lean comfortable
+ * is this cap plus the horizon-stability machinery (the roll follower and
+ * {@link BANK_YAW_RATE_SMOOTHING}), not wide corners.
  */
-export const DEMO_BANK_MAX = Math.PI / 6
+export const DEMO_BANK_MAX = Math.PI / 9
 
 // ---------------------------------------------------------------------------
 // Tuning constants (#91). All of these are deliberately named/exported rather
@@ -66,9 +78,18 @@ export const DEMO_BANK_MAX = Math.PI / 6
  * perimeter ring canyon sits (world units). Too small reads as *einengend*
  * (cramped, clipping the outer Towers on every perimeter pass); too large
  * drifts back toward the old "orbiting wide in empty space" feel. Explicitly
- * flagged in #91 as needing visual tuning.
+ * flagged in #91 as needing visual tuning — and tuned down 1.5 → 1.1 by #105
+ * iteration 3: on a small cluster the ring is *most* of the Canyon graph (a
+ * 7-Tower scene's lattice is 12 ring nodes to 4 interior ones), so the ring
+ * distance dominates how close the tour flies to anything. At 1.1 spacings
+ * the ring passes 3.6 units from the outer Tower faces — comfortably wider
+ * than an interior canyon's 1.2, nowhere near cramped, but close enough
+ * that Towers fill the frame on ring legs instead of receding into the
+ * dark. Measured (layer-1 framing metrics, 5 seeds x 3 grids): median
+ * distance to the nearest Tower 5.15 → 3.44 on the 7-Tower scene, and the
+ * time-in-canyon share roughly doubles.
  */
-export const PERIMETER_OFFSET = TOWER_SPACING * 1.5
+export const PERIMETER_OFFSET = TOWER_SPACING * 1.1
 
 /**
  * World-space Y of a Tower's roofline (its prism top) — `TOWER_HEIGHT`, since
@@ -344,10 +365,29 @@ const VIEW_RESPONSE_TIME = 0.4
  * than snaps. One uniform rule covers canyon, flat-overview, and steep-
  * transition alike: whichever regime, the question is always "is the forward
  * point actually near a Tower or not".
+ *
+ * Retuned by #105 iteration 3 against the layer-1 *framing* metrics (the
+ * maintainer's "black frames" report, measured as the share of frames with
+ * no Tower within 35° of frame centre): the old calibration — NEAR 0.6 /
+ * FAR 3.0 Tower spacings (2.4 / 12 world units), max 0.6 — treated a
+ * perimeter-ring forward point — ~3.6 world units from the outer Tower
+ * faces — as barely deficient (pull ≈ 0.1), so on ring legs and ring turns
+ * the aim tracked the empty path ahead while the Towers slid to the frame
+ * edge: roughly *half* of a tour's frames on the 7-Tower demo scene were
+ * Tower-less by the framing metric, on `main` and iteration 2 alike. The
+ * new, tighter window — NEAR 0.35 / FAR 1.125 spacings (1.4 / 4.5 world
+ * units) — spans "clearly inside a canyon" (an interior canyon's forward
+ * point sits at ~1.2 world units of clearance, still pulled ≈ 0) to "fully
+ * deficient" (reached just past the ring distance), with a stronger cap
+ * (0.85) so a deficient aim really centres a Tower rather than splitting
+ * the difference. Measured across
+ * 5 seeds x 3 grids: Tower-less frames 0.47 → 0.28 (7-Tower scene),
+ * 0.31 → 0.19 (5x5), 0.48 → 0.29 (4x2), with the roll pipeline untouched
+ * and pan-rate saturation still far below the per-waypoint-rhythm regime.
  */
-export const LOOKAT_TOWER_PULL_MAX = 0.6
-const LOOKAT_NEAR_CLEARANCE = TOWER_SPACING * 0.6
-const LOOKAT_FAR_CLEARANCE = TOWER_SPACING * 3
+export const LOOKAT_TOWER_PULL_MAX = 0.85
+const LOOKAT_NEAR_CLEARANCE = TOWER_SPACING * 0.35
+const LOOKAT_FAR_CLEARANCE = TOWER_SPACING * 1.125
 const LOOKAT_BLEND_RATE = 0.8
 
 /**
@@ -430,6 +470,90 @@ export const LOOKAT_AIM_FLOOR = TOWER_HEIGHT * 0.1
 const CATMULL_ROM_TYPE = 'centripetal'
 
 /**
+ * CORNER_TURN_RADIUS (#105 iteration 2 — the route-geometry change ADR-0010
+ * deferred from the first pass): how far before and after a lattice corner
+ * the spline's control points sit, so the flight rounds every turn as a wide
+ * arc instead of pivoting on the corner node.
+ *
+ * Measured on the pre-fix route, a 90° lattice corner turned the heading at a
+ * peak of 6-9 rad/s (implied turn radius 0.5-0.7 world units at the constant
+ * {@link CANYON_TRAVEL_SPEED} — an eighth of a Tower spacing): a helicopter
+ * pivot, not a flown turn, and the direct source of both maintainer findings
+ * of the #116 video review — the saturated-bank rocking (the bank target
+ * `DEMO_BANK_GAIN × yawRate` is pinned at its clamp through every corner) and
+ * the horizon flip-flop (the centripetal Catmull-Rom *counter-flexes* around
+ * a sharp corner, so the heading rate — and with it the bank target's sign —
+ * flipped 1-3 times per corner, rocking the horizon even through an isolated
+ * turn).
+ *
+ * How wide, exactly, went through two calibrations. Iteration 2 chose the
+ * widest arc the lattice affords (0.45 spacings — just under half the
+ * shortest canyon leg), reasoning from bank coordination (`tan φ = v²/(g·r)`)
+ * that wider is better; the maintainer's layer-3 verdict falsified that
+ * premise: the long outer-edge turns "cost us dynamism … takes away this
+ * rapid zip-through the urban canyons feeling". Coordination is the
+ * constraint a cinematic viewer (ADR-0003) cares least about — the *aim*
+ * never whipping (the #116 view followers) is what keeps a fast corner
+ * comfortable, not the path being gentle. Iteration 3 therefore takes most
+ * of the radius back: at a quarter spacing a 90° corner is carved in ~0.36s
+ * with a peak heading rate ≈ that of the merged pivots (~7.6 vs ~6.4-8.4
+ * rad/s, 5 seeds x 3 grids) — the zip — while keeping everything the arcs
+ * bought over pivots: single-signed heading through a corner (no
+ * counter-flexure, so the horizon side-change rate stays ~9-11/min vs the
+ * pivots' ~20-23), a bank capped at {@link DEMO_BANK_MAX}, and no
+ * ground-speed dips. Below ~a fifth of a spacing the geometry degenerates
+ * (measured: at 0.2 spacings the spline wiggle returns and the horizon
+ * side-change rate triples back to pivot levels) — this value sits above
+ * that cliff with margin. The hard never-collide guarantee for any turn
+ * angle or leg length is {@link CORNER_MAX_LEG_FRACTION}'s.
+ */
+export const CORNER_TURN_RADIUS = TOWER_SPACING * 0.25
+
+/**
+ * The hard cap on how far along either adjacent leg a corner's tangent
+ * offset may reach: just under half, so two corners rounding a shared leg
+ * always leave a nonzero straight remnant between their control points
+ * (0.49, not 0.5 — offsets meeting exactly at a leg's midpoint would place
+ * coincident control points, which degenerate a Catmull-Rom tangent). This —
+ * not the design radius {@link CORNER_TURN_RADIUS} — is the guard that
+ * *enforces* no-collision; the design radius merely stays inside it for the
+ * standard lattice geometry.
+ */
+const CORNER_MAX_LEG_FRACTION = 0.49
+
+/**
+ * Below this arc radius a corner is not meaningfully roundable and keeps its
+ * sharp node instead (the pre-rounding pivot behaviour): the leg-fraction
+ * clamp shrinks the inscribed radius, and an "arc" this small collapses
+ * into near-coincident control points beside full-length legs — the
+ * tiny-chord regime that produces spline cusps (see
+ * {@link CORNER_ARC_TARGET_CHORD}'s history). Being a *radius* floor (not an
+ * angle cutoff — deliberately, so sharp-but-roundable turns on long legs
+ * still get their arc), it catches every route that degenerates the radius:
+ * near-hairpin turns (tan(θ/2) → ∞ — dead-end backtracks on 1×N clusters,
+ * pathological activation angles), but also ordinary-angle corners whose
+ * adjacent leg is very short — a 90° corner needs a leg of at least
+ * `CORNER_MIN_TURN_RADIUS / CORNER_MAX_LEG_FRACTION` ≈ 0.51 world units to
+ * clear the floor, while a takeoff leg is only gated at
+ * {@link TAKEOFF_MIN_DISTANCE} (0.5). In practice that short-leg case has
+ * not been observed to fire (the walk's approach-alignment filter keeps
+ * ordinary entry corners at ≤ 90° and lattice legs are ≥ one
+ * {@link TOWER_SPACING}), but it is covered by design, not by accident.
+ */
+const CORNER_MIN_TURN_RADIUS = CORNER_TURN_RADIUS / 4
+
+/**
+ * Below this turn angle (~1°) a "corner" is treated as straight-through and
+ * keeps its node: it is visually straight (an open Catmull-Rom absorbs a
+ * sub-degree kink smoothly on its own), and its inscribed arc would collapse
+ * to near-coincident control points beside full-length legs — the same
+ * degenerate-chord regime {@link CORNER_MIN_TURN_RADIUS} guards at the
+ * hairpin end. Lattice corners are exactly 90°; only a takeoff corner from
+ * an almost-perfectly-aligned activation pose can land under this.
+ */
+const CORNER_MIN_TURN_ANGLE = 0.02
+
+/**
  * Scales the path's turn rate (rad/s of heading change) into a *target* bank
  * angle (shared by the Canyon tour and the orbit fallback). Tuned so the
  * gentle weave produces a clearly visible, but not extreme, bank.
@@ -475,6 +599,22 @@ const DEMO_BANK_GAIN = 1.4
 export const DEMO_ROLL_MAX_RATE = 0.7
 export const DEMO_ROLL_MAX_ACCEL = 2.0
 export const BANK_YAW_RATE_DEADBAND = 0.06
+
+/**
+ * The time constant (seconds) of the exponential moving average the bank
+ * target's yaw-rate input runs through (#105 iteration 2 — finding A of the
+ * #116 video review, "the horizon flip-flops"). The finite-differenced
+ * heading rate carries brief opposite-sign wiggles where the spline
+ * transitions between a straight and a corner arc (small even after corner
+ * rounding — but {@link DEMO_BANK_GAIN} amplifies a 0.2 rad/s wiggle into a
+ * ~10° opposite bank demand, and {@link BANK_YAW_RATE_DEADBAND} only
+ * suppresses wiggles near *zero* heading rate, not sign changes after a real
+ * corner). Smoothing the rate over a quarter second erases sub-corner-scale
+ * sign flips while a genuine corner (~0.4-1s of sustained single-signed
+ * turn) still drives an essentially full bank demand — measured, it roughly
+ * halves the bank-target sign-change rate at unchanged corner banking.
+ */
+export const BANK_YAW_RATE_SMOOTHING = 0.25
 const ROLL_RESPONSE_TIME = 0.4
 const ROLL_TARGET_MAX = DEMO_BANK_MAX - 0.035
 /**
@@ -530,6 +670,16 @@ const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
   maxRate: VIEW_DISTANCE_MAX_RATE,
   maxAccel: VIEW_DISTANCE_MAX_ACCEL,
   responseTime: VIEW_RESPONSE_TIME,
+  // A hard floor on the rendered view distance (#117): the non-overshoot
+  // condition (`maxAccel × responseTime > maxRate`) only holds against a
+  // *static* target — chasing a moving demand, a second-order follower can
+  // overshoot, and a view distance that ever reached ≤ 0 would flip the
+  // reconstructed aim by π (`horizontalReach = cos(pitch) × distance` in
+  // sampleDemoTourPose changes sign). The demand itself is never below
+  // LOOKAT_MIN_HORIZONTAL_DISTANCE (composeLookAt's collapse guard), so a
+  // floor at half of it never engages in legitimate flight; it exists purely
+  // to make the sign flip impossible by construction.
+  clampMin: LOOKAT_MIN_HORIZONTAL_DISTANCE / 2,
 }
 
 /**
@@ -559,8 +709,11 @@ function stepBoundedFollower(
     const desired = clamp(error / limits.responseTime, -limits.maxRate, limits.maxRate)
     rate = approach(rate, desired, limits.maxAccel * h)
     value += rate * h
-    if (limits.clampMin !== undefined && limits.clampMax !== undefined) {
-      value = clamp(value, limits.clampMin, limits.clampMax)
+    if (limits.clampMin !== undefined) {
+      value = Math.max(value, limits.clampMin)
+    }
+    if (limits.clampMax !== undefined) {
+      value = Math.min(value, limits.clampMax)
     }
     remaining -= h
   }
@@ -999,73 +1152,225 @@ function applyGlance(
 // ---------------------------------------------------------------------------
 
 /**
- * A 6-point sliding window: `window[1] -> window[2]` is the segment currently
- * being flown; `window[3]`, `window[4]` and `window[5]` are the three upcoming
- * waypoints the walk has already drawn. Three known *future* waypoints (not
- * one — the #105 demand-continuity fix), for two reasons stacked on top of
- * each other:
+ * The spline's sliding control polygon: `window[0]` shapes the entry tangent
+ * (history), `window[1] -> window[2]` is the piece currently being flown, and
+ * everything after `window[2]` is already-drawn future route. Two structural
+ * properties, one from each #105 pass:
  *
- * - The on-path look-ahead aims a fixed {@link LOOKAT_LOOKAHEAD_DISTANCE} of
- *   arc ahead of the camera, and one future segment can be shorter than that
- *   (an interior lattice hop is one Tower spacing — half the look-ahead), so
- *   the old 4-point window's arc table ran out mid-segment: the forward aim
- *   point sat *pinned at the head waypoint* for the back half of most
- *   segments (~40% of all frames, instrumented) and then teleported a median
- *   ~3.9 world units the instant the window rolled over — the demand-side
- *   half of "the pilot abruptly turns their head at every waypoint". Two
- *   future segments guarantee at least `TOWER_SPACING × 2` =
- *   LOOKAT_LOOKAHEAD_DISTANCE of future arc from anywhere in the current
- *   segment (adjacent canyon lines are never closer than one Tower spacing),
- *   so the look-ahead never pins.
- * - A Catmull-Rom piece's shape depends on its four surrounding points, so
- *   the *last* known piece is still provisional: its shape refines when the
- *   next waypoint replaces the open curve's reflected-end boundary condition.
- *   With only two future waypoints the look-ahead regularly sampled that
- *   provisional piece, leaving a residual demand step (p90 ≈ 0.45 world
- *   units, instrumented) at each rollover. The third future waypoint puts
- *   every piece the look-ahead can reach (`window[2] -> window[3] ->
- *   window[4]`, at least the full look-ahead of arc) in its final shape, so
- *   the aim demand is continuous across every boundary by construction —
- *   `window[4] -> window[5]` is the only provisional piece left, and the
- *   look-ahead can never reach into it.
+ * - **Corner rounding** (iteration 2 — see {@link CORNER_TURN_RADIUS} and
+ *   {@link expandWaypoint}): lattice waypoints are no longer control points
+ *   verbatim. A waypoint the walk flies straight through enters the polygon
+ *   as itself; a waypoint where the walk turns is replaced by a *pair* of
+ *   points — one a turn radius back along the incoming leg, one a turn
+ *   radius out along the outgoing leg — so the spline arcs around the corner
+ *   instead of pivoting on the node. This makes the window variable-length:
+ *   a corner-dense stretch packs more control points into the same ground
+ *   distance than a straightaway.
+ * - **A measured look-ahead guarantee** (replacing iteration 1's counted
+ *   one): the on-path look-ahead aims a fixed {@link
+ *   LOOKAT_LOOKAHEAD_DISTANCE} of arc ahead, and before #105 the window's
+ *   arc table could run out mid-segment — the aim demand pinned at the table
+ *   end for ~40% of all frames and teleported a median ~3.9 world units at
+ *   every rollover (the "bolted-together segments" rhythm at its source).
+ *   Iteration 1 fixed that by counting future waypoints (two future
+ *   segments ≥ the look-ahead, since canyon lines are ≥ one Tower spacing
+ *   apart); with corner rounding a "future control point" no longer implies
+ *   any fixed amount of future arc, so {@link extendWindow} instead
+ *   replenishes the polygon until the *measured* final-shape arc covers the
+ *   current travel plus the full look-ahead. Same guarantee — the aim demand
+ *   never pins and never samples a provisional piece — enforced by
+ *   measurement rather than by counting.
  *
- * The same locality is why the extra trailing points change nothing about
- * the flown segment's geometry: `window[1] -> window[2]` is shaped by
- * `window[0..3]` alone, exactly as before.
+ * A Catmull-Rom piece's shape depends on its four surrounding points, so the
+ * polygon's *last* piece is provisional (an open curve reflects its missing
+ * end point) and refines when the next control point lands. The arc table
+ * therefore spans only pieces `1 .. length-3` — every piece it (and the
+ * look-ahead) can reach has its final shape by construction. Catmull-Rom
+ * locality is also why appending points never changes the flown piece:
+ * `window[1] -> window[2]` is shaped by `window[0..3]` alone.
  */
-type SplineWindow = readonly [Vector3, Vector3, Vector3, Vector3, Vector3, Vector3]
+type SplineWindow = readonly Vector3[]
+
+/**
+ * The chord length a rounded corner's on-arc control points aim for (#105
+ * iteration 3 — replacing a fixed angular step): the spacing at which a
+ * centripetal Catmull-Rom demonstrably hugs an arc without wiggling. A fixed
+ * angular step made chord length *scale with the radius and turn angle*
+ * (chord = 2·r·sin(step/2)), so small radii or small turn angles produced
+ * tiny chords flanked by full-length canyon legs — the exact unequal-chord
+ * regime that whips the CR tangent (measured: a 45° takeoff corner's 0.55u
+ * chords spiked the heading rate to ~6 rad/s at activation; an early
+ * chamfer-pair variant with a 0.4u chord hit ~100 rad/s). Targeting a fixed
+ * *chord length* instead keeps the sampling in the proven-stable scale at
+ * every radius and angle — down to a single apex point for small turns,
+ * which an open CR rounds smoothly by itself.
+ */
+export const CORNER_ARC_TARGET_CHORD = TOWER_SPACING * 0.2
+
+/**
+ * Expands one raw walk waypoint into its spline control points (#105
+ * iteration 2 — the corner rounding {@link CORNER_TURN_RADIUS} documents).
+ * Straight-through waypoints pass through unchanged. A corner is replaced by
+ * points sampled on the exact inscribed circular arc of radius
+ * {@link CORNER_TURN_RADIUS} tangent to both legs — spaced to chords of
+ * roughly {@link CORNER_ARC_TARGET_CHORD} — shrunk where a leg is too short
+ * for the tangent offset ({@link CORNER_MAX_LEG_FRACTION}, so neighbouring
+ * corners' points never collide or reorder). A turn so sharp that the
+ * shrunken radius falls below {@link CORNER_MIN_TURN_RADIUS} (a near-exact
+ * hairpin) keeps its sharp node. All points carry the waypoint's own drawn
+ * altitude, so the altitude program's rhythm is untouched by the expansion.
+ * Pure geometry over three consecutive raw positions — the lattice/graph
+ * logic above knows nothing of it.
+ */
+function expandWaypoint(previous: Vector3, current: Vector3, next: Vector3): Vector3[] {
+  const inX = current.x - previous.x
+  const inZ = current.z - previous.z
+  const outX = next.x - current.x
+  const outZ = next.z - current.z
+  const lengthIn = Math.hypot(inX, inZ)
+  const lengthOut = Math.hypot(outX, outZ)
+  if (lengthIn < 1e-9 || lengthOut < 1e-9) {
+    return [current.clone()]
+  }
+  const uInX = inX / lengthIn
+  const uInZ = inZ / lengthIn
+  const uOutX = outX / lengthOut
+  const uOutZ = outZ / lengthOut
+  const cross = uInX * uOutZ - uInZ * uOutX
+  const dot = uInX * uOutX + uInZ * uOutZ
+  const turnAngle = Math.abs(Math.atan2(cross, dot))
+  if (turnAngle < CORNER_MIN_TURN_ANGLE) {
+    return [current.clone()]
+  }
+  // The tangent offset `d` along each leg for an inscribed arc of the
+  // desired radius (d = r·tan(θ/2)); where a leg is too short for that
+  // offset, the offset is clamped and the radius shrinks to match. As the
+  // turn approaches a hairpin, tan(θ/2) → ∞ drives the clamped radius
+  // toward zero — the CORNER_MIN_TURN_RADIUS floor below then bails to the
+  // sharp node (this also covers exact 180°, where the arc construction
+  // itself would degenerate: cross = 0 ⇒ no turn side).
+  const tangentOffset = Math.min(
+    CORNER_TURN_RADIUS * Math.tan(turnAngle / 2),
+    CORNER_MAX_LEG_FRACTION * lengthIn,
+    CORNER_MAX_LEG_FRACTION * lengthOut,
+  )
+  const radius = tangentOffset / Math.tan(turnAngle / 2)
+  if (radius < CORNER_MIN_TURN_RADIUS) {
+    return [current.clone()]
+  }
+  // The arc's centre sits one radius inside the turn from the entry tangent
+  // point, perpendicular to the incoming leg.
+  const entryX = current.x - uInX * tangentOffset
+  const entryZ = current.z - uInZ * tangentOffset
+  const side = Math.sign(cross)
+  const centerX = entryX + side * -uInZ * radius
+  const centerZ = entryZ + side * uInX * radius
+  // The angular step that yields chords of ~CORNER_ARC_TARGET_CHORD at this
+  // radius (chord = 2·r·sin(step/2)); rounded — not ceiled — to the nearest
+  // whole number of steps so the realized chords stay as close to the target
+  // as the turn allows, with a single apex point as the small-turn floor.
+  const idealStep = 2 * Math.asin(Math.min(1, CORNER_ARC_TARGET_CHORD / (2 * radius)))
+  const steps = Math.max(1, Math.round(turnAngle / idealStep))
+  const points: Vector3[] = []
+  // Rotate the centre->entry spoke through the signed turn, sampling at the
+  // *midpoints* of the angular steps (never the tangent endpoints): when two
+  // corners abut across a short straight remnant, tangent-endpoint control
+  // points sat only ~0.4 units apart across the remnant and the Catmull-Rom
+  // wiggled between them (~6 rad/s heading blips); interior-only samples
+  // keep neighbouring chords uniform, and the spline's natural rounding
+  // through them supplies the tangency the endpoints provided.
+  const spokeX = entryX - centerX
+  const spokeZ = entryZ - centerZ
+  for (let i = 0; i < steps; i++) {
+    const angle = (-side * turnAngle * (i + 0.5)) / steps
+    const cos = Math.cos(angle)
+    const sin = Math.sin(angle)
+    points.push(
+      new Vector3(
+        centerX + spokeX * cos + spokeZ * sin,
+        current.y,
+        centerZ - spokeX * sin + spokeZ * cos,
+      ),
+    )
+  }
+  return points
+}
+
+/**
+ * The horizontal (x, z) Catmull-Rom the route is actually flown on (#105
+ * iteration 2): the control points' Y is the *altitude-target metadata* the
+ * glide-slope pursuit chases (see `CanyonTourState.altitude`) — it was never
+ * the rendered altitude — but feeding it into a 3D curve let it warp the
+ * horizontal path: a big waypoint-to-waypoint altitude change (an overview
+ * episode boundary) landing on a short corner-rounded piece dominated the
+ * centripetal parameterization (a 0.4-unit horizontal chord read as a
+ * ~6-unit 3D chord), and the horizontal projection looped — instrumented at
+ * up to ~186 rad/s of heading (a spin cusp), the worst single artefact of
+ * the whole route. Flattening Y out of the curve makes the flown ground path
+ * a pure function of the route's horizontal geometry, which is the one the
+ * viewer experiences: rendered altitude comes from the pursuit, and the
+ * aim's altitude from {@link splineAltitudeAt}.
+ */
+function flattenedCurve(window: SplineWindow): CatmullRomCurve3 {
+  return new CatmullRomCurve3(
+    window.map((p) => new Vector3(p.x, 0, p.z)),
+    false,
+    CATMULL_ROM_TYPE,
+  )
+}
+
+/**
+ * The route's altitude-target at an extended piece-local `t` — the linear
+ * blend of the two surrounding control points' drawn altitudes. Only the
+ * *aim* reads this (the camera's own altitude is the glide-slope pursuit's),
+ * and the aim target is clamped into the aim window and eased through the
+ * view pitch follower downstream, so linear is plenty smooth.
+ */
+function splineAltitudeAt(window: SplineWindow, localT: number): number {
+  const t = clamp(localT, 0, tablePieceCount(window))
+  const piece = Math.min(Math.floor(t), tablePieceCount(window) - 1)
+  const fraction = t - piece
+  return window[1 + piece].y + (window[2 + piece].y - window[1 + piece].y) * fraction
+}
 
 /**
  * Samples a {@link SplineWindow} at `localT` in `[0, 1]` (0 = `window[1]`, 1 =
- * `window[2]`). Builds a `CatmullRomCurve3` over all six points but only ever
- * reads the `window[1] -> window[2]` fifth of its parameter range — the
+ * `window[2]`). Builds the flattened curve over the whole polygon but only
+ * ever reads the `window[1] -> window[2]` slice of its parameter range — the
  * standard trick for an open, C1-continuous Catmull-Rom segment that still has
  * the outer points to shape its tangents at both ends, so consecutive segments
- * meet with matching position *and* velocity (no teleport, no kink).
+ * meet with matching position *and* velocity (no teleport, no kink). The
+ * returned position/tangent are horizontal (y = 0) — see {@link
+ * flattenedCurve}; every consumer reads only their x/z.
  */
 function sampleSpline(
   window: SplineWindow,
   localT: number,
 ): { position: Vector3; tangent: Vector3 } {
-  const curve = new CatmullRomCurve3([...window], false, CATMULL_ROM_TYPE)
-  const globalT = (1 + clamp01(localT)) / 5
+  const curve = flattenedCurve(window)
+  const globalT = (1 + clamp01(localT)) / (window.length - 1)
   return { position: curve.getPoint(globalT), tangent: curve.getTangent(globalT).normalize() }
 }
 
 /**
- * Number of subdivisions used to measure a segment's horizontal arc length.
- * At segment lengths of one to two Tower spacings this puts samples a small
+ * Number of subdivisions used to measure a piece's horizontal arc length.
+ * At piece lengths up to two Tower spacings this puts samples a small
  * fraction of a world unit apart — the piecewise-linear inversion's speed
  * ripple is far below anything visible.
  */
 const ARC_LENGTH_SAMPLES = 64
 
+/** How many spline pieces a window's arc table spans: every final-shape piece from the flown one on — see {@link SplineWindow}. */
+function tablePieceCount(window: SplineWindow): number {
+  return window.length - 3
+}
+
 /**
  * The cumulative *horizontal* (x, z) arc length along the flyable remainder
- * of the sliding window — the current segment (`window[1] -> window[2]`,
- * `localT` 0..1) *plus* the two already-known next segments (`window[2] ->
- * window[3] -> window[4]`, `localT` 1..3) — at {@link ARC_LENGTH_SAMPLES}
- * evenly spaced stations per segment. Two consumers:
+ * of the sliding window — the flown piece (`window[1] -> window[2]`, `localT`
+ * 0..1) plus every already-final future piece (see {@link SplineWindow}) —
+ * at {@link ARC_LENGTH_SAMPLES} evenly spaced stations per piece. Two
+ * consumers:
  *
  * - the tour's advance: turning "move `CANYON_TRAVEL_SPEED × delta` world
  *   units of ground travel" into a spline parameter (see
@@ -1074,29 +1379,33 @@ const ARC_LENGTH_SAMPLES = 64
  *   hitch at segment boundaries (the "~42s stutter");
  * - the look-at: the forward aim point sits a fixed *arc distance ahead on
  *   the future flight path* (see {@link stepDemoTour}), which is why the
- *   table extends into the next segments — both of them, so the look-ahead
- *   never runs off the table's end (see {@link SplineWindow}).
+ *   table extends across the future pieces — and why {@link extendWindow}
+ *   grows the window until the table provably outreaches the look-ahead.
  *
  * Horizontal (not 3D) arc length on purpose: the camera's rendered altitude
  * is the glide-slope pursuit's (`state.altitude`), not the spline's own Y,
  * so ground distance is the one the viewer actually experiences.
  */
 function segmentHorizontalArc(window: SplineWindow): number[] {
-  const curve = new CatmullRomCurve3([...window], false, CATMULL_ROM_TYPE)
+  const curve = flattenedCurve(window)
   const cumulative = [0]
-  let previous = curve.getPoint(1 / 5)
-  for (let i = 1; i <= 3 * ARC_LENGTH_SAMPLES; i++) {
-    const point = curve.getPoint((1 + i / ARC_LENGTH_SAMPLES) / 5)
+  let previous = curve.getPoint(1 / (window.length - 1))
+  const pieces = tablePieceCount(window)
+  for (let i = 1; i <= pieces * ARC_LENGTH_SAMPLES; i++) {
+    const point = curve.getPoint((1 + i / ARC_LENGTH_SAMPLES) / (window.length - 1))
     cumulative.push(cumulative[i - 1] + Math.hypot(point.x - previous.x, point.z - previous.z))
     previous = point
   }
   return cumulative
 }
 
-/** Samples the window at an extended `localT` in `[0, 3]` — reaching into the already-known next segments (`window[2] -> window[3] -> window[4]`), for the on-path look-ahead. */
+/** Samples the window at an extended `localT` — reaching into the already-known future pieces the arc table spans, for the on-path look-ahead. Horizontal position from the flattened curve; altitude from {@link splineAltitudeAt}. */
 function sampleSplineExtended(window: SplineWindow, localT: number): Vector3 {
-  const curve = new CatmullRomCurve3([...window], false, CATMULL_ROM_TYPE)
-  return curve.getPoint((1 + clamp(localT, 0, 3)) / 5)
+  const curve = flattenedCurve(window)
+  const t = clamp(localT, 0, tablePieceCount(window))
+  const point = curve.getPoint((1 + t) / (window.length - 1))
+  point.y = splineAltitudeAt(window, t)
+  return point
 }
 
 /** The current segment's (`window[1] -> window[2]`) total horizontal arc length off a {@link segmentHorizontalArc} table. */
@@ -1105,10 +1414,10 @@ function segmentArcLength(cumulative: readonly number[]): number {
 }
 
 /**
- * Inverts a {@link segmentHorizontalArc} table: the segment-local `t` (in
- * `[0, 3]` — the table spans the current segment *and* the two known next
- * ones) at which `distance` world units of horizontal travel have been
- * covered. Clamps to the table's extent.
+ * Inverts a {@link segmentHorizontalArc} table: the piece-local `t` (in
+ * `[0, pieceCount]` — the table spans the flown piece *and* every known
+ * final-shape future piece) at which `distance` world units of horizontal
+ * travel have been covered. Clamps to the table's extent.
  */
 function arcDistanceToLocalT(cumulative: readonly number[], distance: number): number {
   const total = cumulative[cumulative.length - 1]
@@ -1433,9 +1742,29 @@ interface CanyonTourState {
   kind: 'canyon'
   graph: CanyonGraph
   rngState: number
-  /** Lattice coordinate of `window[5]` — the walk's leading edge. */
+  /**
+   * The seeded glances' own PRNG stream (#105 iteration 2), advanced only by
+   * {@link rollGlance} — deliberately *separate* from `rngState` (the
+   * waypoint walk's stream). With one shared stream, any change to how often
+   * glances draw shifted every subsequent waypoint draw, so the realized
+   * route for a logged seed changed under pure aim-side tweaks — voiding
+   * ADR-0010's logged-seed reproduction of visual reports across otherwise
+   * route-neutral versions. Decoupled, seed → route is a function of the
+   * walk alone.
+   */
+  glanceRngState: number
+  /** Lattice coordinate of the walk's leading edge — the last *raw* waypoint drawn (`rawTail`). */
   headCoord: LatticeCoord
   headMove: LatticeMove
+  /**
+   * The last two *raw* (pre-{@link expandWaypoint}) walk waypoints: `rawTail`
+   * is the leading edge (`headCoord`'s position, awaiting its successor
+   * before it can be expanded into control points — a corner can only be
+   * rounded once both its legs are known), `rawPrev` the raw waypoint before
+   * it (the incoming leg's origin).
+   */
+  rawPrev: Vector3
+  rawTail: Vector3
   window: SplineWindow
   /**
    * Spline parameter of the current sample, in `[0, 1]` — a *cache* derived
@@ -1485,6 +1814,11 @@ interface CanyonTourState {
    * partner for the bank target's yaw rate (see {@link bankTargetFromYawRate}).
    */
   heading: number
+  /**
+   * The exponentially smoothed heading rate (rad/s) driving the bank target —
+   * see {@link BANK_YAW_RATE_SMOOTHING}.
+   */
+  yawRateSmoothed: number
   /** The temporally smoothed bank (radians) — what {@link sampleDemoTourPose} renders. See {@link DEMO_ROLL_MAX_RATE}. */
   roll: number
   /** The smoothed bank's current angular rate (rad/s) — the follower's second state variable. */
@@ -1549,6 +1883,92 @@ function fallbackCenter(placements: readonly TowerPlacement[]): [number, number,
 }
 
 /**
+ * The walk's leading edge plus the control polygon being built from it — the
+ * mutable bundle {@link extendWindow} advances. Internal to
+ * {@link createDemoTour}/{@link stepDemoTour}, which copy state in, extend,
+ * and read the results back into the immutable {@link DemoTourState}.
+ */
+interface WalkFrontier {
+  window: Vector3[]
+  rawPrev: Vector3
+  rawTail: Vector3
+  headCoord: LatticeCoord
+  headMove: LatticeMove
+  altitudeProgram: AltitudeProgram
+  rngState: number
+}
+
+/**
+ * Grows the control polygon until its final-shape arc table covers
+ * `requiredArc` of horizontal travel (measured from the flown piece's start)
+ * — the look-ahead guarantee {@link SplineWindow} documents: draw the next
+ * raw waypoint from the walk, expand the previous leading edge into control
+ * points now that both its legs are known ({@link expandWaypoint}), append,
+ * repeat. {@link stepDemoTour} calls this **every frame** with the frame's
+ * own `traveled + LOOKAT_LOOKAHEAD_DISTANCE`, not merely at rollovers: a
+ * per-rollover check only guarantees coverage at the rollover instant, and
+ * as travel accrues mid-piece the look-ahead would silently pin at the table
+ * end again (the exact demand-teleport bug the first #105 pass fixed) while
+ * the deficit forced a burst of draws at the next boundary. Checked per
+ * frame, coverage holds on every frame by construction and drawing spreads
+ * out to at most one waypoint per ordinary frame (every draw appends well
+ * over a frame's travel of future arc). Termination is guaranteed because
+ * every raw waypoint extends the polygon by a good fraction of a canyon leg
+ * (adjacent canyon lines are ≥ one {@link TOWER_SPACING} apart and corner
+ * tangent offsets are < half a leg).
+ *
+ * Mutates `frontier` in place — it's a local builder, not shared state — and
+ * returns the window's up-to-date arc table so the caller never computes it
+ * twice: pass `table` when one for the *current* window is already in hand
+ * (the no-draw common path is then free).
+ */
+function extendWindow(
+  frontier: WalkFrontier,
+  graph: CanyonGraph,
+  requiredArc: number,
+  table: number[] | null = null,
+): number[] {
+  let current = table
+  for (;;) {
+    if (frontier.window.length >= 5) {
+      if (!current) {
+        current = segmentHorizontalArc(frontier.window)
+      }
+      if (current[current.length - 1] >= requiredArc) {
+        return current
+      }
+    }
+    const picked = drawNextWaypoint(
+      graph,
+      frontier.headCoord,
+      frontier.headMove,
+      frontier.altitudeProgram,
+      frontier.rngState,
+    )
+    frontier.window.push(
+      ...expandWaypoint(frontier.rawPrev, frontier.rawTail, picked.waypoint.position),
+    )
+    frontier.rawPrev = frontier.rawTail
+    frontier.rawTail = picked.waypoint.position
+    frontier.headCoord = picked.waypoint.coord
+    frontier.headMove = picked.move
+    frontier.altitudeProgram = picked.program
+    frontier.rngState = picked.nextState
+    current = null
+  }
+}
+
+/**
+ * The glance stream's seed derivation (see `glanceRngState` on
+ * {@link CanyonTourState}): a fixed odd constant XORed into the tour seed so
+ * the two mulberry32 streams start decorrelated while remaining a pure
+ * function of the one user-visible seed.
+ */
+function glanceSeed(seed: number): number {
+  return (seed ^ 0x5f356495) | 0
+}
+
+/**
  * Creates a fresh {@link DemoTourState}: the seam Demo Mode's activation
  * calls. The tour *takes flight from the entry pose itself* (#91 smoothness
  * pass): the spline's first point is the camera's own position, and its first
@@ -1603,14 +2023,7 @@ export function createDemoTour(params: {
     cameraPosition.z - entryWaypoint.z,
   )
 
-  let p1: Vector3
-  let p2: Vector3
-  let p3: Vector3
-  let p4: Vector3
-  let p5: Vector3
-  let headCoord: LatticeCoord
-  let headMove: LatticeMove
-  let altitudeProgram: AltitudeProgram
+  let frontier: WalkFrontier
   if (takeoffDistance >= TAKEOFF_MIN_DISTANCE) {
     // Take flight from where the camera already is: the first segment cruises
     // from the entry pose to the nearest Canyon graph node, then the walk
@@ -1629,29 +2042,21 @@ export function createDemoTour(params: {
       rngState,
       approach,
     )
-    const step2 = drawNextWaypoint(
-      graph,
-      step1.waypoint.coord,
-      step1.move,
-      step1.program,
-      step1.nextState,
-    )
-    const step3 = drawNextWaypoint(
-      graph,
-      step2.waypoint.coord,
-      step2.move,
-      step2.program,
-      step2.nextState,
-    )
-    p1 = cameraPosition
-    p2 = entryWaypoint
-    p3 = step1.waypoint.position
-    p4 = step2.waypoint.position
-    p5 = step3.waypoint.position
-    headCoord = step3.waypoint.coord
-    headMove = step3.move
-    altitudeProgram = step3.program
-    rngState = step3.nextState
+    // The raw route so far is [camera, entryWaypoint, step1]; the entry
+    // waypoint's corner (takeoff approach meeting the walk's first move) can
+    // be rounded right away since both its legs are known.
+    frontier = {
+      window: [
+        cameraPosition.clone(),
+        ...expandWaypoint(cameraPosition, entryWaypoint, step1.waypoint.position),
+      ],
+      rawPrev: entryWaypoint,
+      rawTail: step1.waypoint.position,
+      headCoord: step1.waypoint.coord,
+      headMove: step1.move,
+      altitudeProgram: step1.program,
+      rngState: step1.nextState,
+    }
   } else {
     // The camera already sits on the entry node — start the walk there
     // directly rather than flying a degenerate zero-length takeoff segment.
@@ -1663,37 +2068,32 @@ export function createDemoTour(params: {
       step1.program,
       step1.nextState,
     )
-    const step3 = drawNextWaypoint(
-      graph,
-      step2.waypoint.coord,
-      step2.move,
-      step2.program,
-      step2.nextState,
-    )
-    const step4 = drawNextWaypoint(
-      graph,
-      step3.waypoint.coord,
-      step3.move,
-      step3.program,
-      step3.nextState,
-    )
-    p1 = entryWaypoint
-    p2 = step1.waypoint.position
-    p3 = step2.waypoint.position
-    p4 = step3.waypoint.position
-    p5 = step4.waypoint.position
-    headCoord = step4.waypoint.coord
-    headMove = step4.move
-    altitudeProgram = step4.program
-    rngState = step4.nextState
+    frontier = {
+      window: [
+        entryWaypoint.clone(),
+        ...expandWaypoint(entryWaypoint, step1.waypoint.position, step2.waypoint.position),
+      ],
+      rawPrev: step1.waypoint.position,
+      rawTail: step2.waypoint.position,
+      headCoord: step2.waypoint.coord,
+      headMove: step2.move,
+      altitudeProgram: step2.program,
+      rngState: step2.nextState,
+    }
   }
-  // Mirror p2 through p1 for a synthetic "point behind the entry" — the
-  // standard way to give an open Catmull-Rom curve a sensible starting
-  // tangent (zero initial curvature) with no real history to draw on yet.
-  const p0 = p1.clone().multiplyScalar(2).sub(p2)
-  const window: SplineWindow = [p0, p1, p2, p3, p4, p5]
+  // Mirror the second control point through the first for a synthetic "point
+  // behind the entry" — the standard way to give an open Catmull-Rom curve a
+  // sensible starting tangent (zero initial curvature) with no real history
+  // to draw on yet.
+  const mirror = frontier.window[0].clone().multiplyScalar(2).sub(frontier.window[1])
+  frontier.window.unshift(mirror)
+  // Draw until the arc table provably outreaches the look-ahead from the
+  // very first frame (traveled = 0) — the measured guarantee SplineWindow
+  // documents.
+  extendWindow(frontier, graph, LOOKAT_LOOKAHEAD_DISTANCE)
+  const window: SplineWindow = frontier.window
 
-  const glanceRoll = rollGlance(rngState)
+  const glanceRoll = rollGlance(glanceSeed(params.seed))
 
   // Seed the eased pull anchor at its geometric target for the entry pose, so
   // there's nothing to pan from on the very first frame (the blend weight
@@ -1710,25 +2110,30 @@ export function createDemoTour(params: {
   clampToAimBounds(entryForward, bounds)
   const entryPull = nearestTowerPull(entryForward, params.placements)
   // Seed the eased view triplet at its geometric entry target, same reason.
-  const entryTarget = composeLookAt(p1, entryForward, 0, entryPull.point, NO_GLANCE)
-  const entryView = viewTripletTo(p1, entryTarget)
+  const entryPose = window[1]
+  const entryTarget = composeLookAt(entryPose, entryForward, 0, entryPull.point, NO_GLANCE)
+  const entryView = viewTripletTo(entryPose, entryTarget)
 
   return {
     kind: 'canyon',
     graph,
-    rngState: glanceRoll.nextState,
-    headCoord,
-    headMove,
+    rngState: frontier.rngState,
+    glanceRngState: glanceRoll.nextState,
+    headCoord: frontier.headCoord,
+    headMove: frontier.headMove,
+    rawPrev: frontier.rawPrev,
+    rawTail: frontier.rawTail,
     window,
     segmentT: 0,
     segmentDistance: 0,
-    // Start exactly at the entry pose's own altitude — p1.y — so there is
-    // no lag/jump the instant the tour begins; the glide-slope pursuit only
-    // ever engages from here on, chasing each *next* segment's target.
-    altitude: p1.y,
+    // Start exactly at the entry pose's own altitude — window[1].y — so there
+    // is no lag/jump the instant the tour begins; the glide-slope pursuit
+    // only ever engages from here on, chasing each *next* segment's target.
+    altitude: entryPose.y,
     climbGradient: 0,
-    altitudeProgram,
+    altitudeProgram: frontier.altitudeProgram,
     heading: entryHeading,
+    yawRateSmoothed: 0,
     // Wings level at activation: the smoothed roll only ever banks from here.
     roll: 0,
     rollRate: 0,
@@ -1783,13 +2188,18 @@ export function stepDemoTour(
   // segment boundaries (the leftover distance — not a leftover `t` fraction
   // in mismatched time units — carries into the next segment).
   let traveled = state.segmentDistance + CANYON_TRAVEL_SPEED * delta
-  let window = state.window
-  let cumulative = segmentHorizontalArc(window)
   let graph = state.graph
-  let headCoord = state.headCoord
-  let headMove = state.headMove
-  let altitudeProgram = state.altitudeProgram
-  let rngState = state.rngState
+  const frontier: WalkFrontier = {
+    window: [...state.window],
+    rawPrev: state.rawPrev,
+    rawTail: state.rawTail,
+    headCoord: state.headCoord,
+    headMove: state.headMove,
+    altitudeProgram: state.altitudeProgram,
+    rngState: state.rngState,
+  }
+  let cumulative = segmentHorizontalArc(frontier.window)
+  let glanceRngState = state.glanceRngState
   // A glance always survives segment boundaries now: it steps by real time
   // and only ever ends by completing its own eased 0→1→0 envelope. (It used
   // to be *replaced* by a fresh roll on every rollover — but a glance lasts
@@ -1798,56 +2208,58 @@ export function stepDemoTour(
   // waypoint boundaries.)
   let glance = stepGlance(state.glance, delta)
 
-  const segmentLength = segmentArcLength(cumulative)
-  if (traveled >= segmentLength) {
-    // Segment complete: the just-finished segment played out on `state.graph`
-    // (jump-free); the next waypoint is planned on the latest graph.
-    const nextGraph = buildCanyonGraph(placements)
-    if (!nextGraph) {
-      // The cluster shrank to degenerate (≤1 Tower) mid-flight — a rare edge
-      // kept simple: hand off to the orbit fallback rather than engineering a
-      // seamless downgrade for an event this uncommon.
-      return orbitTourState(state.rngState, fallbackCenter(placements))
+  // A `while`, not an `if`: corner rounding makes some pieces much shorter
+  // than a full canyon leg, so a single (large or hitchy) frame delta can
+  // legitimately cross more than one piece boundary.
+  let rolledOver = false
+  while (traveled >= segmentArcLength(cumulative)) {
+    if (!rolledOver) {
+      // First rollover this frame: the just-finished piece played out on
+      // `state.graph` (jump-free); further waypoints are planned on the
+      // latest graph.
+      const nextGraph = buildCanyonGraph(placements)
+      if (!nextGraph) {
+        // The cluster shrank to degenerate (≤1 Tower) mid-flight — a rare
+        // edge kept simple: hand off to the orbit fallback rather than
+        // engineering a seamless downgrade for an event this uncommon.
+        return orbitTourState(state.rngState, fallbackCenter(placements))
+      }
+      graph = nextGraph
+      rolledOver = true
     }
-    graph = nextGraph
-    const picked = drawNextWaypoint(
-      graph,
-      state.headCoord,
-      state.headMove,
-      altitudeProgram,
-      rngState,
-    )
-    window = [
-      state.window[1],
-      state.window[2],
-      state.window[3],
-      state.window[4],
-      state.window[5],
-      picked.waypoint.position,
-    ]
-    headCoord = picked.waypoint.coord
-    headMove = picked.move
-    altitudeProgram = picked.program
-    rngState = picked.nextState
-    traveled -= segmentLength
-    cumulative = segmentHorizontalArc(window)
-    // A new segment may start a fresh glance — but only when no glance is
-    // already in flight (see the doc comment on `glance` above).
+    traveled -= segmentArcLength(cumulative)
+    frontier.window.shift()
+    cumulative = extendWindow(frontier, graph, traveled + LOOKAT_LOOKAHEAD_DISTANCE)
+    // A new piece may start a fresh glance — but only when no glance is
+    // already in flight (see the doc comment on `glance` above). Drawn from
+    // the glances' own PRNG stream, never the walk's (see glanceRngState).
     if (!glance.active) {
-      const glanceRoll = rollGlance(rngState)
-      rngState = glanceRoll.nextState
+      const glanceRoll = rollGlance(glanceRngState)
+      glanceRngState = glanceRoll.nextState
       glance = glanceRoll.glance
     }
   }
+  // Per-frame look-ahead coverage — never only at rollovers (see
+  // extendWindow's doc comment): the table must outreach this frame's own
+  // travel + look-ahead so the aim demand can never pin at the table end.
+  // Coverage draws plan on the frame's graph (refreshed at the last
+  // rollover), so a placements change reaches *new* draws within at most
+  // one piece of flight — though the waypoints already drawn ahead (up to a
+  // look-ahead's worth of route) were planned on the older graph and are
+  // still flown as drawn, the same laziness ADR-0010 already accepts.
+  cumulative = extendWindow(frontier, graph, traveled + LOOKAT_LOOKAHEAD_DISTANCE, cumulative)
+  const window: SplineWindow = frontier.window
 
   const segmentT = arcDistanceToLocalT(cumulative, traveled)
   const { position: currentPosition, tangent: currentTangent } = sampleSpline(window, segmentT)
 
   // The camera's actual altitude (#91 climb-rate tuning pass, reworked to a
   // per-frame gradient cap by the elevator-look follow-up, then to a *slewed*
-  // gradient by the smoothness pass): a pursuit of the current segment's
-  // destination altitude (`window[2].y`, the waypoint this segment is flying
-  // toward), never the spline's own (possibly steep) Y directly. The flown
+  // gradient by the smoothness pass): a pursuit of the current piece's
+  // destination altitude (`window[2].y` — the altitude-target metadata the
+  // control point carries: the drawn altitude of the raw waypoint it came
+  // from, whether that point is the waypoint itself or one of its corner's
+  // arc samples), never the spline's own (possibly steep) Y directly. The flown
   // gradient — Δaltitude per world unit of *this frame's actual horizontal
   // travel* — is (a) capped at ±MAX_CLIMB_GRADIENT so the visual climb angle
   // can never exceed atan(MAX_CLIMB_GRADIENT) no matter how a frame moves,
@@ -1890,11 +2302,17 @@ export function stepDemoTour(
   // deadbanded to exactly level on straight flight) — see
   // DEMO_ROLL_MAX_RATE's doc comment.
   const heading = horizontalHeading(currentTangent, state.heading)
-  const yawRate = delta > 1e-9 ? angleDelta(state.heading, heading) / delta : 0
+  const yawRateRaw = delta > 1e-9 ? angleDelta(state.heading, heading) / delta : 0
+  // The bank target tracks the *smoothed* heading rate (see
+  // BANK_YAW_RATE_SMOOTHING): brief opposite-sign wiggles at straight/arc
+  // transitions must not rock the horizon.
+  const yawRateSmoothed =
+    state.yawRateSmoothed +
+    (yawRateRaw - state.yawRateSmoothed) * (1 - Math.exp(-delta / BANK_YAW_RATE_SMOOTHING))
   const rolled = stepBoundedFollower(
     state.roll,
     state.rollRate,
-    bankTargetFromYawRate(yawRate),
+    bankTargetFromYawRate(yawRateSmoothed),
     delta,
     ROLL_FOLLOWER,
   )
@@ -1974,16 +2392,20 @@ export function stepDemoTour(
   return {
     kind: 'canyon',
     graph,
-    rngState,
-    headCoord,
-    headMove,
+    rngState: frontier.rngState,
+    glanceRngState,
+    headCoord: frontier.headCoord,
+    headMove: frontier.headMove,
+    rawPrev: frontier.rawPrev,
+    rawTail: frontier.rawTail,
     window,
     segmentT,
     segmentDistance: traveled,
     altitude,
     climbGradient,
-    altitudeProgram,
+    altitudeProgram: frontier.altitudeProgram,
     heading,
+    yawRateSmoothed,
     roll: rolled.value,
     rollRate: rolled.rate,
     lookAtBlend,
