@@ -109,8 +109,17 @@ const SEEDS = [42424242, 1, 7, 13, 99]
  * not — on the small ones).
  *
  * `maxVoidFraction` / `minCanyonFraction` are the framing/dynamism bounds
- * (#105 iteration 3) — see the "keeps the Towers on screen" and "stays in
- * among the Towers" invariants for the metric definitions and calibration.
+ * (#105 iteration 3, re-tightened by iteration 4 against its improved
+ * observations) — see the "keeps the Towers on screen" and "stays in among
+ * the Towers" invariants for the metric definitions and calibration.
+ *
+ * `minWideFraction` is iteration 4's vantage-variety floor — see the "wide
+ * overview vantage" invariant. Only kwok7 carries a nonzero bound: its
+ * lattice is ring-dominant (12 ring nodes to 4 interior), so its tours
+ * reliably ride perimeter lines during wide overview episodes; on the
+ * interior-heavy 5x5 (and the short-ringed 4x2) whole seeds legitimately
+ * never place a wide episode on a straight ring stretch, so a nonzero
+ * per-seed floor there would be flaky by construction rather than guarding.
  */
 const GRIDS: Array<{
   name: string
@@ -118,27 +127,31 @@ const GRIDS: Array<{
   expectStraightCruise: boolean
   maxVoidFraction: number
   minCanyonFraction: number
+  minWideFraction: number
 }> = [
   {
     name: '5x5',
     placements: grid(5, 5),
     expectStraightCruise: true,
-    maxVoidFraction: 0.27,
-    minCanyonFraction: 0.65,
+    maxVoidFraction: 0.22,
+    minCanyonFraction: 0.72,
+    minWideFraction: 0,
   },
   {
     name: '4x2',
     placements: grid(4, 2),
     expectStraightCruise: false,
-    maxVoidFraction: 0.4,
-    minCanyonFraction: 0.6,
+    maxVoidFraction: 0.33,
+    minCanyonFraction: 0.7,
+    minWideFraction: 0,
   },
   {
     name: 'kwok7',
     placements: kwok7(),
     expectStraightCruise: false,
-    maxVoidFraction: 0.4,
-    minCanyonFraction: 0.55,
+    maxVoidFraction: 0.32,
+    minCanyonFraction: 0.68,
+    minWideFraction: 0.02,
   },
 ]
 
@@ -284,7 +297,14 @@ function straightFlightFrames(poses: DemoPose[]): boolean[] {
 
 describe.each(GRIDS)(
   'Demo Mode pose-stream smoothness on a $name grid',
-  ({ name, placements, expectStraightCruise, maxVoidFraction, minCanyonFraction }) => {
+  ({
+    name,
+    placements,
+    expectStraightCruise,
+    maxVoidFraction,
+    minCanyonFraction,
+    minWideFraction,
+  }) => {
     describe.each(SEEDS)('seed %i', (seed) => {
       const poses = recordedTour(name, seed, placements)
 
@@ -420,13 +440,17 @@ describe.each(GRIDS)(
         //   legitimately exceed this; crossing it means the clamp mechanism
         //   itself changed.
         // - a calibrated drift guard well below it: observed clamp-frame
-        //   values move with aim tuning (≤ 5.5 with iteration 2's weak
-        //   pull, ≤ 14.7 with iteration 3's strong roofline pull — the one
-        //   smoothness metric that rose this iteration, on a handful of
-        //   frames per tour), bounded at 18 (~1.25x observed) so a further
-        //   drift toward the ceiling fails loudly instead of hiding under
-        //   it — this is the dimension ("no abrupt jitters") the maintainer
-        //   praised in #116, so quiet growth here is not acceptable.
+        //   values move with aim tuning (≤ 5.5 with iteration 2's weak pull;
+        //   ≤ 14.7 with iteration 3's strong *roofline* pull, whose ceiling
+        //   pin against the camera's own climb was the mechanism; ≤ 6.5
+        //   since iteration 4 made the pull horizontal-only and pulled the
+        //   aim demand's window strictly inside the rendered clamp — the
+        //   clamp now barely engages at all). Bounded at 9 (~1.4x the
+        //   observed 6.5, below both known-bad regimes: iteration 3's 14.7
+        //   and even the 9.6 of the build before it) so a drift back toward
+        //   clamp-driven pitch spikes fails loudly — this is the dimension
+        //   ("no abrupt jitters") the maintainer praised in #116, so quiet
+        //   growth here is not acceptable.
         //
         // The pre-#105 rate-limiter snaps (up to 96 rad/s² of pitch) sit far
         // above both. The exception stays narrow via the clamp-share
@@ -436,7 +460,7 @@ describe.each(GRIDS)(
         const MAX_YAW_ACCEL = VIEW_YAW_MAX_ACCEL + 1e-6
         const MAX_PITCH_ACCEL = VIEW_PITCH_MAX_ACCEL + 1e-6
         const MAX_PITCH_ACCEL_CLAMPED_CEILING = 28
-        const MAX_PITCH_ACCEL_CLAMPED_DRIFT = 18
+        const MAX_PITCH_ACCEL_CLAMPED_DRIFT = 9
         let previous = focusLookAngles(poses[0].position, poses[0].target)
         let previousYawRate: number | null = null
         let previousPitchRate: number | null = null
@@ -469,11 +493,95 @@ describe.each(GRIDS)(
         // bound, a future change that parks the aim on the clamp (e.g. an
         // altitude program living at the roofline) would silently move most
         // frames onto the looser clamp-frame bounds with nothing failing.
-        // Observed across all seeds/grids: 3.8-7.8% of frames engaged.
-        // Calibrated bound: 15% (~2x the observed worst).
+        // Observed across all seeds/grids: 3.8-7.8% at iteration 3 (nearly
+        // all of it the *ceiling*); ≤ 5% since iteration 4 (the remainder
+        // mostly brief floor grazes during dives — the ceiling share has its
+        // own, tighter invariant below). Calibrated bound: 15% (unchanged —
+        // still ~2x iteration 3's worst, and the exception-narrowness
+        // property it guards is unchanged).
         const MAX_CLAMP_FRACTION = 0.15
         const engaged = poses.filter(aimClampEngaged).length
         expect(engaged / poses.length).toBeLessThanOrEqual(MAX_CLAMP_FRACTION)
+      })
+
+      it('keeps its gaze level: the aim does not spend the tour pitched up (the "captain cranking his head up" guard — #105 iteration 4)', () => {
+        // The metric iteration 3 regressed *without any invariant noticing*
+        // — for the second time on this ticket, an axis nobody measured:
+        // every existing bound measured smoothness or framing, none
+        // measured where the aim points vertically. The maintainer saw it
+        // in 90 seconds of flying; the ceiling-clamp share had already
+        // doubled and was read only as a jitter risk.
+        //
+        // Rendered aim pitch, signed (+ = above the horizon). Two
+        // calibrated bounds, both bracketed between iteration 4's
+        // observations and iteration 3's (main's) known-bad values:
+        //
+        // - median ≤ 0 (level or below — a pilot's gaze): observed
+        //   −3.2..−1.6° across all seeds/grids; main measured +4.0..+11.1°
+        //   (its *best* seed is 4° above the bound, so a regression to
+        //   roofline-anchored aiming fails on every seed);
+        // - pitched-up share (> +5°) ≤ 0.30: observed 0.12-0.21; main
+        //   0.48-0.60 — more than half of every tour looking up.
+        const MAX_MEDIAN_PITCH = 0
+        const MAX_UP_SHARE = 0.3
+        const UP_PITCH = (5 * Math.PI) / 180
+        const pitches: number[] = []
+        let up = 0
+        for (const pose of poses) {
+          const dx = pose.target[0] - pose.position[0]
+          const dy = pose.target[1] - pose.position[1]
+          const dz = pose.target[2] - pose.position[2]
+          const pitch = Math.atan2(dy, Math.hypot(dx, dz))
+          pitches.push(pitch)
+          if (pitch > UP_PITCH) up++
+        }
+        pitches.sort((a, b) => a - b)
+        expect(pitches[Math.floor(pitches.length / 2)]).toBeLessThanOrEqual(MAX_MEDIAN_PITCH)
+        expect(up / poses.length).toBeLessThanOrEqual(MAX_UP_SHARE)
+      })
+
+      it('rarely looks up as far as it is allowed to: the aim-ceiling-pinned share stays small (#105 iteration 4)', () => {
+        // The number that was on the table for a full review round and
+        // misread: frames whose rendered aim altitude sits pinned at the
+        // roofline ceiling are frames where the camera is looking up as far
+        // as it is permitted to. Iteration 3 moved it 0.04-0.08 → 0.06-0.13
+        // and the review filed it as a jitter risk only. Observed since
+        // iteration 4 (horizontal-only pull + the aim demand clamped
+        // strictly inside the rendered window): ≤ 0.042. Calibrated bound:
+        // 0.055 — ~1.3x the observed worst, deliberately *below* main's
+        // smallest per-seed value (0.059), so a regression to
+        // roofline-anchored aiming fails on every seed. Thinner headroom
+        // than this file's usual 1.25-1.5x convention, documented rather
+        // than hidden: the bracket between "worst current" and "best
+        // known-bad" is only 1.4x wide.
+        const MAX_CEILING_SHARE = 0.055
+        const pinned = poses.filter((pose) => pose.target[1] >= TOWER_HEIGHT - 1e-6).length
+        expect(pinned / poses.length).toBeLessThanOrEqual(MAX_CEILING_SHARE)
+      })
+
+      it('varies its vantage: wide overview passes actually happen (the anti-uniformly-cramped guard — #105 iteration 4)', () => {
+        // The maintainer's iteration-3 verdict in metric form: "the current
+        // state gives a cramped/narrow view the whole time". Wide-vantage
+        // frames — a Tower framed near frame centre from ≥ 1.5 Tower
+        // spacings away — are the hero-overview shots; a tour can be
+        // perfectly smooth and perfectly framed and still fail this by
+        // never once stepping back. Observed on kwok7 with iteration 4's
+        // episode-gated ring widening: 0.031-0.120 per seed; main's worst
+        // kwok7 seed measures 0.000 (a 90-second tour without a single
+        // wide-vantage frame — "uniformly cramped", literally). Calibrated
+        // per-seed floor: 0.02. Skipped (bound 0) on the grids whose
+        // lattice makes ring-riding episodes a per-seed coin flip — see
+        // GRIDS.
+        if (minWideFraction <= 0) {
+          return
+        }
+        const WIDE_DISTANCE = 1.5 * TOWER_SPACING
+        let wide = 0
+        for (const pose of poses) {
+          const f = framing(pose, placements)
+          if (f.framed && f.nearest >= WIDE_DISTANCE) wide++
+        }
+        expect(wide / poses.length).toBeGreaterThanOrEqual(minWideFraction)
       })
 
       it('pans deliberately: rate-cap saturation only as sustained corner sweeps, never a per-waypoint head-turn rhythm', () => {
@@ -494,7 +602,8 @@ describe.each(GRIDS)(
         //
         // Observed with iteration 3's stronger tower pull (the aim actively
         // pans between Towers): worst single seed 17 events per 90s tour,
-        // each ≤ 2.4s, worst fraction 0.14. Bounds:
+        // each ≤ 2.4s, worst fraction 0.14 (iteration 4: 15 events / 0.146
+        // — essentially unchanged). Bounds:
         //
         // - events ≤ 24: ~1.4x the observed worst, still far below the
         //   40-65 of a per-waypoint rhythm — the sharper discriminator;
@@ -541,9 +650,19 @@ describe.each(GRIDS)(
         // 16.7-25.3 side changes per minute across these seeds/grids — a
         // horizon rocking every 2-4 seconds. With corner rounding
         // (CORNER_TURN_RADIUS) and the smoothed bank driver
-        // (BANK_YAW_RATE_SMOOTHING), observed ≤ 12/min (4x2 grids ≤ 6/min).
-        // Calibrated bound: 16/min — below every pre-fix observation, ~1.3x
-        // above the worst current one.
+        // (BANK_YAW_RATE_SMOOTHING), observed ≤ 12.7/min. Since #105
+        // iteration 4 the observed worst is 15.3/min (kwok7 seed 99 / 5x5
+        // seed 13) — decomposed by a route-controlled A/B (same routes,
+        // widening offset zeroed): all but ≤ 1.4/min of any tour's total is
+        // the seed's route realization under the new episode structure, and
+        // that ≤ 1.4/min marginal cost is the wide passes' deliberate banks
+        // off and back onto the ring. Bound: 16/min — unchanged, pinned
+        // from above by the 16.7 known-bad floor, now with only ~5% headroom
+        // over the worst seed: deliberate and documented (fixed seeds, so it
+        // cannot flake) — a tuning change that trips it has eaten the whole
+        // remaining distance to the flip-flop regime and deserves the look.
+        // Whether the wide passes' slow, paired banks *read* as flown is
+        // explicitly a layer-3 question.
         const HYSTERESIS = 0.03
         const MAX_SIGN_CHANGES_PER_MINUTE = 16
         let changes = 0
@@ -606,14 +725,14 @@ describe.each(GRIDS)(
         // anything was in frame. Void fraction = share of frames with no
         // Tower inside the FRAMING_CONE_DEG cone of the view axis (see
         // framing()'s doc comment for the definition's deliberate limits and
-        // its validation against the real captures). Calibrated per grid:
-        // the iteration-3 aim/ring retune measures 0.15-0.32 across all
-        // seeds/grids, `main` measures 0.29-0.34 per seed on 5x5 and
-        // 0.42-0.51 on kwok7/4x2 — each bound sits above the current
-        // observations with ~1.25x headroom and *below main's weakest
-        // (best-framed) seed on its grid* (5x5: bound 0.27 vs main's best
-        // 0.29), so a regression back to main-grade framing fails on every
-        // seed, not merely on average.
+        // its validation against the real captures). Calibrated per grid,
+        // re-tightened by iteration 4 (whose level gaze improved framing
+        // again). Observed per grid: 5x5 0.14-0.16 (bound 0.22, 1.38x
+        // headroom), 4x2 0.21-0.28 (bound 0.33, 1.18x), kwok7 0.18-0.24
+        // (bound 0.32, 1.33x). (Iteration 3 measured 0.15-0.32;
+        // pre-iteration-3 `main` 0.29-0.51.) Each bound sits below every
+        // pre-iteration-3 per-seed value on its grid, so a regression to
+        // pre-retune framing fails on every seed, not merely on average.
         let voidFrames = 0
         for (const pose of poses) {
           if (!framing(pose, placements).framed) voidFrames++
@@ -624,12 +743,17 @@ describe.each(GRIDS)(
       it('stays in among the Towers: a healthy share of the tour is genuine canyon flying (the zip guard — finding "dynamism" of the iteration-2 video verdict)', () => {
         // Time-in-canyon = share of frames below the roofline within 1.25
         // Tower spacings of the nearest Tower prism — the "zip through the
-        // urban canyons" sensation, mechanically. Calibrated per grid: the
-        // iteration-3 ring/aim retune measures 0.70-0.84 across all
-        // seeds/grids where `main` measures ~0.40 (kwok7) / ~0.55 (5x5) /
-        // ~0.41 (4x2) — the bounds sit below current observations with
-        // headroom but *above* main's level, so sliding back to a
-        // perimeter-heavy, distant tour fails here.
+        // urban canyons" sensation, mechanically. Calibrated per grid, and
+        // re-tightened by iteration 4 specifically because its wide
+        // overview passes *spend* this metric if left unguarded (every
+        // second of hero pass is a second not in a canyon — the widening
+        // is episode-gated and length-refunded so it converts existing
+        // rooftop-cruise time instead): observed 0.70-0.85 across all
+        // seeds/grids (iteration 3: 0.70-0.84; the pre-iteration-3 rebuild
+        // of the ring measured ~0.40-0.55). The bounds sit just below the
+        // per-grid worst observations (kwok7: 0.68 vs observed 0.70, the
+        // ticket's stated floor) — deliberately snug, so any future widening
+        // tune that starts eating canyon time fails here first.
         let canyonFrames = 0
         for (const pose of poses) {
           const f = framing(pose, placements)
