@@ -4,6 +4,9 @@ includes:
   web:
     taskfile: ./web/Taskfile.yml
     dir: ./web
+  capture:
+    taskfile: ./test/e2e/capture/Taskfile.yml
+    dir: ./test/e2e/capture
 
 tasks:
   build:

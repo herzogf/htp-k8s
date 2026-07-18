@@ -1,0 +1,25 @@
+# ADR-0011 layer-3 authoritative video capture harness (issue #120).
+#
+# Included by the root Taskfile as the `capture:` namespace, alongside the
+# `web:` namespace (see the root Taskfile.yml and web/Taskfile.yml for the
+# same pattern).
+version: '3'
+
+silent: true
+
+tasks:
+  record:
+    desc: >
+      ADR-0011 layer-3 authoritative video capture: builds the real binary,
+      spins up a throwaway kind+KWOK cluster, captures a raw CDP screencast
+      (not Playwright's built-in recorder — see docs/running-locally.md for
+      why) of a Demo Mode flight at full fidelity, encodes it, and analyzes
+      the pose trace (strongest turns, yaw-rate saturation clusters, tower
+      proximity, labeled stills). Tears down the cluster/app process and
+      deletes the raw JPEG frame cache when done. Override seed/duration/
+      viewport/output directory with HTP_K8S_CAPTURE_* env vars — see
+      test/e2e/capture/run.sh's header comment or docs/running-locally.md.
+      Use this before merging a feel-changing PR (camera/animation/aesthetic
+      work); it is NOT part of the regular test suite and is never run in CI.
+    cmds:
+      - ./run.sh
