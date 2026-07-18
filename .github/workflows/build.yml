@@ -331,6 +331,38 @@ jobs:
           kubectl cluster-info
           kubectl get nodes
 
+      # Container-behavior coverage for the published image's kubeconfig
+      # fallback (issue #113/PR #124). This is the one piece of that change no
+      # unit test can reach (internal/kube/client_test.go covers the decision
+      # function; this covers the real ko/Chainguard-static image's real
+      # non-root process). Reuses THIS job's already-provisioned kind cluster
+      # rather than spinning up a redundant one (ADR-0004) — it only needs a
+      # real, reachable kubeconfig, which the step above just verified. Runs
+      # before KWOK seeding so a regression here fails fast without paying for
+      # the seed step first.
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+
+      # Bare build (no frontend embed) is enough here — these checks only need
+      # the backend's kubeconfig-loading path, not real UI content. Same
+      # rationale as the Container scan (Trivy) job's local image build (see
+      # docs/agents/findings.md): the committed placeholder
+      # internal/server/dist/index.html lets `ko build --local` succeed without
+      # a frontend build.
+      - name: Build local container image (ko)
+        id: build-fallback-test-image
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: |
+          image="$(ko build --local ./cmd/htp-k8s)"
+          echo "Built image: ${image}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Container kubeconfig fallback (docker)
+        env:
+          IMAGE: ${{ steps.build-fallback-test-image.outputs.image }}
+        run: ./test/e2e/container-kubeconfig/run.sh
+
       # ADR-0004's "modest" tier: layer a KWOK controller plus a handful of fake
       # Nodes and ~30 fake Pods (varied phases) onto the single real kind node,
       # so the screenshot/video below show a populated multi-tower scene rather
