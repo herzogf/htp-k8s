@@ -13,7 +13,9 @@ import {
   sampleDemoIntro,
   sampleDemoTourPose,
   stepDemoTour,
+  VIEW_PITCH_MAX_ACCEL,
   VIEW_PITCH_MAX_RATE,
+  VIEW_YAW_MAX_ACCEL,
   VIEW_YAW_MAX_RATE,
 } from './demoMode'
 import { focusLookAngles, type Pose } from './focus'
@@ -243,6 +245,76 @@ describe.each(GRIDS)(
           )
           previous = angles
         }
+      })
+
+      it('turns its head smoothly: per-frame view yaw/pitch angular acceleration stays bounded (no C1 head-snap at waypoint boundaries)', () => {
+        // The #105 root cause: the view triplet was a plain rate limiter —
+        // C0-continuous but C1-discontinuous, so its angular velocity stepped
+        // instantly between 0 and ±MAX_RATE on saturation, release, or a
+        // target-side flip (instrumented at up to 180 rad/s² of rendered yaw
+        // acceleration, overwhelmingly at segment boundaries — the "pilot
+        // abruptly turns their head" at every waypoint). The bounded
+        // second-order follower makes these accelerations hold by
+        // construction, exactly as the roll invariants above do for the bank.
+        //
+        // The yaw bound is exact (the rendered yaw is the eased triplet's yaw
+        // verbatim). The pitch bound carries a calibrated slack on top of the
+        // follower's cap: sampleDemoTourPose's aim-window clamp (never above
+        // the roofline / below the canyon floor) pins the target's altitude
+        // while the camera itself climbs/descends, and the clamp's
+        // engagement/release re-keys the rendered pitch rate by up to
+        // ~verticalSpeed / horizontalReach in a frame — a rare, brief kink
+        // (observed ≤ ~9.6 rad/s² across all seeds/grids, ~a dozen frames
+        // per 450s of recorded flight) far below the pre-#105 rate-limiter
+        // snaps (up to 96 rad/s² of pitch), bounded here with ~1.5x headroom.
+        const MAX_YAW_ACCEL = VIEW_YAW_MAX_ACCEL + 1e-6
+        const MAX_PITCH_ACCEL = VIEW_PITCH_MAX_ACCEL + 12.5
+        let previous = focusLookAngles(poses[0].position, poses[0].target)
+        let previousYawRate: number | null = null
+        let previousPitchRate: number | null = null
+        for (let i = 1; i < poses.length; i++) {
+          const angles = focusLookAngles(poses[i].position, poses[i].target)
+          const yawRate = wrapAngle(angles.yaw - previous.yaw) / DT
+          const pitchRate = wrapAngle(angles.pitch - previous.pitch) / DT
+          if (previousYawRate !== null && previousPitchRate !== null) {
+            expect(Math.abs(yawRate - previousYawRate) / DT).toBeLessThanOrEqual(MAX_YAW_ACCEL)
+            expect(Math.abs(pitchRate - previousPitchRate) / DT).toBeLessThanOrEqual(
+              MAX_PITCH_ACCEL,
+            )
+          }
+          previousYawRate = yawRate
+          previousPitchRate = pitchRate
+          previous = angles
+        }
+      })
+
+      it('rarely saturates its pan rate: the aim demand stays continuous across waypoint boundaries (no per-waypoint head-turn rhythm)', () => {
+        // Calibrated bound on how often the rendered yaw runs pinned at its
+        // rate cap. Saturation means the demand outran the deliberate-pan
+        // limit — a head-snap demand. Pre-#105, the forward aim point was
+        // pinned at the arc table's end for ~40% of all frames and teleported
+        // a median ~3.9 world units at *every* segment rollover (the look-
+        // ahead distance exceeds one segment, and the table only spanned one
+        // future segment), so ~18% of all frames panned at the saturated
+        // constant rate — the "several route segments bolted together" feel.
+        // With the sliding window extended so the look-ahead always samples
+        // final-shape spline pieces (see SplineWindow), the demand is
+        // continuous by construction and the only saturation left is a
+        // handful of genuinely sharp 90° corner pans per tour (observed:
+        // 1-6 events of ≤ 0.9s each per 90s tour, per-seed fraction
+        // ≤ ~3.2%, vs ~65 rollovers — an occasional steady head-turn, not a
+        // per-waypoint rhythm; bounded with headroom).
+        const MAX_SATURATION_FRACTION = 0.05
+        let saturated = 0
+        let previous = focusLookAngles(poses[0].position, poses[0].target)
+        for (let i = 1; i < poses.length; i++) {
+          const angles = focusLookAngles(poses[i].position, poses[i].target)
+          if (Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT > VIEW_YAW_MAX_RATE * 0.98) {
+            saturated++
+          }
+          previous = angles
+        }
+        expect(saturated / (poses.length - 1)).toBeLessThanOrEqual(MAX_SATURATION_FRACTION)
       })
     })
 

@@ -299,6 +299,38 @@ export const VIEW_PITCH_MAX_RATE = 0.8
 const VIEW_DISTANCE_MAX_RATE = CANYON_TRAVEL_SPEED * 2
 
 /**
+ * Hard caps on the rendered view's angular *acceleration* (#105 — "several
+ * route segments bolted together" / the split-second view jumps): the view
+ * triplet is promoted from a plain rate limiter to the same bounded
+ * second-order follower the roll already uses ({@link stepBoundedFollower},
+ * mirroring {@link DEMO_ROLL_MAX_RATE}/{@link DEMO_ROLL_MAX_ACCEL}).
+ *
+ * A rate limiter is C0-continuous but C1-*dis*continuous: its angular
+ * velocity steps instantly between 0 and ±MAX_RATE whenever it saturates,
+ * releases, or the target crosses to the other side — instrumented on the
+ * pre-#105 code at up to **180 rad/s²** of rendered view-yaw acceleration (a
+ * full ±VIEW_YAW_MAX_RATE sign flip within one frame), overwhelmingly
+ * clustered at segment boundaries (near-boundary p99 ≈ 80 rad/s² vs ≈ 2
+ * rad/s² elsewhere). That C1 step *is* the maintainer's "pilot abruptly turns
+ * their head" at every waypoint, and — because a saturated yaw pans at a
+ * constant rate visibly decoupled from the flight's own banking — a large
+ * part of the "hovering quadcopter, not a Cessna" read. With the follower,
+ * the pan rate itself ramps smoothly through every demand change, so a
+ * heading change reads as a flowing head-turn that eases in and out.
+ *
+ * Each cap must satisfy `maxAccel × VIEW_RESPONSE_TIME > maxRate` (the same
+ * non-overshoot condition the roll follower documents: the rate can always
+ * decay at least as fast as the closing demand shrinks). Exported for the
+ * pose-stream smoothness invariants, which assert the rendered yaw/pitch
+ * accelerations across full seeded tours.
+ */
+export const VIEW_YAW_MAX_ACCEL = 4.0
+export const VIEW_PITCH_MAX_ACCEL = 2.5
+const VIEW_DISTANCE_MAX_ACCEL = CANYON_TRAVEL_SPEED * 6
+/** The view followers' shared response time constant (seconds) — how eagerly the eased view chases its demand, the counterpart of the roll's ROLL_RESPONSE_TIME. */
+const VIEW_RESPONSE_TIME = 0.4
+
+/**
  * The demand-driven look-at blend (ADR-0010, root-caused #91 follow-up 2):
  * inside a canyon, Towers already flank the forward look-ahead point, so the
  * pull toward the nearest one should contribute ≈0; it should only ramp up
@@ -415,7 +447,7 @@ const DEMO_BANK_GAIN = 1.4
  *
  * Now the instantaneous turn rate only sets a *target* bank; the actual roll
  * is a stateful, bounded second-order follower threaded through
- * {@link DemoTourState} and advanced by {@link stepRollFollower}:
+ * {@link DemoTourState} and advanced by {@link stepBoundedFollower}:
  *
  * - the roll *rate* is hard-capped at {@link DEMO_ROLL_MAX_RATE} (a calm
  *   ~40°/s — a light aircraft's gentle coordinated roll, never a flick), and
@@ -446,12 +478,12 @@ export const BANK_YAW_RATE_DEADBAND = 0.06
 const ROLL_RESPONSE_TIME = 0.4
 const ROLL_TARGET_MAX = DEMO_BANK_MAX - 0.035
 /**
- * The follower integrates in substeps no longer than this, so a single huge
- * frame delta (a stall, or a test deliberately stepping seconds at a time)
- * degrades to "several small smooth steps", never to one wild integration
- * step that could hurl the roll past its bounds.
+ * A bounded follower integrates in substeps no longer than this, so a single
+ * huge frame delta (a stall, or a test deliberately stepping seconds at a
+ * time) degrades to "several small smooth steps", never to one wild
+ * integration step that could hurl the value past its bounds.
  */
-const ROLL_MAX_SUBSTEP = 1 / 30
+const FOLLOWER_MAX_SUBSTEP = 1 / 30
 
 /** The target bank for a given instantaneous heading rate: deadbanded (straight flight targets exactly level), scaled, and clamped just inside the bank limit. */
 function bankTargetFromYawRate(yawRate: number): number {
@@ -460,31 +492,79 @@ function bankTargetFromYawRate(yawRate: number): number {
 }
 
 /**
- * One frame of the bounded roll follower (see {@link DEMO_ROLL_MAX_RATE}'s
- * doc comment): the roll rate approaches the demand `(target - roll) /
- * ROLL_RESPONSE_TIME` (clamped to ±DEMO_ROLL_MAX_RATE) at no more than
- * DEMO_ROLL_MAX_ACCEL per second, and the roll integrates that rate. Pure
- * `state -> state`, like everything else in this module.
+ * The tuning of one bounded second-order follower (see
+ * {@link stepBoundedFollower}): its hard rate cap, its hard acceleration cap,
+ * the time constant it chases its target with, and (optionally) a hard clamp
+ * on the followed value itself. Each instance should satisfy
+ * `maxAccel × responseTime > maxRate` so the rate can always decay at least
+ * as fast as the closing demand shrinks — the follower then cannot overshoot
+ * its target (the property {@link DEMO_ROLL_MAX_RATE}'s doc comment
+ * established for the roll).
  */
-function stepRollFollower(
-  roll: number,
-  rollRate: number,
+interface FollowerLimits {
+  readonly maxRate: number
+  readonly maxAccel: number
+  readonly responseTime: number
+  readonly clampMin?: number
+  readonly clampMax?: number
+}
+
+const ROLL_FOLLOWER: FollowerLimits = {
+  maxRate: DEMO_ROLL_MAX_RATE,
+  maxAccel: DEMO_ROLL_MAX_ACCEL,
+  responseTime: ROLL_RESPONSE_TIME,
+  clampMin: -DEMO_BANK_MAX,
+  clampMax: DEMO_BANK_MAX,
+}
+const VIEW_YAW_FOLLOWER: FollowerLimits = {
+  maxRate: VIEW_YAW_MAX_RATE,
+  maxAccel: VIEW_YAW_MAX_ACCEL,
+  responseTime: VIEW_RESPONSE_TIME,
+}
+const VIEW_PITCH_FOLLOWER: FollowerLimits = {
+  maxRate: VIEW_PITCH_MAX_RATE,
+  maxAccel: VIEW_PITCH_MAX_ACCEL,
+  responseTime: VIEW_RESPONSE_TIME,
+}
+const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
+  maxRate: VIEW_DISTANCE_MAX_RATE,
+  maxAccel: VIEW_DISTANCE_MAX_ACCEL,
+  responseTime: VIEW_RESPONSE_TIME,
+}
+
+/**
+ * One frame of a bounded second-order follower — the one smoothing shape this
+ * module uses for every rendered degree of freedom that must never snap (the
+ * roll since #91; the view yaw/pitch/distance triplet since #105): the rate
+ * approaches the demand `(target - value) / responseTime` (clamped to
+ * ±maxRate) at no more than maxAccel per second, and the value integrates
+ * that rate — bounded rate *and* bounded acceleration, so the followed signal
+ * is C1-smooth by construction where a plain rate limiter steps its velocity
+ * instantly on saturation/release/target flips. `angular` computes the demand
+ * through the shortest arc (for the wrapping yaw). Pure `state -> state`,
+ * like everything else in this module.
+ */
+function stepBoundedFollower(
+  value: number,
+  rate: number,
   target: number,
   delta: number,
-): { roll: number; rollRate: number } {
+  limits: FollowerLimits,
+  angular = false,
+): { value: number; rate: number } {
   let remaining = delta
   while (remaining > 1e-9) {
-    const h = Math.min(remaining, ROLL_MAX_SUBSTEP)
-    const desired = clamp(
-      (target - roll) / ROLL_RESPONSE_TIME,
-      -DEMO_ROLL_MAX_RATE,
-      DEMO_ROLL_MAX_RATE,
-    )
-    rollRate = approach(rollRate, desired, DEMO_ROLL_MAX_ACCEL * h)
-    roll = clamp(roll + rollRate * h, -DEMO_BANK_MAX, DEMO_BANK_MAX)
+    const h = Math.min(remaining, FOLLOWER_MAX_SUBSTEP)
+    const error = angular ? angleDelta(value, target) : target - value
+    const desired = clamp(error / limits.responseTime, -limits.maxRate, limits.maxRate)
+    rate = approach(rate, desired, limits.maxAccel * h)
+    value += rate * h
+    if (limits.clampMin !== undefined && limits.clampMax !== undefined) {
+      value = clamp(value, limits.clampMin, limits.clampMax)
+    }
     remaining -= h
   }
-  return { roll, rollRate }
+  return { value, rate }
 }
 
 /** Orbit-and-bob fallback tuning (single Tower / empty scene — see {@link createDemoTour}). */
@@ -918,23 +998,57 @@ function applyGlance(
 // Spline sampling
 // ---------------------------------------------------------------------------
 
-/** A 4-point sliding window: `window[1] -> window[2]` is the segment currently being flown. */
-type SplineWindow = readonly [Vector3, Vector3, Vector3, Vector3]
+/**
+ * A 6-point sliding window: `window[1] -> window[2]` is the segment currently
+ * being flown; `window[3]`, `window[4]` and `window[5]` are the three upcoming
+ * waypoints the walk has already drawn. Three known *future* waypoints (not
+ * one — the #105 demand-continuity fix), for two reasons stacked on top of
+ * each other:
+ *
+ * - The on-path look-ahead aims a fixed {@link LOOKAT_LOOKAHEAD_DISTANCE} of
+ *   arc ahead of the camera, and one future segment can be shorter than that
+ *   (an interior lattice hop is one Tower spacing — half the look-ahead), so
+ *   the old 4-point window's arc table ran out mid-segment: the forward aim
+ *   point sat *pinned at the head waypoint* for the back half of most
+ *   segments (~40% of all frames, instrumented) and then teleported a median
+ *   ~3.9 world units the instant the window rolled over — the demand-side
+ *   half of "the pilot abruptly turns their head at every waypoint". Two
+ *   future segments guarantee at least `TOWER_SPACING × 2` =
+ *   LOOKAT_LOOKAHEAD_DISTANCE of future arc from anywhere in the current
+ *   segment (adjacent canyon lines are never closer than one Tower spacing),
+ *   so the look-ahead never pins.
+ * - A Catmull-Rom piece's shape depends on its four surrounding points, so
+ *   the *last* known piece is still provisional: its shape refines when the
+ *   next waypoint replaces the open curve's reflected-end boundary condition.
+ *   With only two future waypoints the look-ahead regularly sampled that
+ *   provisional piece, leaving a residual demand step (p90 ≈ 0.45 world
+ *   units, instrumented) at each rollover. The third future waypoint puts
+ *   every piece the look-ahead can reach (`window[2] -> window[3] ->
+ *   window[4]`, at least the full look-ahead of arc) in its final shape, so
+ *   the aim demand is continuous across every boundary by construction —
+ *   `window[4] -> window[5]` is the only provisional piece left, and the
+ *   look-ahead can never reach into it.
+ *
+ * The same locality is why the extra trailing points change nothing about
+ * the flown segment's geometry: `window[1] -> window[2]` is shaped by
+ * `window[0..3]` alone, exactly as before.
+ */
+type SplineWindow = readonly [Vector3, Vector3, Vector3, Vector3, Vector3, Vector3]
 
 /**
  * Samples a {@link SplineWindow} at `localT` in `[0, 1]` (0 = `window[1]`, 1 =
- * `window[2]`). Builds a `CatmullRomCurve3` over all four points but only ever
- * reads the middle third of its parameter range — the standard trick for an
- * open, C1-continuous Catmull-Rom segment that still has the two outer points
- * to shape its tangents at both ends, so consecutive segments meet with
- * matching position *and* velocity (no teleport, no kink).
+ * `window[2]`). Builds a `CatmullRomCurve3` over all six points but only ever
+ * reads the `window[1] -> window[2]` fifth of its parameter range — the
+ * standard trick for an open, C1-continuous Catmull-Rom segment that still has
+ * the outer points to shape its tangents at both ends, so consecutive segments
+ * meet with matching position *and* velocity (no teleport, no kink).
  */
 function sampleSpline(
   window: SplineWindow,
   localT: number,
 ): { position: Vector3; tangent: Vector3 } {
   const curve = new CatmullRomCurve3([...window], false, CATMULL_ROM_TYPE)
-  const globalT = (1 + clamp01(localT)) / 3
+  const globalT = (1 + clamp01(localT)) / 5
   return { position: curve.getPoint(globalT), tangent: curve.getTangent(globalT).normalize() }
 }
 
@@ -949,9 +1063,9 @@ const ARC_LENGTH_SAMPLES = 64
 /**
  * The cumulative *horizontal* (x, z) arc length along the flyable remainder
  * of the sliding window — the current segment (`window[1] -> window[2]`,
- * `localT` 0..1) *plus* the already-known next segment (`window[2] ->
- * window[3]`, `localT` 1..2) — at {@link ARC_LENGTH_SAMPLES} evenly spaced
- * stations per segment. Two consumers:
+ * `localT` 0..1) *plus* the two already-known next segments (`window[2] ->
+ * window[3] -> window[4]`, `localT` 1..3) — at {@link ARC_LENGTH_SAMPLES}
+ * evenly spaced stations per segment. Two consumers:
  *
  * - the tour's advance: turning "move `CANYON_TRAVEL_SPEED × delta` world
  *   units of ground travel" into a spline parameter (see
@@ -960,7 +1074,8 @@ const ARC_LENGTH_SAMPLES = 64
  *   hitch at segment boundaries (the "~42s stutter");
  * - the look-at: the forward aim point sits a fixed *arc distance ahead on
  *   the future flight path* (see {@link stepDemoTour}), which is why the
- *   table extends into the next segment.
+ *   table extends into the next segments — both of them, so the look-ahead
+ *   never runs off the table's end (see {@link SplineWindow}).
  *
  * Horizontal (not 3D) arc length on purpose: the camera's rendered altitude
  * is the glide-slope pursuit's (`state.altitude`), not the spline's own Y,
@@ -969,19 +1084,19 @@ const ARC_LENGTH_SAMPLES = 64
 function segmentHorizontalArc(window: SplineWindow): number[] {
   const curve = new CatmullRomCurve3([...window], false, CATMULL_ROM_TYPE)
   const cumulative = [0]
-  let previous = curve.getPoint(1 / 3)
-  for (let i = 1; i <= 2 * ARC_LENGTH_SAMPLES; i++) {
-    const point = curve.getPoint((1 + i / ARC_LENGTH_SAMPLES) / 3)
+  let previous = curve.getPoint(1 / 5)
+  for (let i = 1; i <= 3 * ARC_LENGTH_SAMPLES; i++) {
+    const point = curve.getPoint((1 + i / ARC_LENGTH_SAMPLES) / 5)
     cumulative.push(cumulative[i - 1] + Math.hypot(point.x - previous.x, point.z - previous.z))
     previous = point
   }
   return cumulative
 }
 
-/** Samples the window at an extended `localT` in `[0, 2]` — reaching into the already-known next segment (`window[2] -> window[3]`), for the on-path look-ahead. */
+/** Samples the window at an extended `localT` in `[0, 3]` — reaching into the already-known next segments (`window[2] -> window[3] -> window[4]`), for the on-path look-ahead. */
 function sampleSplineExtended(window: SplineWindow, localT: number): Vector3 {
   const curve = new CatmullRomCurve3([...window], false, CATMULL_ROM_TYPE)
-  return curve.getPoint((1 + clamp(localT, 0, 2)) / 3)
+  return curve.getPoint((1 + clamp(localT, 0, 3)) / 5)
 }
 
 /** The current segment's (`window[1] -> window[2]`) total horizontal arc length off a {@link segmentHorizontalArc} table. */
@@ -991,9 +1106,9 @@ function segmentArcLength(cumulative: readonly number[]): number {
 
 /**
  * Inverts a {@link segmentHorizontalArc} table: the segment-local `t` (in
- * `[0, 2]` — the table spans the current *and* the next segment) at which
- * `distance` world units of horizontal travel have been covered. Clamps to
- * the table's extent.
+ * `[0, 3]` — the table spans the current segment *and* the two known next
+ * ones) at which `distance` world units of horizontal travel have been
+ * covered. Clamps to the table's extent.
  */
 function arcDistanceToLocalT(cumulative: readonly number[], distance: number): number {
   const total = cumulative[cumulative.length - 1]
@@ -1021,15 +1136,6 @@ function horizontalHeading(tangent: Vector3, fallback: number): number {
     return fallback
   }
   return Math.atan2(tangent.x, tangent.z)
-}
-
-/** {@link approach} for angles: turns `current` toward `target` through the shortest arc, at most `maxDelta` radians. */
-function approachAngle(current: number, target: number, maxDelta: number): number {
-  const diff = angleDelta(current, target)
-  if (Math.abs(diff) <= maxDelta) {
-    return target
-  }
-  return current + Math.sign(diff) * maxDelta
 }
 
 /**
@@ -1327,7 +1433,7 @@ interface CanyonTourState {
   kind: 'canyon'
   graph: CanyonGraph
   rngState: number
-  /** Lattice coordinate of `window[3]` — the walk's leading edge. */
+  /** Lattice coordinate of `window[5]` — the walk's leading edge. */
   headCoord: LatticeCoord
   headMove: LatticeMove
   window: SplineWindow
@@ -1393,15 +1499,22 @@ interface CanyonTourState {
   lookAtPullPoint: [number, number, number]
   glance: GlanceState
   /**
-   * The rendered view direction, as camera-relative yaw/pitch/distance eased
-   * at {@link VIEW_YAW_MAX_RATE}/{@link VIEW_PITCH_MAX_RATE}/
-   * {@link VIEW_DISTANCE_MAX_RATE} toward the demand-driven look-at — the
-   * pipeline's *output* guardrail (see VIEW_YAW_MAX_RATE's doc comment).
+   * The rendered view direction, as camera-relative yaw/pitch/distance —
+   * each a bounded second-order follower ({@link stepBoundedFollower}, #105)
+   * chasing the demand-driven look-at under the {@link VIEW_YAW_MAX_RATE}/
+   * {@link VIEW_PITCH_MAX_RATE}/{@link VIEW_DISTANCE_MAX_RATE} rate caps
+   * *and* the {@link VIEW_YAW_MAX_ACCEL}/{@link VIEW_PITCH_MAX_ACCEL}
+   * acceleration caps — the pipeline's *output* guardrail (see
+   * VIEW_YAW_MAX_RATE's and VIEW_YAW_MAX_ACCEL's doc comments).
    * {@link sampleDemoTourPose} reconstructs the look-at point from these.
    */
   viewYaw: number
   viewPitch: number
   viewDistance: number
+  /** The view followers' current rates — their second state variables, exactly as `rollRate` is the roll follower's. */
+  viewYawRate: number
+  viewPitchRate: number
+  viewDistanceRate: number
 }
 
 /**
@@ -1493,6 +1606,8 @@ export function createDemoTour(params: {
   let p1: Vector3
   let p2: Vector3
   let p3: Vector3
+  let p4: Vector3
+  let p5: Vector3
   let headCoord: LatticeCoord
   let headMove: LatticeMove
   let altitudeProgram: AltitudeProgram
@@ -1514,13 +1629,29 @@ export function createDemoTour(params: {
       rngState,
       approach,
     )
+    const step2 = drawNextWaypoint(
+      graph,
+      step1.waypoint.coord,
+      step1.move,
+      step1.program,
+      step1.nextState,
+    )
+    const step3 = drawNextWaypoint(
+      graph,
+      step2.waypoint.coord,
+      step2.move,
+      step2.program,
+      step2.nextState,
+    )
     p1 = cameraPosition
     p2 = entryWaypoint
     p3 = step1.waypoint.position
-    headCoord = step1.waypoint.coord
-    headMove = step1.move
-    altitudeProgram = step1.program
-    rngState = step1.nextState
+    p4 = step2.waypoint.position
+    p5 = step3.waypoint.position
+    headCoord = step3.waypoint.coord
+    headMove = step3.move
+    altitudeProgram = step3.program
+    rngState = step3.nextState
   } else {
     // The camera already sits on the entry node — start the walk there
     // directly rather than flying a degenerate zero-length takeoff segment.
@@ -1532,19 +1663,35 @@ export function createDemoTour(params: {
       step1.program,
       step1.nextState,
     )
+    const step3 = drawNextWaypoint(
+      graph,
+      step2.waypoint.coord,
+      step2.move,
+      step2.program,
+      step2.nextState,
+    )
+    const step4 = drawNextWaypoint(
+      graph,
+      step3.waypoint.coord,
+      step3.move,
+      step3.program,
+      step3.nextState,
+    )
     p1 = entryWaypoint
     p2 = step1.waypoint.position
     p3 = step2.waypoint.position
-    headCoord = step2.waypoint.coord
-    headMove = step2.move
-    altitudeProgram = step2.program
-    rngState = step2.nextState
+    p4 = step3.waypoint.position
+    p5 = step4.waypoint.position
+    headCoord = step4.waypoint.coord
+    headMove = step4.move
+    altitudeProgram = step4.program
+    rngState = step4.nextState
   }
   // Mirror p2 through p1 for a synthetic "point behind the entry" — the
   // standard way to give an open Catmull-Rom curve a sensible starting
   // tangent (zero initial curvature) with no real history to draw on yet.
   const p0 = p1.clone().multiplyScalar(2).sub(p2)
-  const window: SplineWindow = [p0, p1, p2, p3]
+  const window: SplineWindow = [p0, p1, p2, p3, p4, p5]
 
   const glanceRoll = rollGlance(rngState)
 
@@ -1591,6 +1738,11 @@ export function createDemoTour(params: {
     viewYaw: entryView.yaw,
     viewPitch: entryView.pitch,
     viewDistance: entryView.distance,
+    // The view followers start at rest, like the roll: their rates ramp in
+    // under the acceleration caps from the very first frame.
+    viewYawRate: 0,
+    viewPitchRate: 0,
+    viewDistanceRate: 0,
   }
 }
 
@@ -1665,7 +1817,14 @@ export function stepDemoTour(
       altitudeProgram,
       rngState,
     )
-    window = [state.window[1], state.window[2], state.window[3], picked.waypoint.position]
+    window = [
+      state.window[1],
+      state.window[2],
+      state.window[3],
+      state.window[4],
+      state.window[5],
+      picked.waypoint.position,
+    ]
     headCoord = picked.waypoint.coord
     headMove = picked.move
     altitudeProgram = picked.program
@@ -1732,7 +1891,13 @@ export function stepDemoTour(
   // DEMO_ROLL_MAX_RATE's doc comment.
   const heading = horizontalHeading(currentTangent, state.heading)
   const yawRate = delta > 1e-9 ? angleDelta(state.heading, heading) / delta : 0
-  const rolled = stepRollFollower(state.roll, state.rollRate, bankTargetFromYawRate(yawRate), delta)
+  const rolled = stepBoundedFollower(
+    state.roll,
+    state.rollRate,
+    bankTargetFromYawRate(yawRate),
+    delta,
+    ROLL_FOLLOWER,
+  )
 
   // The blend must ease toward the deficiency of the *forward look-ahead
   // point* (what the camera is about to aim at), not the camera's own
@@ -1768,9 +1933,12 @@ export function stepDemoTour(
     LOOKAT_PULL_POINT_EASE_RATE * delta,
   )
 
-  // The rendered view direction eases toward the demand-driven target at
-  // hard-capped angular rates — the pipeline's output guardrail (see
-  // VIEW_YAW_MAX_RATE's doc comment).
+  // The rendered view direction follows the demand-driven target through the
+  // bounded second-order followers — hard-capped angular rate *and*
+  // acceleration, the pipeline's output guardrail (see VIEW_YAW_MAX_RATE's
+  // and VIEW_YAW_MAX_ACCEL's doc comments). A plain rate limiter here was
+  // #105's root cause: its velocity stepped instantly on saturation/release/
+  // target flips — the "head snap" at waypoint boundaries.
   const rawTarget = composeLookAt(
     actualPosition,
     forward,
@@ -1779,15 +1947,28 @@ export function stepDemoTour(
     glance,
   )
   const rawView = viewTripletTo(actualPosition, rawTarget)
-  const viewYaw = angleDelta(
-    0,
-    approachAngle(state.viewYaw, rawView.yaw, VIEW_YAW_MAX_RATE * delta),
+  const yawFollowed = stepBoundedFollower(
+    state.viewYaw,
+    state.viewYawRate,
+    rawView.yaw,
+    delta,
+    VIEW_YAW_FOLLOWER,
+    true,
   )
-  const viewPitch = approach(state.viewPitch, rawView.pitch, VIEW_PITCH_MAX_RATE * delta)
-  const viewDistance = approach(
+  const viewYaw = angleDelta(0, yawFollowed.value)
+  const pitchFollowed = stepBoundedFollower(
+    state.viewPitch,
+    state.viewPitchRate,
+    rawView.pitch,
+    delta,
+    VIEW_PITCH_FOLLOWER,
+  )
+  const distanceFollowed = stepBoundedFollower(
     state.viewDistance,
+    state.viewDistanceRate,
     rawView.distance,
-    VIEW_DISTANCE_MAX_RATE * delta,
+    delta,
+    VIEW_DISTANCE_FOLLOWER,
   )
 
   return {
@@ -1803,14 +1984,17 @@ export function stepDemoTour(
     climbGradient,
     altitudeProgram,
     heading,
-    roll: rolled.roll,
-    rollRate: rolled.rollRate,
+    roll: rolled.value,
+    rollRate: rolled.rate,
     lookAtBlend,
     lookAtPullPoint,
     glance,
     viewYaw,
-    viewPitch,
-    viewDistance,
+    viewPitch: pitchFollowed.value,
+    viewDistance: distanceFollowed.value,
+    viewYawRate: yawFollowed.rate,
+    viewPitchRate: pitchFollowed.rate,
+    viewDistanceRate: distanceFollowed.rate,
   }
 }
 
