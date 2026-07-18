@@ -131,12 +131,26 @@ release:
   #
   # Content is deliberately scoped to what release.yml/ADR-0005 actually ship
   # today: multi-arch pull/run + build-provenance verification (the index-level
-  # `attest-build-provenance` from the `image` job). It does NOT claim an
-  # image SBOM (the `sboms` block below only covers archives — see issue #98)
-  # and does NOT show a `cosign verify` example (no bare cosign signature is
-  # emitted yet — that's issue #100 to decide). The `docker run` line mirrors
-  # the README's current example (explicit `-e KUBECONFIG`); issue #113 may
-  # change that default, at which point this footer needs a matching update.
+  # `attest-build-provenance` from the `image` job) for BOTH the image and the
+  # release binaries (issue #99 explicitly asks for the binary line too, to
+  # cover the whole supply chain in one place — command mirrors README.md's
+  # existing one). It does NOT claim an image SBOM (the `sboms` block below
+  # only covers archives — see issue #98) and does NOT show a `cosign verify`
+  # example (no bare cosign signature is emitted yet — that's issue #100 to
+  # decide). The `docker run` line mirrors the README's current example
+  # (explicit `-e KUBECONFIG`, plus the README's `# then open
+  # http://localhost:8080` follow-up so the reader has a next step); issue
+  # #113 may change the KUBECONFIG default. Deliberately NOT copying the
+  # README's `--network host` local-kind caveat here — a release-notes reader
+  # is more likely pointing at a remote/real cluster than a local kind
+  # cluster on the same host, so it'd be noise for the likelier reader here
+  # (unlike the README's Quickstart, which leads with a local kind cluster).
+  #
+  # `--signer-workflow` on both `gh attestation verify` calls: `--repo` alone
+  # only proves SOME workflow in this repo produced the attestation, not
+  # specifically `release.yml` — the prose right below the commands claims the
+  # latter, so the flag is there to make that claim actually true, not just
+  # plausible.
   # NOTE the leading blank line: GoReleaser's body template joins the
   # changelog and this footer with exactly ONE newline (see
   # internal/pipe/release/body.go), so a footer starting directly with `---`
@@ -166,19 +180,23 @@ release:
       -e KUBECONFIG=/kube/config \
       -v "$HOME/.kube/config:/kube/config:ro" \
       ghcr.io/herzogf/htp-k8s:{{ .Tag }}
+    # then open http://localhost:8080
     ```
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.
     {{- end }}
 
-    Verify build provenance (keyless, Sigstore-backed — no keys to manage):
+    Verify build provenance (keyless, Sigstore-backed — no keys to manage) — for the image, and for any release binary you downloaded:
 
     ```bash
-    gh attestation verify oci://ghcr.io/herzogf/htp-k8s:{{ .Tag }} --repo herzogf/htp-k8s
+    gh attestation verify oci://ghcr.io/herzogf/htp-k8s:{{ .Tag }} --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
+
+    # adjust the filename to the platform you downloaded
+    gh attestation verify htp-k8s_{{ trimprefix .Tag "v" }}_linux_amd64.tar.gz --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
     ```
 
-    A passing check means this image was built by this repo's release workflow and hasn't been tampered with since. More on the posture: [ADR-0005](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0005-supply-chain-security-posture.md).
+    A passing check means the artifact was built by this repo's `release.yml` workflow and hasn't been tampered with since. More on the posture: [ADR-0005](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0005-supply-chain-security-posture.md).
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
