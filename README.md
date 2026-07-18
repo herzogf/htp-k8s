@@ -64,12 +64,12 @@ Runs on **vanilla Kubernetes**. **OpenShift** support is planned but **not yet t
 
 ## Controls
 
-- **Fly:** click the canvas to grab the pointer, then `WASD` (or the arrow keys) plus the mouse to fly and look around. `Esc` releases the pointer again.
-- **Inspect:** click any tower or pod panel to fly the camera to it and open its detail popup; `Esc`, its close button, or a click on empty space dismisses it.
-- **Demo Mode:** click the **Demo Mode** toggle (top right) to start or stop the hands-off canyon tour.
+- **Fly:** click the canvas to grab the pointer, then `WASD` (or the arrow keys) to fly, `Space`/`Shift` to rise/descend, and the mouse to look around. `Esc` releases the pointer again.
+- **Inspect:** with the pointer released, click any tower or pod panel to fly the camera to it and open its detail popup; `Esc`, its close button, or a click on empty space dismisses it.
+- **Demo Mode:** click the **Demo Mode** toggle (top right) to start the hands-off canyon tour; manual flight resumes as soon as you switch it back off.
 - **Quit:** close the tab, then `Ctrl-C` the binary/container.
 
-The full control scheme (including vertical flight) is in [Running & developing locally](docs/running-locally.md#controls).
+The full control scheme is in [Running & developing locally](docs/running-locally.md#controls).
 
 ## Supply chain
 
