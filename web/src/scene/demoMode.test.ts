@@ -16,6 +16,9 @@ import {
   OVERVIEW_ALTITUDE_MAX,
   OVERVIEW_ALTITUDE_MIN,
   OVERVIEW_EPISODE_WAYPOINTS,
+  OVERVIEW_PERIMETER_EXTRA,
+  OVERVIEW_WIDE_APEX_MAX,
+  OVERVIEW_WIDE_EPISODE_WAYPOINTS,
   OVERVIEW_GAP_WAYPOINTS_MIN,
   PERIMETER_OFFSET,
   sampleDemoIntro,
@@ -459,11 +462,19 @@ describe('overview passes are sustained, paced episodes (#91 climb-choreography 
 
     // A long walk over paced episodes must contain several overview episodes…
     expect(overviewRuns.length).toBeGreaterThanOrEqual(3)
-    // …and every one of them sustains its single drawn apex for the full
+    // …and every one of them sustains its single drawn apex for exactly its
     // episode length — the intent never resets to a fresh draw mid-episode
-    // (which is exactly what compressed the old climbs into pop-ups).
+    // (which is exactly what compressed the old climbs into pop-ups). Since
+    // #105 iteration 4 the episode length is apex-dependent: shallow-apex
+    // episodes are the *wide* ones and run one waypoint shorter (the length
+    // refund that pays for their wide detour — see
+    // OVERVIEW_WIDE_EPISODE_WAYPOINTS).
     for (const run of overviewRuns) {
-      expect(run.length).toBeGreaterThanOrEqual(OVERVIEW_EPISODE_WAYPOINTS)
+      const expected =
+        run.y <= OVERVIEW_WIDE_APEX_MAX
+          ? OVERVIEW_WIDE_EPISODE_WAYPOINTS
+          : OVERVIEW_EPISODE_WAYPOINTS
+      expect(run.length).toBe(expected)
     }
   })
 
@@ -524,6 +535,81 @@ describe('overview passes are sustained, paced episodes (#91 climb-choreography 
       expect(returnedToCanyon).toBe(true)
     },
   )
+})
+
+describe('wide overview episodes swing the perimeter waypoints outward (#105 iteration 4)', () => {
+  // kwok7-shaped ring-dominant grid geometry is where wide passes live, but
+  // the property is structural, so the reference 5x5 exercises it too.
+  const placements = grid(5, 5)
+  const graph = buildCanyonGraph(placements)!
+  const seeds = [42424242, 1, 7, 13, 99]
+
+  /** Every raw waypoint (walk order) of a long tour, read off the state's leading edge like recordWaypointAltitudes does. */
+  function recordWaypoints(seed: number): Vector3[] {
+    let tour: DemoTourState = createDemoTour({ seed, placements, entry: ORIGIN_POSE })
+    const waypoints: Vector3[] = []
+    let lastKey = ''
+    const record = () => {
+      if (tour.kind !== 'canyon') return
+      const key = `${tour.headCoord.i},${tour.headCoord.j}`
+      if (key !== lastKey) {
+        lastKey = key
+        waypoints.push(tour.rawTail.clone())
+      }
+    }
+    record()
+    for (let i = 0; i < 3400; i++) {
+      tour = stepDemoTour(tour, 0.15, placements)
+      record()
+    }
+    return waypoints
+  }
+
+  it('widens only shallow-apex overview waypoints, by exactly the extra offset, on exactly one axis, never at ring corners', () => {
+    const minX = graph.xs[0]
+    const maxX = graph.xs[graph.xs.length - 1]
+    const minZ = graph.zs[0]
+    const maxZ = graph.zs[graph.zs.length - 1]
+    let widened = 0
+    for (const seed of seeds) {
+      for (const w of recordWaypoints(seed)) {
+        const outX = w.x < minX - 1e-9 || w.x > maxX + 1e-9
+        const outZ = w.z < minZ - 1e-9 || w.z > maxZ + 1e-9
+        if (!outX && !outZ) continue
+        widened++
+        // Exactly one axis beyond its ring line (ring corners never widen)…
+        expect(outX !== outZ).toBe(true)
+        // …by exactly the wide offset (the lattice knows no other off-ring
+        // position)…
+        const overshoot = outX
+          ? Math.min(Math.abs(w.x - minX), Math.abs(w.x - maxX))
+          : Math.min(Math.abs(w.z - minZ), Math.abs(w.z - maxZ))
+        expect(overshoot).toBeCloseTo(OVERVIEW_PERIMETER_EXTRA, 9)
+        // …and only while a *shallow-apex* (wide) overview episode is
+        // running: the waypoint's own drawn altitude is that apex.
+        expect(w.y).toBeGreaterThan(TOWER_HEIGHT)
+        expect(w.y).toBeLessThanOrEqual(OVERVIEW_WIDE_APEX_MAX)
+      }
+    }
+    // Sanity check on the test itself: the recorded walks actually contained
+    // wide-phase waypoints, or nothing above was exercised.
+    expect(widened).toBeGreaterThan(0)
+  })
+
+  it('never widens deep-apex overview waypoints (deep episodes stay on the tight ring)', () => {
+    // Complements the test above from the other side: collect every
+    // deep-apex overview waypoint and require it exactly on lattice lines.
+    let deepOverview = 0
+    for (const seed of seeds) {
+      for (const w of recordWaypoints(seed)) {
+        if (w.y <= OVERVIEW_WIDE_APEX_MAX) continue
+        deepOverview++
+        expect(graph.xs.some((x) => Math.abs(w.x - x) < 1e-9)).toBe(true)
+        expect(graph.zs.some((z) => Math.abs(w.z - z) < 1e-9)).toBe(true)
+      }
+    }
+    expect(deepOverview).toBeGreaterThan(0)
+  })
 })
 
 /**
