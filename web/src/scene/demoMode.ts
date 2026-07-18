@@ -469,12 +469,50 @@ const CATMULL_ROM_TYPE = 'centripetal'
  * CORNER_TURN_RADIUS` ≈ 2.4 rad/s), makes the heading rate through a corner
  * single-signed (the arc has one curvature direction — no counter-flexure,
  * no per-corner horizon rock), and stretches the turn over ~4x the ground
- * distance — a flown arc, not a pivot. The 0.45 factor (not 0.5) leaves a
- * short straight remnant between back-to-back corners so consecutive
- * chamfer points can never coincide (coincident control points degenerate a
- * Catmull-Rom tangent).
+ * distance — a flown arc, not a pivot. The 0.45 factor (not 0.5) sizes a
+ * standard 90° corner's tangent offsets comfortably inside half a lattice
+ * leg; the hard never-collide guarantee for *any* turn angle or leg length
+ * is {@link CORNER_MAX_LEG_FRACTION}'s.
  */
 export const CORNER_TURN_RADIUS = TOWER_SPACING * 0.45
+
+/**
+ * The hard cap on how far along either adjacent leg a corner's tangent
+ * offset may reach: just under half, so two corners rounding a shared leg
+ * always leave a nonzero straight remnant between their control points
+ * (0.49, not 0.5 — offsets meeting exactly at a leg's midpoint would place
+ * coincident control points, which degenerate a Catmull-Rom tangent). This —
+ * not {@link CORNER_TURN_RADIUS}'s 0.45 — is the guard that *enforces*
+ * no-collision; the design radius merely stays inside it for the standard
+ * lattice geometry.
+ */
+const CORNER_MAX_LEG_FRACTION = 0.49
+
+/**
+ * Below this arc radius a corner is not meaningfully roundable and keeps its
+ * sharp node instead (the pre-rounding pivot behaviour): as a turn
+ * approaches a hairpin, the leg-fraction clamp shrinks the inscribed radius
+ * toward zero, and an "arc" that small collapses into near-coincident
+ * control points beside full-length legs — the tiny-chord regime that
+ * produces spline cusps (see {@link CORNER_ARC_MAX_STEP}'s history). In
+ * practice only dead-end backtracks (1×N clusters) and pathological
+ * activation angles land here: the walk's approach-alignment filter keeps
+ * ordinary entry corners at ≤ 90°, and lattice corners are exactly 90°.
+ * Expressed as a radius floor rather than an angle cutoff so sharp-but-
+ * roundable turns on long legs still get their arc.
+ */
+const CORNER_MIN_TURN_RADIUS = CORNER_TURN_RADIUS / 4
+
+/**
+ * Below this turn angle (~1°) a "corner" is treated as straight-through and
+ * keeps its node: it is visually straight (an open Catmull-Rom absorbs a
+ * sub-degree kink smoothly on its own), and its inscribed arc would collapse
+ * to near-coincident control points beside full-length legs — the same
+ * degenerate-chord regime {@link CORNER_MIN_TURN_RADIUS} guards at the
+ * hairpin end. Lattice corners are exactly 90°; only a takeoff corner from
+ * an almost-perfectly-aligned activation pose can land under this.
+ */
+const CORNER_MIN_TURN_ANGLE = 0.02
 
 /**
  * Scales the path's turn rate (rad/s of heading change) into a *target* bank
@@ -1129,16 +1167,17 @@ const CORNER_ARC_MAX_STEP = Math.PI / 6
 /**
  * Expands one raw walk waypoint into its spline control points (#105
  * iteration 2 — the corner rounding {@link CORNER_TURN_RADIUS} documents).
- * Straight-through waypoints (and the rare dead-end hairpin, which no arc
- * can round) pass through unchanged. A corner is replaced by points sampled
- * on the exact inscribed circular arc of radius {@link CORNER_TURN_RADIUS}
- * tangent to both legs — the two tangent points plus one intermediate on-arc
- * point per {@link CORNER_ARC_MAX_STEP} of turn — shrunk where a leg is too
- * short for the tangent offset (never past just-under-half a leg, so
- * neighbouring corners' points never collide or reorder). All points carry
- * the waypoint's own drawn altitude, so the altitude program's rhythm is
- * untouched by the expansion. Pure geometry over three consecutive raw
- * positions — the lattice/graph logic above knows nothing of it.
+ * Straight-through waypoints pass through unchanged. A corner is replaced by
+ * points sampled on the exact inscribed circular arc of radius
+ * {@link CORNER_TURN_RADIUS} tangent to both legs — one on-arc point per
+ * {@link CORNER_ARC_MAX_STEP} of turn — shrunk where a leg is too short for
+ * the tangent offset ({@link CORNER_MAX_LEG_FRACTION}, so neighbouring
+ * corners' points never collide or reorder). A turn so sharp that the
+ * shrunken radius falls below {@link CORNER_MIN_TURN_RADIUS} (a near-exact
+ * hairpin) keeps its sharp node. All points carry the waypoint's own drawn
+ * altitude, so the altitude program's rhythm is untouched by the expansion.
+ * Pure geometry over three consecutive raw positions — the lattice/graph
+ * logic above knows nothing of it.
  */
 function expandWaypoint(previous: Vector3, current: Vector3, next: Vector3): Vector3[] {
   const inX = current.x - previous.x
@@ -1156,19 +1195,26 @@ function expandWaypoint(previous: Vector3, current: Vector3, next: Vector3): Vec
   const uOutZ = outZ / lengthOut
   const cross = uInX * uOutZ - uInZ * uOutX
   const dot = uInX * uOutX + uInZ * uOutZ
-  if ((Math.abs(cross) < 1e-6 && dot > 0) || dot < -0.9) {
+  const turnAngle = Math.abs(Math.atan2(cross, dot))
+  if (turnAngle < CORNER_MIN_TURN_ANGLE) {
     return [current.clone()]
   }
-  // The turn angle and the tangent offset `d` along each leg for an inscribed
-  // arc of the desired radius (d = r·tan(θ/2)); where a leg is too short for
-  // that offset, the offset is clamped and the radius shrinks to match.
-  const turnAngle = Math.abs(Math.atan2(cross, dot))
+  // The tangent offset `d` along each leg for an inscribed arc of the
+  // desired radius (d = r·tan(θ/2)); where a leg is too short for that
+  // offset, the offset is clamped and the radius shrinks to match. As the
+  // turn approaches a hairpin, tan(θ/2) → ∞ drives the clamped radius
+  // toward zero — the CORNER_MIN_TURN_RADIUS floor below then bails to the
+  // sharp node (this also covers exact 180°, where the arc construction
+  // itself would degenerate: cross = 0 ⇒ no turn side).
   const tangentOffset = Math.min(
     CORNER_TURN_RADIUS * Math.tan(turnAngle / 2),
-    0.49 * lengthIn,
-    0.49 * lengthOut,
+    CORNER_MAX_LEG_FRACTION * lengthIn,
+    CORNER_MAX_LEG_FRACTION * lengthOut,
   )
   const radius = tangentOffset / Math.tan(turnAngle / 2)
+  if (radius < CORNER_MIN_TURN_RADIUS) {
+    return [current.clone()]
+  }
   // The arc's centre sits one radius inside the turn from the entry tangent
   // point, perpendicular to the incoming leg.
   const entryX = current.x - uInX * tangentOffset
@@ -2149,8 +2195,10 @@ export function stepDemoTour(
   // extendWindow's doc comment): the table must outreach this frame's own
   // travel + look-ahead so the aim demand can never pin at the table end.
   // Coverage draws plan on the frame's graph (refreshed at the last
-  // rollover); a placements change thus reaches route planning within at
-  // most one piece of flight, the same laziness ADR-0010 already accepts.
+  // rollover), so a placements change reaches *new* draws within at most
+  // one piece of flight — though the waypoints already drawn ahead (up to a
+  // look-ahead's worth of route) were planned on the older graph and are
+  // still flown as drawn, the same laziness ADR-0010 already accepts.
   cumulative = extendWindow(frontier, graph, traveled + LOOKAT_LOOKAHEAD_DISTANCE, cumulative)
   const window: SplineWindow = frontier.window
 
@@ -2159,9 +2207,11 @@ export function stepDemoTour(
 
   // The camera's actual altitude (#91 climb-rate tuning pass, reworked to a
   // per-frame gradient cap by the elevator-look follow-up, then to a *slewed*
-  // gradient by the smoothness pass): a pursuit of the current segment's
-  // destination altitude (`window[2].y`, the waypoint this segment is flying
-  // toward), never the spline's own (possibly steep) Y directly. The flown
+  // gradient by the smoothness pass): a pursuit of the current piece's
+  // destination altitude (`window[2].y` — the altitude-target metadata the
+  // control point carries: the drawn altitude of the raw waypoint it came
+  // from, whether that point is the waypoint itself or one of its corner's
+  // arc samples), never the spline's own (possibly steep) Y directly. The flown
   // gradient — Δaltitude per world unit of *this frame's actual horizontal
   // travel* — is (a) capped at ±MAX_CLIMB_GRADIENT so the visual climb angle
   // can never exceed atan(MAX_CLIMB_GRADIENT) no matter how a frame moves,

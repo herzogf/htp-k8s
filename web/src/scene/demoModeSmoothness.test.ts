@@ -129,10 +129,14 @@ function wrapAngle(d: number): number {
  * identifying its frames mechanically lets the pitch invariants hold the
  * *exact* follower caps everywhere else.
  */
+function aimClampEngaged(pose: DemoPose): boolean {
+  const y = pose.target[1]
+  return y <= LOOKAT_AIM_FLOOR + 1e-6 || y >= TOWER_HEIGHT - 1e-6
+}
+
 function aimClampEngagedNear(poses: DemoPose[], i: number, span: number): boolean {
   for (let j = Math.max(0, i - span); j <= i; j++) {
-    const y = poses[j].target[1]
-    if (y <= LOOKAT_AIM_FLOOR + 1e-6 || y >= TOWER_HEIGHT - 1e-6) {
+    if (aimClampEngaged(poses[j])) {
       return true
     }
   }
@@ -327,6 +331,20 @@ describe.each(GRIDS)(
         }
       })
 
+      it('keeps the aim-window-clamp exception narrow: clamp-engaged frames stay a small share of the tour', () => {
+        // The pitch invariants above hold the exact follower caps on every
+        // frame *except* mechanically identified aim-window-clamp frames.
+        // That exception is only honest while it stays rare: without this
+        // bound, a future change that parks the aim on the clamp (e.g. an
+        // altitude program living at the roofline) would silently move most
+        // frames onto the looser clamp-frame bounds with nothing failing.
+        // Observed across all seeds/grids: 3.8-7.8% of frames engaged.
+        // Calibrated bound: 15% (~2x the observed worst).
+        const MAX_CLAMP_FRACTION = 0.15
+        const engaged = poses.filter(aimClampEngaged).length
+        expect(engaged / poses.length).toBeLessThanOrEqual(MAX_CLAMP_FRACTION)
+      })
+
       it('pans deliberately: rate-cap saturation only as sustained corner sweeps, never a per-waypoint head-turn rhythm', () => {
         // Calibrated bounds on the rendered yaw running pinned at its rate
         // cap. Since corner rounding (#105 iteration 2) a genuine corner is
@@ -346,8 +364,12 @@ describe.each(GRIDS)(
         // Observed across all seeds/grids: 2-12 events per 90s tour (one per
         // genuinely long turn), each ≤ 2.4s, total fraction ≤ 13.1%. Bounds:
         // ≤ 20 events (vs ~40-65 for a per-waypoint rhythm), ≤ 3.5s per
-        // event, ≤ 20% of frames.
-        const MAX_SATURATION_FRACTION = 0.2
+        // event, and ≤ 16% of frames — 1.25x the observed worst fraction,
+        // deliberately *below* the ~18% the pre-#105 pinning bug produced,
+        // so the fraction bound alone still excludes the known-bad regime
+        // (the event-count bound is the sharper discriminator; this one
+        // backstops it honestly rather than sitting above known-bad).
+        const MAX_SATURATION_FRACTION = 0.16
         const MAX_SATURATION_EVENTS = 20
         const MAX_SATURATION_RUN_SECONDS = 3.5
         let saturated = 0
