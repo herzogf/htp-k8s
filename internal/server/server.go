@@ -83,13 +83,15 @@ type Config struct {
 	DemoAutostart bool
 
 	// AllowedHosts is the Host-header allowlist enforced on /ws and /api by
-	// hostAllowlist (issue #163 / ADR-0013), guarding against DNS rebinding —
-	// a distinct threat from the Origin check above, since rebinding makes
-	// Origin and Host both name the attacker's host, so same-origin alone
-	// doesn't help. The zero value AllowedHosts{} trusts nothing with an
-	// Origin header present, which would reject every browser request; callers
-	// build this via server.NewAllowedHosts so loopback and the server's own
-	// bind address are trusted without configuration.
+	// hostAllowlist (issue #163 / ADR-0013): a request whose Host isn't
+	// trusted is rejected, UNCONDITIONALLY — independent of whatever Origin
+	// header (if any) it carries. This is what stops DNS rebinding, which
+	// makes Origin and Host both name the attacker's host, and which a
+	// same-origin check (or a check that only applies when Origin is
+	// present) cannot catch. The zero value AllowedHosts{} still trusts
+	// IP-literal and "localhost"/"*.localhost" hosts on its own (see
+	// AllowedHosts.Permits); build this via server.NewAllowedHosts to
+	// additionally trust -allowed-hosts entries.
 	AllowedHosts AllowedHosts
 }
 
@@ -120,23 +122,24 @@ var upgrader = websocket.Upgrader{}
 func NewHandler(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	// /ws and every /api/* route are wrapped in the Host allowlist (issue #163
-	// / ADR-0013) — the DNS-rebinding defense that a same-origin check alone
-	// can't provide. /healthz and the static frontend at / carry no cluster
-	// data, so they stay unwrapped.
-	mux.Handle("GET /ws", hostAllowlist(cfg.AllowedHosts, newWSHandler(cfg)))
+	mux.HandleFunc("GET /ws", newWSHandler(cfg))
 	// On-demand Detail Popup endpoints (issue #23). All read-only GETs — the
 	// ServeMux rejects any other method with 405, so no mutating verb is reachable
 	// on this data path (ADR-0003). The more specific /logtail pattern coexists
 	// with the pod-detail pattern; Go's ServeMux routes the longer match first.
-	mux.Handle("GET /api/towers/{name}", hostAllowlist(cfg.AllowedHosts, handleTowerDetail(cfg)))
-	mux.Handle("GET /api/pods/{namespace}/{name}", hostAllowlist(cfg.AllowedHosts, handlePodDetail(cfg)))
-	mux.Handle("GET /api/pods/{namespace}/{name}/logtail", hostAllowlist(cfg.AllowedHosts, handlePodLogTail(cfg)))
+	mux.HandleFunc("GET /api/towers/{name}", handleTowerDetail(cfg))
+	mux.HandleFunc("GET /api/pods/{namespace}/{name}", handlePodDetail(cfg))
+	mux.HandleFunc("GET /api/pods/{namespace}/{name}/logtail", handlePodLogTail(cfg))
 	// The frontend's startup-config channel (issue #91) — deliberately not on
 	// SceneState (ADR-0008); see config.go.
-	mux.Handle("GET /api/config", hostAllowlist(cfg.AllowedHosts, handleAppConfig(cfg)))
+	mux.HandleFunc("GET /api/config", handleAppConfig(cfg))
 	mux.Handle("GET /", http.FileServerFS(frontendFS()))
-	return mux
+	// The Host allowlist (issue #163 / ADR-0013) wraps the WHOLE mux, not each
+	// route individually: gatedPath decides per-request which paths it
+	// actually enforces (/ws and /api/*, per its own doc comment), so a
+	// future /api/* route added above is protected automatically — there's no
+	// per-route wrapper to remember or forget.
+	return hostAllowlist(cfg.AllowedHosts, mux)
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

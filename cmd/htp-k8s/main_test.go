@@ -281,8 +281,10 @@ func TestParseFlags_DemoSeedAndAutostartAreOrthogonal(t *testing.T) {
 }
 
 // TestParseFlags_AllowedHostsDefaultsToNil proves no flag or env leaves
-// allowedHosts empty — server.NewAllowedHosts still trusts loopback and the
-// addr host on its own, so an operator on the defaults needs nothing extra.
+// allowedHosts empty — server.NewAllowedHosts still trusts IP-literal and
+// localhost/*.localhost Hosts on its own regardless of -addr, so an operator
+// on the defaults (including a widened wildcard -addr reached by IP) needs
+// nothing extra.
 func TestParseFlags_AllowedHostsDefaultsToNil(t *testing.T) {
 	opts, err := parseFlags(nil, noEnv)
 	if err != nil {
@@ -335,6 +337,24 @@ func TestParseFlags_AllowedHostsFlagOverridesEnv(t *testing.T) {
 	}
 	if len(opts.allowedHosts) != 1 || opts.allowedHosts[0] != "flag.example.com" {
 		t.Fatalf("allowedHosts = %v, want [flag.example.com]", opts.allowedHosts)
+	}
+}
+
+// TestParseFlags_AllowedHostsRejectsURL proves an -allowed-hosts entry that
+// looks like a URL (a scheme) is rejected at startup rather than silently
+// becoming a useless allowlist entry (hostOnly("http://foo.com") would parse
+// out "http" as the "hostname") that only surfaces later as an opaque 403.
+func TestParseFlags_AllowedHostsRejectsURL(t *testing.T) {
+	if _, err := parseFlags([]string{"-allowed-hosts", "http://k8s.example.com"}, noEnv); err == nil {
+		t.Fatal("expected an error for an -allowed-hosts entry containing a scheme, got nil")
+	}
+}
+
+// TestParseFlags_AllowedHostsRejectsPath proves an -allowed-hosts entry
+// carrying a path is rejected the same way — a bare hostname is required.
+func TestParseFlags_AllowedHostsRejectsPath(t *testing.T) {
+	if _, err := parseFlags([]string{"-allowed-hosts", "k8s.example.com/app"}, noEnv); err == nil {
+		t.Fatal("expected an error for an -allowed-hosts entry containing a path, got nil")
 	}
 }
 

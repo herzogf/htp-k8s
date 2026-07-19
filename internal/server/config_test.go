@@ -15,7 +15,7 @@ func TestAppConfig_ReturnsSeedAndAutostart(t *testing.T) {
 	cfg := server.Config{DemoSeed: 42, DemoAutostart: true}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req := trustedRequest(http.MethodGet, "/api/config")
 	server.NewHandler(cfg).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -40,7 +40,7 @@ func TestAppConfig_ReturnsSeedAndAutostart(t *testing.T) {
 // Detail Popup endpoints.
 func TestAppConfig_DefaultsToZeroValue(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req := trustedRequest(http.MethodGet, "/api/config")
 	server.NewHandler(server.Config{}).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -59,7 +59,7 @@ func TestAppConfig_DefaultsToZeroValue(t *testing.T) {
 // other endpoints' ServeMux-enforced read-only surface (ADR-0003).
 func TestAppConfig_MethodNotAllowed(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/config", nil)
+	req := trustedRequest(http.MethodPost, "/api/config")
 	server.NewHandler(server.Config{}).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
