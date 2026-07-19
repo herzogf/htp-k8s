@@ -113,6 +113,12 @@ jobs:
     name: Backend (Go)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      # Required to upload the govulncheck SARIF to the GitHub Security tab
+      # (issue #143), same grant the Trivy job already carries for the same
+      # reason (ADR-0005).
+      security-events: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -164,9 +170,51 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 
       # Source-level CVE scanning is blocking here (unlike the report-only
-      # Trivy container scan) per issue #1 and ADR-0005.
+      # Trivy container scan) per issue #1 and ADR-0005. govulncheck's
+      # reachability analysis (only symbols this code actually calls) makes
+      # it the highest-signal, lowest-noise of the three Go vuln signals in
+      # this repo (Trivy image scan, Dependabot, govulncheck) — worth
+      # blocking on (issue #143).
+      #
+      # Findings were previously invisible outside the Actions log (issue
+      # #143) because plain-text `govulncheck ./...` exits non-zero on a
+      # finding, which would abort the step before a SARIF could ever be
+      # produced or uploaded. `set +e` here defers that failure: the SARIF
+      # (`-format sarif`, valid regardless of whether findings exist — only
+      # the process exit code differs) is always captured to disk and the
+      # exit code is stashed in an output, so the upload step below always
+      # has something to upload. The job still fails on findings, just one
+      # step later, after the report has landed.
       - name: govulncheck
-        run: govulncheck ./...
+        id: govulncheck
+        run: |
+          set +e
+          govulncheck -format sarif ./... > govuln.sarif
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      # if: always() so a real SARIF lands in the Security tab whether or not
+      # the govulncheck step above found something (or, in principle, errored
+      # in some other way) — mirrors the upload invariant the Trivy jobs use,
+      # even though the `set +e` above already keeps this step reachable on
+      # its own. A distinct `govulncheck` category keeps this from colliding
+      # with Trivy's `trivy-container` / `trivy-release-image-<digest>`
+      # categories in the Security tab (issue #143).
+      - name: Upload govulncheck SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+        with:
+          sarif_file: govuln.sarif
+          category: govulncheck
+
+      # Explicit, separate failure step (rather than letting the govulncheck
+      # step itself fail) so the SARIF upload above is never skipped: findings
+      # still block the PR (issue #1 / ADR-0005), they're just no longer
+      # invisible while doing so (issue #143).
+      - name: Fail on govulncheck findings
+        if: steps.govulncheck.outputs.exit_code != '0'
+        run: |
+          echo "::error::govulncheck found reachable vulnerabilities (exit ${{ steps.govulncheck.outputs.exit_code }}). See the Security tab (category: govulncheck) for details, or run 'govulncheck ./...' locally."
+          exit 1
 
   frontend:
     name: Frontend (Node)
