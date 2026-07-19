@@ -82,9 +82,27 @@ let stopping = false
 let browserPromise = null
 let browser = null
 
+// Set once a signal handler has taken ownership of teardown (see the
+// bottom of this file). main() checks this after awaiting its own launch
+// so it can't stomp closeBrowser()'s `browser = null` completion marker by
+// re-assigning a (by-then-already-closed) browser back into it — a benign
+// race in practice (browser.close() is idempotent and the process is about
+// to exit either way), but `browser = null` is meant to read as "no
+// browser is currently open", and blindly reassigning after teardown has
+// already run breaks that invariant for no benefit.
+let shuttingDown = false
+
 async function main() {
   browserPromise = chromium.launch({ headless: true })
-  browser = await browserPromise
+  const launched = await browserPromise
+  if (shuttingDown) {
+    // A signal already fired while launch was in flight; closeBrowser()
+    // (called from the shutdown handler) already raced this same await and
+    // has since moved on — let it own the close, don't touch module state.
+    await launched.close().catch(() => {})
+    return
+  }
+  browser = launched
   // Everything from here on can throw (bounded waits below, Demo Mode not
   // active, ffmpeg/CDP errors) — always close the browser on the way out so
   // a failed capture doesn't leave an orphaned headless Chromium process
@@ -262,27 +280,37 @@ async function captureFlight(browser) {
   console.log(`Last frame elapsedMs: ${frameMeta[frameMeta.length - 1]?.elapsedMs}`)
 }
 
-// run.sh's stop_capture signals this process directly on a targeted `kill
-// <run.sh PID>` (as opposed to Ctrl-C, which the kernel delivers to the
-// whole foreground process group, Chromium included). Own our own teardown
-// here rather than relying on the signal reaching Chromium some other way:
-// it's a grandchild of this process (spawned by Playwright underneath
-// node), so if this process dies without an explicit browser.close() first,
-// Chromium is simply orphaned — reparented, not killed. Node's default
-// action for SIGTERM/SIGINT/SIGHUP with no listener is to terminate
-// immediately without running any `finally` block, so this must be an
-// explicit handler, not reliance on main()'s try/finally above — and all
-// three signals are covered (not just TERM/INT), matching run.sh's own
-// `trap cleanup EXIT INT TERM HUP` (a bare SIGHUP, e.g. a closed terminal,
-// would otherwise take the un-owned path).
+// This process's tree lives in its own process group (run.sh's launch site
+// sets that up deliberately with `set -m`), so it does NOT get a raw
+// terminal Ctrl-C's kernel broadcast at all — nor, it turns out, would that
+// broadcast have done anything useful even without that isolation: bash
+// sets SIGINT/SIGQUIT to SIG_IGN for asynchronous (backgrounded, no job
+// control) commands in a script, so before this process group isolation
+// existed, node — and everything it forked, including Chromium — was
+// already ignoring a plain Ctrl-C's SIGINT outright (confirmed empirically,
+// see the #130 PR discussion). Own our own teardown here instead of relying
+// on any such implicit broadcast: run.sh's `stop_capture` is what actually
+// reaches this process, sending SIGTERM (or SIGKILL, on escalation) whether
+// the run was interrupted via Ctrl-C or a targeted `kill <run.sh PID>` —
+// both funnel through the same trap in run.sh, so there's no meaningful
+// distinction between them from this process's point of view. Since
+// Chromium is a grandchild (spawned by Playwright underneath node), if this
+// process dies without an explicit browser.close() first, Chromium is
+// simply orphaned — reparented, not killed. Node's default action for
+// SIGTERM/SIGINT/SIGHUP with no listener is to terminate immediately
+// without running any `finally` block, so this must be an explicit
+// handler, not reliance on main()'s try/finally above — and all three
+// signals are covered (not just TERM/INT), matching run.sh's own `trap
+// cleanup EXIT INT TERM HUP` (a bare SIGHUP, e.g. a closed terminal, would
+// otherwise take the un-owned path).
 //
 // This handler is a best-effort belt, not the sole safety net: if
 // browser.close() itself hangs (a wedged browser), run.sh's stop_capture
 // now escalates to SIGKILL against this process's whole process GROUP
 // (node + Chromium + all of its descendants), not just this PID, and
 // verifies the group is actually empty afterward — see that function's
-// comment (issue #130).
-let shuttingDown = false
+// comment (issue #130). `shuttingDown` itself is declared up top, alongside
+// `browser`/`browserPromise` — main() reads it too (see there).
 async function shutdown(signal) {
   if (shuttingDown) return
   shuttingDown = true

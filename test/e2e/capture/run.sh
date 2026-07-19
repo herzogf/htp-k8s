@@ -142,11 +142,16 @@ stop_app() {
 # stop_capture: same verify+escalate discipline as stop_app, for the
 # backgrounded capture.mjs (node + its headless Chromium child and further
 # Chromium-internal grandchildren: zygotes, gpu-process, renderer). Deliberately
-# run FIRST in cleanup() (see below): a targeted `kill <run.sh PID>` (as
-# opposed to Ctrl-C, which the kernel delivers to the whole foreground
-# process group) can otherwise leave capture.mjs running orphaned while the
-# rest of cleanup proceeds — including delete_frame_cache's rm -rf of the
-# very directory it's still writing frames into (issue #120 review).
+# run FIRST in cleanup() (see below), because EVERY exit path this script
+# takes — a plain Ctrl-C, a targeted `kill <run.sh PID>`, or a normal
+# successful run — reaches this function through the exact same route: the
+# `trap cleanup EXIT INT TERM HUP` at the top of this script. There is no
+# separate, redundant kernel-level protection for the Ctrl-C case (see the
+# capture-launch site's comment for why an assumption like that would in
+# fact be wrong for this tree specifically) — cleanup ordering here is what
+# keeps delete_frame_cache's rm -rf below from racing capture.mjs still
+# writing into that very directory, regardless of which signal got us here
+# (issue #120 review).
 #
 # Signals and verifies the whole process GROUP (`-CAPTURE_PID`, via pgrep
 # -g), not just the tracked node PID — see the capture-launch site's
@@ -332,19 +337,33 @@ create_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}" "${WEB_NODE_M
 # so this has the same "capture failure aborts the script" behavior as a
 # plain foreground invocation.
 #
-# `set -m` (job control) around JUST this backgrounding: without it, a
-# background job in a non-interactive script inherits THIS SCRIPT's own
-# process group, which is why Ctrl-C (a kernel broadcast to the whole
-# foreground process group) has always reached Chromium's descendants too.
-# A targeted `kill <run.sh PID>` doesn't get that broadcast, so
-# stop_capture below needs to be able to signal capture.mjs's tree on its
-# own — which requires that tree to have its OWN process group, isolated
-# from run.sh's, so signaling it can never also hit run.sh itself. Job
-# control assigns a fresh pgid (== CAPTURE_PID) to exactly this job when
-# backgrounded; every process capture.mjs/Chromium subsequently forks
-# inherits that same pgid (confirmed empirically — see the #130 PR
-# discussion), so `-CAPTURE_PID` reaches the whole tree. Turned back off
-# immediately after so it doesn't affect anything else in this script.
+# `set -m` (job control) around JUST this backgrounding, so this job gets
+# its OWN process group (pgid == CAPTURE_PID), isolated from run.sh's own —
+# NOT because Ctrl-C's kernel broadcast was ever reaching Chromium before
+# this. It wasn't: bash sets SIGINT/SIGQUIT to SIG_IGN for asynchronous
+# commands in a script with job control off (POSIX-mandated), so without
+# `set -m` here, node — and everything it forks, including Chromium —
+# inherited that ignore mask. Confirmed empirically (see the #130 PR
+# discussion): `SigIgn` in /proc/<pid>/status was `...0110` (SIGINT|SIGQUIT
+# bits set) for a plain backgrounded job, `...0000` under `set -m`. So a raw
+# terminal Ctrl-C was never what protected Chromium pre-#130 — only run.sh's
+# own `trap cleanup ... INT` was, by reaching stop_capture the same way a
+# targeted `kill <run.sh PID>` does. What `set -m` actually buys here is
+# giving stop_capture something it can aim AT: a process group containing
+# exactly capture.mjs's tree and nothing of run.sh's own, so
+# `kill -- -CAPTURE_PID` is guaranteed to reach the whole tree without ever
+# being able to hit run.sh itself. Every process capture.mjs/Chromium
+# subsequently forks inherits that same pgid. Turned back off immediately
+# after so it doesn't affect anything else in this script.
+#
+# One side effect worth naming: isolating this tree into its own process
+# group means it's no longer in run.sh's own foreground group either, so a
+# raw terminal SIGINT (Ctrl-C) reaches it even LESS directly than before —
+# not that it mattered pre-fix (SIG_IGN, above), but post-fix teardown now
+# depends wholly, and explicitly, on run.sh's trap completing and
+# stop_capture reaching it via this pgid. Net-neutral versus before (the
+# earlier "protection" was already illusory), but worth stating since nothing
+# else here says so.
 set -m
 node "${SCRIPT_DIR}/capture.mjs" \
   --out-dir "${OUT_DIR}" \
@@ -354,6 +373,20 @@ node "${SCRIPT_DIR}/capture.mjs" \
   --height "${HEIGHT}" &
 CAPTURE_PID=$!
 set +m
+# Self-checking assertion, not decorative: stop_capture's whole
+# verification strategy (pgrep -g "${CAPTURE_PID}") depends on
+# pgid == CAPTURE_PID actually holding. If a future edit moved `set +m`
+# earlier, or wrapped this launch in a pipeline/subshell (either of which
+# can change what gets the fresh pgid), every `pgrep -g` in stop_capture
+# would silently return empty and it would report the capture process group
+# "gone" while node and Chromium are still alive — exactly the false
+# verification docs/running-locally.md's cleanup discipline forbids. Fail
+# loudly here instead, before any of that can happen.
+CAPTURE_PGID="$(ps -o pgid= -p "${CAPTURE_PID}" 2>/dev/null | tr -d ' ')"
+if [ "${CAPTURE_PGID}" != "${CAPTURE_PID}" ]; then
+  echo "ERROR: capture.mjs's process group (${CAPTURE_PGID:-unknown}) is not its own PID (${CAPTURE_PID}) — stop_capture's group-based cleanup would silently miss it. Aborting." >&2
+  exit 1
+fi
 wait "${CAPTURE_PID}"
 CAPTURE_PID=""
 remove_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}"
