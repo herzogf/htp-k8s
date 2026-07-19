@@ -3,6 +3,7 @@ import { Text } from '@react-three/drei'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { type SceneState } from './generated/scenestate'
 import { viewModeLabel } from './scene/sceneState'
+import { sceneTowerHeight } from './scene/panelLayout'
 import { towerPlacements } from './scene/towerLayout'
 import { Tower, TOWER_COLOR } from './scene/Tower'
 import { Panels } from './scene/Panels'
@@ -38,7 +39,12 @@ export interface SceneProps {
  */
 export function Scene({ sceneState }: SceneProps) {
   const label = sceneState ? viewModeLabel(sceneState.viewMode) : WAITING_TEXT
-  const placements = sceneState ? towerPlacements(sceneState.towers) : []
+  // #59: one scene-wide Tower height, driven by the busiest Tower's Pod count,
+  // applied to every Tower's placement (its Y-centre) and prism (Tower.tsx's
+  // `height` prop below) so the skyline stays uniform however lopsided the
+  // Pod counts are — a quiet Tower gets unfilled faces, never a shorter prism.
+  const towerHeight = sceneState ? sceneTowerHeight(sceneState.towers) : undefined
+  const placements = sceneState ? towerPlacements(sceneState.towers, towerHeight) : []
   // One Focus hand-off shared for the scene's lifetime (#21): Tower/Panel clicks
   // push a target pose into it and FreeFlyControls pulls that pose to fly to.
   const focusController = useMemo(() => createFocusController(), [])
@@ -123,7 +129,7 @@ export function Scene({ sceneState }: SceneProps) {
                   (#28). */}
                 <FloorLanes towers={sceneState.towers} />
                 {placements.map((placement) => (
-                  <Tower key={placement.name} placement={placement} />
+                  <Tower key={placement.name} placement={placement} height={towerHeight} />
                 ))}
                 {/* Every Pod as a glowing Panel, drawn as one InstancedMesh over all
                   Towers (the scale decision — see {@link Panels}). */}

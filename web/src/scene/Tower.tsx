@@ -26,6 +26,15 @@ export const TOWER_COLOR = '#39d3ff'
  * structure; the Pods on its faces are drawn separately as instanced Panels
  * (see {@link Panels}).
  *
+ * `height` (#59) defaults to the resting {@link TOWER_HEIGHT} but the scene
+ * passes every Tower the same scene-wide {@link sceneTowerHeight} (panelLayout.ts)
+ * so the whole skyline renders at one uniform height once any Tower's Pods
+ * need more than the four faces hold at the resting height — a Tower with
+ * fewer Pods simply has unfilled faces rather than a shorter prism. Since
+ * `placement.position`'s own Y is already `height / 2` (see
+ * {@link towerPlacements}'s `height` param), the box geometry here must be
+ * built from that same `height` or the prism and its Panels would part ways.
+ *
  * Clicking a Tower does two things (#21, #24): it hands the {@link towerFocusPose}
  * for this Tower's placement to the shared {@link FocusController} — the camera
  * rig picks it up and smoothly flies to it — and it selects this Tower, opening
@@ -33,7 +42,13 @@ export const TOWER_COLOR = '#39d3ff'
  * propagating so a ray that also grazes a farther Tower acts only on the one
  * actually clicked.
  */
-export function Tower({ placement }: { placement: TowerPlacement }) {
+export function Tower({
+  placement,
+  height = TOWER_HEIGHT,
+}: {
+  placement: TowerPlacement
+  height?: number
+}) {
   const focus = useFocus()
   const { select } = useSelection()
 
@@ -45,7 +60,7 @@ export function Tower({ placement }: { placement: TowerPlacement }) {
 
   return (
     <mesh position={placement.position} onClick={onClick}>
-      <boxGeometry args={[TOWER_FOOTPRINT, TOWER_HEIGHT, TOWER_FOOTPRINT]} />
+      <boxGeometry args={[TOWER_FOOTPRINT, height, TOWER_FOOTPRINT]} />
       <meshStandardMaterial
         color={TOWER_COLOR}
         emissive={TOWER_COLOR}

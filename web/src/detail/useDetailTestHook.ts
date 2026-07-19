@@ -1,7 +1,7 @@
 import { useEffect } from 'react'
 import { type SceneState } from '../generated/scenestate'
 import { type FocusController, panelFocusPose, towerFocusPose } from '../scene/focus'
-import { panelInstances } from '../scene/panelLayout'
+import { panelInstances, sceneTowerHeight } from '../scene/panelLayout'
 import { towerPlacements } from '../scene/towerLayout'
 import { panelSelection, type Selection, towerSelection } from './selection'
 
@@ -66,7 +66,10 @@ export function useDetailTestHook(
 ): void {
   useEffect(() => {
     const towers = sceneState ? sceneState.towers : []
-    const placements = towerPlacements(towers)
+    // #59: match the scene's real uniform Tower height so a hook-driven Tower
+    // focus lands on the same Y the actually-rendered (possibly grown) prism
+    // sits at — see Scene.tsx's own sceneTowerHeight call.
+    const placements = towerPlacements(towers, sceneTowerHeight(towers))
     const instances = panelInstances(towers)
 
     window.__htpDetailTest = {

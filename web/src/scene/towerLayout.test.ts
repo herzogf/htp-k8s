@@ -79,4 +79,13 @@ describe('towerPlacements', () => {
 
     expect(placements.every((p) => p.position[1] === TOWER_HEIGHT / 2)).toBe(true)
   })
+
+  it('accepts an explicit uniform height (#59) and lifts every Tower to half of it', () => {
+    // The scene-wide height a busy cluster grows to (sceneTowerHeight in
+    // panelLayout.ts) is passed in here so every Tower — busy or idle — is
+    // drawn at the same height; a Tower with fewer pods is not shorter.
+    const placements = towerPlacements([tower('a', 0, 0), tower('b', 2, 4)], 12)
+
+    expect(placements.every((p) => p.position[1] === 6)).toBe(true)
+  })
 })

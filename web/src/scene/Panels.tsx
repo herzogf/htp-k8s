@@ -351,6 +351,10 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
     const phases = new Float32Array(instances.length)
     instances.forEach((instance, i) => {
       dummy.position.set(...instance.position)
+      // Face #59's four-faces-per-Tower wrap: the front (+Z) face's Panels keep
+      // rotationY 0 (a no-op, identical to pre-#59), the other three faces spin
+      // the quad about Y so its normal points outward from that side instead.
+      dummy.rotation.set(0, instance.rotationY, 0)
       dummy.updateMatrix()
       mesh.setMatrixAt(i, dummy.matrix)
       mesh.setColorAt(i, color.set(instance.color))
