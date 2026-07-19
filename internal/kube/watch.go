@@ -58,13 +58,21 @@ const blinkDebounce = 500 * time.Millisecond
 // requests more than the mode already reads. Per ADR-0002 a forbidden or absent
 // resource degrades gracefully: an informer that cannot watch simply delivers no
 // events (its errors are logged by client-go), pods still flow, and the initial
-// snapshot is unaffected. (The OpenShift Project-fallback resource is not
-// watched for deltas — nor is a Pods informer scoped per-Project — so on a
-// project-scoped OpenShift user's cluster a new Project, or a pod change only
-// visible via the per-Project pod-listing fallback (issue #55), appears only on
-// the next snapshot/reconnect rather than as a live delta. That live-watch gap
-// remains open; every rebuild still reflects real cluster state via BuildScene,
-// so it self-corrects on the next snapshot.)
+// snapshot is unaffected.
+//
+// Neither the OpenShift Project-fallback resource nor a per-Project-scoped Pods
+// list is ever watched for deltas — every informer here is cluster-scoped. For a
+// project-scoped OpenShift user (issue #55's target), that means every one of
+// these informers 403s the same way the old cluster-wide BuildPanels call did,
+// so no event ever fires and the coalescing trigger (notify/run below) is never
+// poked. SnapshotAndSubscribe hands a new subscriber the cached current
+// SceneState under lock — it does NOT call BuildScene — so current stays
+// exactly what the single rebuild in Start produced before the informers were
+// even started, for as long as the watcher runs. A reconnect does not "re-run
+// the fallback": it receives that same frozen snapshot, not a fresh one. (A
+// separate, more fundamental gap — whether Start can even return for such a
+// user when WaitForCacheSync never completes — is tracked outside this
+// comment, not yet fixed.)
 type SceneWatcher struct {
 	rebuild func(context.Context) scene.SceneState
 	factory informers.SharedInformerFactory

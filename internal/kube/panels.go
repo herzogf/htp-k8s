@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -47,14 +48,17 @@ const crashLoopBackOff = "CrashLoopBackOff"
 // default and the Namespace-mode path, where filtering the Towers already drops
 // hidden namespaces' pods (AttachPanels).
 //
-// Listing pods is cluster-wide, first. If that fails — e.g. an OpenShift
-// project-scoped user who can list their own Projects but not pods at the
-// cluster scope — BuildPanels falls back to listing pods per admitted
-// Namespace/Project (see podsForPanels), the Panel analogue of BuildTowers'
-// Project fallback (issue #55, resolved). Only if neither source is available
-// does it degrade to an empty result with an informational error rather than
-// hard-failing the scene (ADR-0002), mirroring BuildTowers: the caller still
-// gets a valid SceneState.
+// Listing pods is cluster-wide, first. If that is specifically forbidden —
+// e.g. an OpenShift project-scoped user who can list their own Projects but
+// not pods at the cluster scope — BuildPanels falls back to listing pods per
+// admitted Namespace/Project (see podsForPanels), the Panel analogue of
+// BuildTowers' Project fallback (issue #55, resolved). A non-permission
+// cluster-wide failure (timeout, transport error) is not retried per-namespace
+// — see podsForPanels — so a struggling API server fails this rebuild once
+// rather than 1+N times. Only if neither source is available (or the fallback
+// itself is cut short, see namespaceScopedPods) does BuildPanels degrade to an
+// empty result with an informational error rather than hard-failing the scene
+// (ADR-0002), mirroring BuildTowers: the caller still gets a valid SceneState.
 func BuildPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode, admitNamespace func(string) bool) (map[string][]scene.Panel, error) {
 	byTower := map[string][]scene.Panel{}
 
@@ -91,14 +95,22 @@ func BuildPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic.I
 }
 
 // podsForPanels returns every Pod BuildPanels should consider, preferring one
-// cluster-wide List and falling back to namespaceScopedPods only when that is
-// forbidden. It returns an error only when neither source yields pods, so a
-// listing failure can still degrade the scene per ADR-0002 rather than
-// hard-failing it.
+// cluster-wide List. It only falls back to namespaceScopedPods (1+N calls,
+// N being the number of admitted Namespaces/Projects) when the cluster-wide
+// call was specifically forbidden (apierrors.IsForbidden) — the OpenShift
+// project-scoped-user shape this fallback exists for. Any other cluster-wide
+// failure (a timeout, a transport error, an unavailable API server) is
+// returned as-is without fanning out: retrying it N times over inside the
+// same rebuildTimeout budget would make a transient hiccup worse, not better,
+// and — unlike namespaceTowers' single extra Project call — this fallback is
+// expensive enough that "any error" is the wrong trigger for it.
 func podsForPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface) ([]corev1.Pod, error) {
 	list, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err == nil {
 		return list.Items, nil
+	}
+	if !apierrors.IsForbidden(err) {
+		return nil, fmt.Errorf("list pods for panels: %w", err)
 	}
 
 	// Cluster-wide listing wasn't permitted — on OpenShift, typically a
@@ -121,10 +133,16 @@ func podsForPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic
 // is forbidden but where per-namespace listing is not — the case for an
 // OpenShift project-scoped user.
 //
-// A namespace whose own pod listing fails (e.g. access revoked mid-enumeration)
+// A namespace whose own pod listing fails for a reason unrelated to ctx (e.g.
+// access revoked mid-enumeration, or that one namespace specifically forbidden)
 // is skipped, logged, and does not abort the other admitted namespaces' Panels.
-// An error is returned only when the namespace/project names themselves can't
-// be enumerated at all — there would be nothing to iterate.
+// But if ctx is already done by the time a per-namespace List fails — e.g.
+// rebuildTimeout expired mid-enumeration — every namespace not yet listed would
+// fail the same way; returning what was collected so far as a success would
+// silently hand BuildScene a scene missing most Panels, which scene.Diff would
+// then broadcast to every connected client as a mass panelRemoved. So a
+// ctx-cut-short fallback is a failure of the whole fallback, not a partial
+// result, and the caller degrades the rebuild instead of publishing it.
 func namespaceScopedPods(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface) ([]corev1.Pod, error) {
 	names, err := admittedNamespaceNames(ctx, client, dyn, NamespaceFilter{})
 	if err != nil {
@@ -135,6 +153,9 @@ func namespaceScopedPods(ctx context.Context, client kubernetes.Interface, dyn d
 	for _, ns := range names {
 		list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("per-namespace pod fallback cut short after namespace %q: %w", ns, ctxErr)
+			}
 			log.Printf("list pods in namespace %q for panels: %v", ns, err)
 			continue
 		}

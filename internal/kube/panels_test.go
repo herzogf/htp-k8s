@@ -451,3 +451,120 @@ func TestBuildPanels_PerNamespaceFallback_SkipsFailingNamespace(t *testing.T) {
 		t.Errorf("byTower has an entry for the namespace whose own list failed: %+v", got["broken"])
 	}
 }
+
+// TestBuildPanels_ClusterWideListUsedWhenPermitted proves the cluster-wide
+// Pods list is still the path taken whenever it's permitted — the fallback
+// added for issue #55 must not run when nothing is forbidden. Regressing to
+// "always fall back" would still pass every fallback-specific test above (the
+// fallback covers the same pods when nothing is actually restricted), so this
+// asserts on the client's recorded Actions rather than only the resulting
+// Panels: exactly one Pods list call was made, and it was the cluster-wide one
+// (empty namespace), not a per-namespace fan-out.
+func TestBuildPanels_ClusterWideListUsedWhenPermitted(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		namespace("team-a"), namespace("team-b"),
+		pod("team-a", "web", "node-1", corev1.PodRunning),
+		pod("team-b", "api", "node-2", corev1.PodRunning),
+	)
+
+	if _, err := kube.BuildPanels(context.Background(), client, nil, scene.ViewModeNamespace, nil); err != nil {
+		t.Fatalf("BuildPanels: %v", err)
+	}
+
+	var podListNamespaces []string
+	for _, action := range client.Actions() {
+		if action.GetVerb() != "list" || action.GetResource().Resource != "pods" {
+			continue
+		}
+		podListNamespaces = append(podListNamespaces, action.GetNamespace())
+	}
+
+	if len(podListNamespaces) != 1 {
+		t.Fatalf("got %d Pods list calls %v, want exactly 1 (the cluster-wide list) — a per-namespace fallback ran even though nothing was forbidden", len(podListNamespaces), podListNamespaces)
+	}
+	if podListNamespaces[0] != "" {
+		t.Errorf("the one Pods list call was scoped to namespace %q, want the cluster-wide list (empty namespace)", podListNamespaces[0])
+	}
+}
+
+// TestBuildPanels_NonForbiddenClusterWideErrorNotRetriedPerNamespace proves
+// that a cluster-wide Pods list failure NOT caused by a permission denial
+// (e.g. a timeout, or any other transient/transport error) fails BuildPanels
+// directly rather than triggering the 1+N-call per-namespace fallback: only a
+// genuine `apierrors.IsForbidden` — the OpenShift project-scoped-user shape the
+// fallback exists for — should fan out per namespace.
+func TestBuildPanels_NonForbiddenClusterWideErrorNotRetriedPerNamespace(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		namespace("team-a"),
+		pod("team-a", "web", "node-1", corev1.PodRunning),
+	)
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if la, ok := action.(k8stesting.ListAction); ok && la.GetNamespace() == "" {
+			return true, nil, apierrors.NewTimeoutError("cluster-wide pods list timed out", 0)
+		}
+		return false, nil, nil
+	})
+
+	got, err := kube.BuildPanels(context.Background(), client, nil, scene.ViewModeNamespace, nil)
+	if err == nil {
+		t.Fatal("expected an error from a non-forbidden cluster-wide list failure, got nil")
+	}
+	if len(got) != 0 {
+		t.Fatalf("byTower = %+v, want empty (no per-namespace fallback should have run)", got)
+	}
+
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "pods" && action.GetNamespace() != "" {
+			t.Errorf("unexpected per-namespace Pods list for namespace %q: a non-forbidden cluster-wide error must not trigger the fallback", action.GetNamespace())
+		}
+	}
+}
+
+// TestBuildPanels_PerNamespaceFallback_DeadlineCutShortFailsNotPartial proves
+// that when the per-namespace fallback is itself cut short by ctx being done
+// (e.g. rebuildTimeout expiring mid-enumeration), BuildPanels fails outright
+// rather than silently returning the partial pods collected before the
+// deadline hit as a success — a partial result would let BuildScene/scene.Diff
+// broadcast a scene missing most Panels (a mass panelRemoved) to every client
+// over what was really just a transient timeout.
+func TestBuildPanels_PerNamespaceFallback_DeadlineCutShortFailsNotPartial(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		namespace("team-a"), namespace("team-b"), namespace("team-c"),
+		pod("team-a", "web", "node-1", corev1.PodRunning),
+		pod("team-b", "api", "node-2", corev1.PodRunning),
+		pod("team-c", "cache", "node-3", corev1.PodRunning),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var nsCalls int
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		la, ok := action.(k8stesting.ListAction)
+		if !ok {
+			return false, nil, nil
+		}
+		if la.GetNamespace() == "" {
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "pods"}, "", errors.New("cannot list pods at the cluster scope"))
+		}
+		nsCalls++
+		if nsCalls == 2 {
+			// Simulate rebuildTimeout expiring mid-enumeration: ctx is already
+			// done by the time this (second) per-namespace call fails, exactly
+			// as a real deadline would leave every remaining namespace's List
+			// failing too.
+			cancel()
+			return true, nil, context.DeadlineExceeded
+		}
+		return false, nil, nil
+	})
+
+	got, err := kube.BuildPanels(ctx, client, nil, scene.ViewModeNamespace, nil)
+	if err == nil {
+		t.Fatalf("expected an error when the fallback is cut short by a deadline, got byTower = %+v", got)
+	}
+	if len(got) != 0 {
+		t.Fatalf("byTower = %+v, want empty — a deadline cutting the fallback short must not silently publish a partial scene", got)
+	}
+}
