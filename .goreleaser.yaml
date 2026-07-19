@@ -134,64 +134,38 @@ release:
   # stays a draft until a human publishes it, by which point both jobs have
   # finished and the tag resolves.
   #
-  # Content is deliberately scoped to what release.yml/ADR-0005 actually ship
-  # today: multi-arch pull/run + build-provenance verification (the index-level
-  # `attest-build-provenance` from the `image` job) for BOTH the image and the
-  # release binaries (issue #99 explicitly asks for the binary line too, to
-  # cover the whole supply chain in one place — command mirrors README.md's
-  # existing one). It does NOT claim an image SBOM (the `sboms` block below
-  # only covers archives — see issue #98) and does NOT show a `cosign verify`
-  # example (no bare cosign signature is emitted yet — that's issue #100 to
-  # decide). The `docker run` line mirrors the README's current "real network
-  # address" example verbatim, including the README's `# then open
-  # http://localhost:8080` follow-up so the reader has a next step. #113/#124
-  # made the image default `KUBECONFIG` to `/kube/config`, so — like the
-  # README — this no longer sets `-e KUBECONFIG` explicitly; keep the two in
-  # sync if that default ever changes again. Deliberately NOT copying the
-  # README's local-cluster recipes (`--network kind`+`--internal` for kind,
-  # `--network host` for k3d/minikube/Docker Desktop) here — a release-notes
-  # reader is more likely pointing at a remote/real cluster than a local one
-  # on the same host, so it'd be noise for the likelier reader here (unlike
-  # the README's Quickstart, which leads with a local kind cluster).
+  # SCOPE (redesigned after two separate drift incidents): earlier versions
+  # of this footer (#99/#123) also carried a `docker run` recipe and
+  # `gh attestation verify` commands, copied from README.md. That duplication
+  # is what drifted TWICE — once when #124 changed the image's KUBECONFIG
+  # default and the footer's copy went stale, and again when the README's
+  # `--user` phrasing was revised and the footer's copy wasn't. A GitHub
+  # Release page is frozen at publish time; README.md is not — it's on
+  # `main` and always describes the LATEST version, so any release page
+  # showing an OLDER version needs commands for that version, not whatever
+  # main says today. Two independently-maintained copies of the same
+  # procedure will always eventually disagree.
   #
-  # DOES copy the README's `--user "$(id -u):$(id -g)"` flag (issue #128) and
-  # `-e HTP_K8S_ADDR=:8080` (issue #127): a standard kind/kubectl-written
-  # kubeconfig is mode 0600 and this footer's command mounts it read-only into
-  # a fixed-non-root-uid container exactly like the README's does, and
-  # `defaultAddr` in cmd/htp-k8s/main.go is loopback-only for the same reason
-  # the README's is — so a release-notes reader copy-pasting this footer needs
-  # both fixes too. This binds `-p 127.0.0.1:8080:8080` (loopback), not a bare
-  # `-p 8080:8080` (all interfaces) — this footer is the copy-paste surface
-  # for every release reader, so it gets the safer form; zero usability cost,
-  # since the next line already says `http://localhost:8080`.
+  # So: this footer now only states what's version-pinned and can't live
+  # anywhere else — WHICH images this specific release published — and
+  # points elsewhere for HOW to use them. It does not restate the `docker
+  # run` procedure (README.md's Quickstart owns that), the `--user`/
+  # `HTP_K8S_ADDR` reasoning (README.md + docs/running-locally.md +
+  # ADR-0012 own that), or the `gh attestation verify` commands (README.md's
+  # "Supply chain" section owns that, and covers both the image and the
+  # release binaries in one place already). One-line pointer to both instead.
   #
-  # The shipped parenthetical right after the command is deliberately terse
-  # (maintainer feedback on PR #132: the README's Quickstart had grown a full
-  # paragraph of "why" per flag across several review rounds — cut back there
-  # to commands + minimal orientation, with the "why" moved to
-  # docs/running-locally.md and docs/adr/0012-secure-by-default-network-
-  # binding.md, issue #127's ADR, added separately in PR #134). This footer
-  # follows the same discipline and links out to both rather than restating
-  # their content — don't re-inflate it; if a future flag needs explaining
-  # here, add a short pointer, not a paragraph.
+  # `--signer-workflow` note: README.md's attestation commands now carry
+  # `--signer-workflow herzogf/htp-k8s/.github/workflows/release.yml` (added
+  # alongside this footer redesign) for the same reason this footer's old
+  # copy did before it was removed — `--repo` alone only proves SOME
+  # workflow in this repo produced the attestation, not specifically
+  # `release.yml`, and the surrounding prose claims the latter. Since this
+  # footer no longer carries its own attestation commands and instead points
+  # readers at the README's, the README's copy is now the ONLY shipped
+  # instance — keep the flag on it; removing it would silently regress a
+  # published release's verification instructions to the weaker form.
   #
-  # `--signer-workflow` on both `gh attestation verify` calls: `--repo` alone
-  # only proves SOME workflow in this repo produced the attestation, not
-  # specifically `release.yml` — the prose right below the commands claims the
-  # latter, so the flag is there to make that claim actually true, not just
-  # plausible.
-  #
-  # Verification is by TAG, which resolves at verify time — a pass proves "an
-  # artifact built by this repo's release.yml", not "the artifact THIS
-  # release described" (that would need the tag to be immutable, which it
-  # only is by convention). Narrow in practice (exploiting it needs GHCR
-  # `packages: write`, and only permits repointing to another legitimately
-  # attested htp-k8s build, i.e. a downgrade) and acceptable for an exact
-  # version tag — but worth one sentence pointing a reader who wants the
-  # stronger guarantee at the digest both commands print. Do NOT copy this
-  # tag-based pattern onto a moving tag (e.g. a future `major`/`major.minor`
-  # tag, issue #64) without a digest-pinning instruction — there, tag
-  # mutability is the norm, not a convention-backed exception.
   # NOTE the leading blank line: GoReleaser's body template joins the
   # changelog and this footer with exactly ONE newline (see
   # internal/pipe/release/body.go), so a footer starting directly with `---`
@@ -201,46 +175,21 @@ release:
   # intended horizontal rule. The blank line here restores the gap so `---`
   # renders as a thematic break, verified by rendering the full body
   # (changelog + footer) through Go's text/template, matching GoReleaser's
-  # own template+options exactly (see the PR for #99).
+  # own template+options exactly (see the PR for #99, and the redesign PR).
   footer: |
 
     ---
 
     ### Container image
 
-    Multi-arch (`linux/amd64`, `linux/arm64`), published to GHCR — this is **not** a release asset, it lives in [GHCR (Packages)](https://github.com/herzogf/htp-k8s/pkgs/container/htp-k8s):
+    Multi-arch, published to [GHCR (Packages)](https://github.com/herzogf/htp-k8s/pkgs/container/htp-k8s) — not a release asset, so it doesn't show up above:
 
-    ```bash
-    docker pull ghcr.io/herzogf/htp-k8s:{{ .Tag }}
-    ```
-
-    Run it:
-
-    ```bash
-    docker run --rm -p 127.0.0.1:8080:8080 \
-      --user "$(id -u):$(id -g)" \
-      -e HTP_K8S_ADDR=:8080 \
-      -v "$HOME/.kube/config:/kube/config:ro" \
-      ghcr.io/herzogf/htp-k8s:{{ .Tag }}
-    # then open http://localhost:8080
-    ```
-
-    (`--user "$(id -u):$(id -g)"` is needed because of kubeconfig file permissions (`0600`); `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats (Windows, root shells): [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image); design reasoning: [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-secure-by-default-network-binding.md).)
+    - `ghcr.io/herzogf/htp-k8s:{{ .Tag }}` (`linux/amd64`, `linux/arm64`)
     {{- if not .Prerelease }}
-
-    `:latest` also points at this release.
+    - `ghcr.io/herzogf/htp-k8s:latest` also points at this release
     {{- end }}
 
-    Verify build provenance (keyless, Sigstore-backed — no keys to manage) — for the image, and for any release binary you downloaded:
-
-    ```bash
-    gh attestation verify oci://ghcr.io/herzogf/htp-k8s:{{ .Tag }} --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
-
-    # adjust the filename to the platform you downloaded
-    gh attestation verify htp-k8s_{{ .Version }}_linux_amd64.tar.gz --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
-    ```
-
-    A passing check means the artifact was built by this repo's `release.yml` workflow and hasn't been tampered with since. Both commands print the resolved digest — pin `@sha256:…` instead of the tag if you need that guarantee to hold even if this tag were ever repointed. More on the posture: [ADR-0005](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0005-supply-chain-security-posture.md).
+    Pull/run and verify: [README](https://github.com/herzogf/htp-k8s#readme), [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image).
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
