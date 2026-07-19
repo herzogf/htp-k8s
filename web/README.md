@@ -33,8 +33,11 @@ its screenshots and video are the project's visual proof of behavior.
 Run it with `task e2e` (from here) or `npm run e2e`. The browser binary must be
 present first — `npx playwright install chromium` (the `task e2e` target does
 this for you). The suite builds and launches on port 8080 by default; set
-`HTP_K8S_E2E_PORT` to use another port (the frontend's `/ws` target is rebuilt
-to match).
+`HTP_K8S_E2E_PORT` to use another port — no frontend rebuild needed to match it,
+since the built frontend derives its `/ws`/`/api` target from the page's own
+origin (issue #146). CI deliberately runs the suite on a non-default port
+(`.github/workflows/build.yml`) so a regression back to a hardcoded origin
+would fail there.
 
 Artifacts land in `e2e-results/` (per-test screenshot, video, trace) and an
 HTML report in `playwright-report/` — both git-ignored, and the predictable

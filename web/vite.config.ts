@@ -18,8 +18,12 @@ export default defineConfig({
     // This removes the need for VITE_WS_URL/VITE_API_URL in development —
     // see getWebSocketUrl/getApiBaseUrl in src/config.ts.
     proxy: {
-      '/ws': {
-        target: devBackend.replace(/^http/, 'ws'),
+      // Exact-match, not a prefix: '/ws' as a plain string key would also
+      // capture any future '/ws…' route. `target` takes the plain http(s)
+      // origin unchanged — `ws: true` alone is what makes http-proxy accept
+      // and forward the WebSocket upgrade; verified live (issue #146).
+      '^/ws$': {
+        target: devBackend,
         ws: true,
       },
       '/api': {

@@ -136,7 +136,7 @@ The binary takes a few flags (each also has an `HTP_K8S_*` environment fallback)
 
 | Flag | Env | Purpose |
 | --- | --- | --- |
-| `-addr` | `HTP_K8S_ADDR` | Listen address; default `127.0.0.1:8080` (**loopback only** — there's no auth layer, so nothing is reachable off this machine unless you opt in; see [ADR-0012](adr/0012-secure-by-default-network-binding.md)). Pass `-addr :8080` (or any other address) to widen it — the frontend derives its `/ws`/`/api` target from the page's own origin (issue #146), so a remote browser reaches the live scene without a frontend rebuild. |
+| `-addr` | `HTP_K8S_ADDR` | Listen address; default `127.0.0.1:8080` (**loopback only** — nothing is reachable off this machine unless you opt in). Pass `-addr :8080` (or any other address) to widen it — the frontend derives its `/ws`/`/api` target from the page's own origin (issue #146), so a remote browser reaches the live scene without a frontend rebuild (origin root only — a reverse proxy serving htp-k8s under a sub-path isn't supported yet). **There is still no auth layer**, so widening this is a deliberate trade: anyone who can reach the port gets full, unauthenticated read access to your cluster through the UI, not just the raw API — see [ADR-0012](adr/0012-secure-by-default-network-binding.md). |
 | `-demo` | `HTP_K8S_DEMO` | Auto-start Demo Mode at launch — handy for unattended showcase runs. |
 | `-demo-seed` | `HTP_K8S_DEMO_SEED` | Fix the canyon-tour PRNG seed so a flight is reproducible (ADR-0010). A random seed is chosen and logged otherwise. |
 | `-namespace-filter` | `HTP_K8S_NAMESPACE_FILTER` | Preset a name-pattern Namespace/Project filter (shell wildcards, e.g. `openshift-*`). |
