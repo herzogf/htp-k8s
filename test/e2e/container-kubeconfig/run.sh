@@ -90,6 +90,27 @@ set -euo pipefail
 
 log() { printf '\n=== [container-kubeconfig] %s\n' "$*"; }
 
+# client-go's KUBECONFIG resolution accepts a colon-separated list of files
+# (restConfig's doc comment in internal/kube/client.go calls this out
+# explicitly), but the `stat` below needs exactly one real file to check the
+# 0600 premise against. In CI, KUBECONFIG is always the single file
+# kind-action wrote (build.yml sets it to just $HOME/.kube/config), so this
+# never fires there — but a developer running the documented local invocation
+# above (`KUBECONFIG=$HOME/.kube/config ... run.sh`) may already have a
+# longer, colon-joined KUBECONFIG set in their own shell, which this script
+# can't meaningfully check a single mode against. Fail with a clear,
+# actionable message rather than a bare, confusing `stat: cannot stat` on a
+# path containing a literal ':' (issue #129 — keeping this a hard failure
+# rather than e.g. checking only the first entry via `${KUBECONFIG%%:*}` was
+# a deliberate maintainer call: that would silently stat the wrong file and
+# weaken the #128 0600 premise this script exists to check).
+case "${KUBECONFIG}" in
+*:*)
+  echo "FAIL: KUBECONFIG (${KUBECONFIG}) is a colon-separated list of files. This script needs a single kubeconfig file to check the issue #128 permission premise against — re-run with KUBECONFIG set to just the one file kind wrote (e.g. KUBECONFIG=\$HOME/.kube/config)." >&2
+  exit 1
+  ;;
+esac
+
 # This whole script's value rests on a real kind/kubectl-written kubeconfig
 # being genuinely owner-read-only (issue #128's actual failure mode) — assert
 # that against KUBECONFIG, the kubeconfig kind/kind-action actually wrote via
@@ -151,13 +172,17 @@ HOST_USER="$(id -u):$(id -g)"
 # HTP_K8S_ADDR=:8080, matching the documented recipe exactly) to a HOST port
 # via `-p 127.0.0.1:<port>:8080`, so a hardcoded port risks colliding with
 # anything else already listening on the host — another job, another agent's
-# process, a developer's own process. Pick a random candidate in the
-# ephemeral range and probe it with bash's own /dev/tcp (no extra tool
-# dependency), retrying on collision.
+# process, a developer's own process. Pick a random candidate and probe it
+# with bash's own /dev/tcp (no extra tool dependency), retrying on collision.
+# Candidates are drawn from 20000-32767, deliberately kept BELOW Linux's
+# default ephemeral port range (32768-60999, net.ipv4.ip_local_port_range):
+# the probe-then-bind below is inherently TOCTOU-racy (nothing stops another
+# process claiming the port between the probe and `docker run`'s bind), and
+# picking from the ephemeral range would widen that race further by
+# competing with every outbound connection the host makes in the meantime.
 port_is_free() {
   local port="$1"
   if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
-    exec 3>&- 2>/dev/null || true
     return 1 # connected -> something is already listening
   fi
   return 0 # connection refused/failed -> free
@@ -166,7 +191,7 @@ port_is_free() {
 pick_free_port() {
   local port attempt
   for attempt in $(seq 1 20); do
-    port=$(((RANDOM % 20000) + 20000))
+    port=$(((RANDOM % 12768) + 20000)) # 20000-32767, see the note above
     if port_is_free "${port}"; then
       echo "${port}"
       return 0
@@ -198,11 +223,25 @@ wait_http_200() {
 # startup log line (proof of "correctly bound to loopback", not merely
 # "the port didn't answer" — see that test's header comment for why the
 # distinction matters).
+#
+# Captures `docker logs` into a variable FIRST, then greps the variable via a
+# here-string, rather than `docker logs ... | grep -q ...`: under this
+# script's `set -o pipefail` (line 85), a live pipe into `grep -q` is a real
+# bug, not a style choice — `grep -q` exits the instant it finds a match,
+# which can close the pipe's read end while `docker logs` still has buffered
+# output left to write; the resulting SIGPIPE gives `docker logs` exit 141,
+# and pipefail then reports the WHOLE pipeline as failed even though grep
+# genuinely matched. Racy (only fires depending on scheduling/buffering), so
+# it can pass for a long time before failing on a real match — see the git
+# history of this function for the concrete case that surfaced it. A
+# here-string has no pipe at all, so there is nothing for grep's early exit
+# to race against.
 wait_log_contains() {
-  local name="$1" pattern="$2" timeout="$3" deadline
+  local name="$1" pattern="$2" timeout="$3" deadline logs
   deadline=$((SECONDS + timeout))
   while :; do
-    if docker logs "${name}" 2>&1 | grep -q -- "${pattern}"; then
+    logs="$(docker logs "${name}" 2>&1)"
+    if grep -q -- "${pattern}" <<<"${logs}"; then
       return 0
     fi
     if [ "${SECONDS}" -ge "${deadline}" ]; then
@@ -249,9 +288,29 @@ case "${resp}" in
   exit 1
   ;;
 esac
-if ! docker logs "${name}" 2>&1 | grep -q "detected view mode:"; then
+# Captured first, then matched via a here-string rather than piped straight
+# into `grep -q` — see wait_log_contains's header comment above for why a
+# live `docker logs | grep -q` pipeline is a real bug under this script's
+# `set -o pipefail`, not just a style preference. Capturing once here also
+# means the failure branch below can reuse the same log text instead of
+# calling `docker logs` a second time.
+#
+# This assignment is a top-level statement (unlike wait_log_contains's,
+# which only ever runs inside an `if !` condition and so has `set -e`
+# suppressed by the shell around it) — a failing `docker logs` here would
+# otherwise trip `set -e` and exit immediately, with docker's own error text
+# silently swallowed inside `logs` (folded in via 2>&1) rather than printed.
+# The explicit `|| { ... }` below prints that text and fails loudly instead,
+# so a `docker logs` failure can't regress into exactly the silent-failure
+# class this PR exists to remove.
+logs="$(docker logs "${name}" 2>&1)" || {
+  echo "FAIL: docker logs ${name} failed. Output:" >&2
+  echo "${logs}" >&2
+  exit 1
+}
+if ! grep -q "detected view mode:" <<<"${logs}"; then
   echo "FAIL: container never logged a successful permission probe (detected view mode); the fallback path may not have actually reached the cluster. Log:" >&2
-  docker logs "${name}" >&2 || true
+  echo "${logs}" >&2
   exit 1
 fi
 docker rm -f "${name}" >/dev/null 2>&1
@@ -279,19 +338,19 @@ if [ "${rc}" -ne 1 ]; then
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q "permission denied"; then
+if ! grep -q "permission denied" <<<"${out}"; then
   echo "FAIL: expected a permission-denied failure (0600 kubeconfig, no --user), got a different error. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q -- '--user "\$(id -u):\$(id -g)"'; then
+if ! grep -q -- '--user "\$(id -u):\$(id -g)"' <<<"${out}"; then
   echo "FAIL: permission diagnostic does not name --user \"\$(id -u):\$(id -g)\". Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
 # Must NOT be confused with the missing-mount diagnostic (test 4) — a file IS
 # mounted here, so that wording would be actively misleading.
-if echo "${out}" | grep -q "run with -v"; then
+if grep -q "run with -v" <<<"${out}"; then
   echo "FAIL: got the missing-mount diagnostic for a file that IS mounted (just unreadable). Output:" >&2
   echo "${out}" >&2
   exit 1
@@ -348,6 +407,34 @@ if [ "${rc}" -eq 0 ]; then
   echo "${out}" >&2
   exit 1
 fi
+# Positive proof of life FIRST (issue #129): the two checks below only assert
+# the ABSENCE of certain strings, so they'd pass just as well if the
+# container failed early for some unrelated reason (a broken image, a
+# missing binary, docker itself refusing to start it) — neither string would
+# be present then either, and the subtest would prove nothing. Assert
+# affirmatively that the real client-go resolution actually ran and produced
+# exactly the plain "empty config" error restConfig's non-retry branch wraps
+# (verified against a real run of internal/kube.restConfig() with
+# KUBECONFIG set to this same nonexistent path) — proof this container
+# genuinely reached and exercised the code path under test, not merely that
+# two unrelated strings happen to be missing from whatever it did output.
+#
+# Issue #129 itself suggested `grep -q /custom/kubeconfig` here. That path
+# deliberately does NOT appear in the error and can't be used: KUBECONFIG
+# feeds client-go's Precedence chain, not its ExplicitPath, and
+# clientcmd's loader silently skips missing Precedence entries rather than
+# naming them (k8s.io/client-go/tools/clientcmd/loader.go, Load()) — so the
+# chain ends up empty and clientcmd reports the same path-free
+# ErrEmptyConfig used above, never the file's own path. Confirmed against a
+# real build (see internal/kube/client_test.go's
+# TestRestConfig_ExplicitKUBECONFIG_NeverRedirected, which asserts this same
+# text); the issue's literal suggestion would have been a permanently-failing
+# assertion, not a stronger one.
+if ! grep -q "no configuration has been provided" <<<"${out}"; then
+  echo "FAIL: did not get the expected plain client-go empty-config error — the container may have failed for an unrelated reason before ever reaching the KUBECONFIG resolution this test exercises. Output:" >&2
+  echo "${out}" >&2
+  exit 1
+fi
 # The container-specific hint (see the "no kubeconfig found at ... or the
 # container default" wording in internal/kube/client.go) must be ABSENT here —
 # its presence would mean the retry fired despite KUBECONFIG being explicitly
@@ -357,12 +444,12 @@ fi
 # "config" (mirrors internal/kube/client_test.go's
 # TestRestConfig_ExplicitKUBECONFIG_NeverRedirected, which checks the same
 # thing against a bogus path).
-if echo "${out}" | grep -q "container default"; then
+if grep -q "container default" <<<"${out}"; then
   echo "FAIL: an explicit KUBECONFIG was redirected to the container default — it must never be second-guessed. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if echo "${out}" | grep -q "/kube/config"; then
+if grep -q "/kube/config" <<<"${out}"; then
   echo "FAIL: error unexpectedly names the container default path /kube/config; explicit KUBECONFIG must never be redirected. Output:" >&2
   echo "${out}" >&2
   exit 1
@@ -398,17 +485,17 @@ if [ "${rc}" -ne 1 ]; then
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q "/kube/config"; then
+if ! grep -q "/kube/config" <<<"${out}"; then
   echo "FAIL: diagnostic does not name /kube/config. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q -- "-v \$HOME/.kube/config:/kube/config:ro"; then
+if ! grep -q -- "-v \$HOME/.kube/config:/kube/config:ro" <<<"${out}"; then
   echo "FAIL: diagnostic does not name the -v flag to run with. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if echo "${out}" | grep -q -- '--user'; then
+if grep -q -- '--user' <<<"${out}"; then
   echo "FAIL: got the permission diagnostic for a mount that doesn't exist at all. Output:" >&2
   echo "${out}" >&2
   exit 1
