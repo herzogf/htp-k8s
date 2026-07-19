@@ -3,10 +3,12 @@ package kube
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/herzogf/htp-k8s/internal/scene"
@@ -45,22 +47,24 @@ const crashLoopBackOff = "CrashLoopBackOff"
 // default and the Namespace-mode path, where filtering the Towers already drops
 // hidden namespaces' pods (AttachPanels).
 //
-// Listing pods is cluster-wide. If it fails — e.g. a restricted user who cannot
-// list pods at the cluster scope — BuildPanels degrades to an empty result with
-// an informational error rather than hard-failing the scene (ADR-0002),
-// mirroring BuildTowers: the caller still gets a valid SceneState. (The
-// OpenShift per-Project pod-listing fallback, the Panel analogue of
-// BuildTowers' Project fallback, is issue #55.)
-func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.ViewMode, admitNamespace func(string) bool) (map[string][]scene.Panel, error) {
+// Listing pods is cluster-wide, first. If that fails — e.g. an OpenShift
+// project-scoped user who can list their own Projects but not pods at the
+// cluster scope — BuildPanels falls back to listing pods per admitted
+// Namespace/Project (see podsForPanels), the Panel analogue of BuildTowers'
+// Project fallback (issue #55, resolved). Only if neither source is available
+// does it degrade to an empty result with an informational error rather than
+// hard-failing the scene (ADR-0002), mirroring BuildTowers: the caller still
+// gets a valid SceneState.
+func BuildPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode, admitNamespace func(string) bool) (map[string][]scene.Panel, error) {
 	byTower := map[string][]scene.Panel{}
 
-	list, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	items, err := podsForPanels(ctx, client, dyn)
 	if err != nil {
-		return byTower, fmt.Errorf("list pods for panels: %w", err)
+		return byTower, err
 	}
 
-	for i := range list.Items {
-		pod := &list.Items[i]
+	for i := range items {
+		pod := &items[i]
 		if admitNamespace != nil && !admitNamespace(pod.Namespace) {
 			// The Namespace Filter excludes this pod's namespace from the scene.
 			continue
@@ -84,6 +88,59 @@ func BuildPanels(ctx context.Context, client kubernetes.Interface, mode scene.Vi
 		sortPanels(byTower[tower])
 	}
 	return byTower, nil
+}
+
+// podsForPanels returns every Pod BuildPanels should consider, preferring one
+// cluster-wide List and falling back to namespaceScopedPods only when that is
+// forbidden. It returns an error only when neither source yields pods, so a
+// listing failure can still degrade the scene per ADR-0002 rather than
+// hard-failing it.
+func podsForPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface) ([]corev1.Pod, error) {
+	list, err := client.CoreV1().Pods(metav1.NamespaceAll).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		return list.Items, nil
+	}
+
+	// Cluster-wide listing wasn't permitted — on OpenShift, typically a
+	// project-scoped user who can list their own Projects but lacks
+	// cluster-scoped `list pods`. Fall back to listing pods per admitted
+	// Namespace/Project (the Panel analogue of BuildTowers' Project fallback),
+	// preserving the original error for the report if that is unavailable too.
+	pods, fbErr := namespaceScopedPods(ctx, client, dyn)
+	if fbErr != nil {
+		return nil, fmt.Errorf("list pods for panels: cluster-wide: %v; per-namespace fallback: %w", err, fbErr)
+	}
+	return pods, nil
+}
+
+// namespaceScopedPods lists pods once per Namespace/Project the caller can
+// enumerate (see admittedNamespaceNames, called here with the zero-value
+// NamespaceFilter so it enumerates every admitted name — any Namespace/Project
+// filtering happens later, in BuildPanels/AttachPanels, exactly as it would for
+// the cluster-wide path). It is the fallback for a cluster-wide Pods list that
+// is forbidden but where per-namespace listing is not — the case for an
+// OpenShift project-scoped user.
+//
+// A namespace whose own pod listing fails (e.g. access revoked mid-enumeration)
+// is skipped, logged, and does not abort the other admitted namespaces' Panels.
+// An error is returned only when the namespace/project names themselves can't
+// be enumerated at all — there would be nothing to iterate.
+func namespaceScopedPods(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface) ([]corev1.Pod, error) {
+	names, err := admittedNamespaceNames(ctx, client, dyn, NamespaceFilter{})
+	if err != nil {
+		return nil, fmt.Errorf("enumerate namespaces/projects for per-namespace pod fallback: %w", err)
+	}
+
+	var pods []corev1.Pod
+	for _, ns := range names {
+		list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			log.Printf("list pods in namespace %q for panels: %v", ns, err)
+			continue
+		}
+		pods = append(pods, list.Items...)
+	}
+	return pods, nil
 }
 
 // AttachPanels nests each Tower's Panels into it, returning the same towers with

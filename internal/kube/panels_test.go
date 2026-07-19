@@ -64,7 +64,7 @@ func buildScene(t *testing.T, objs []runtime.Object, mode scene.ViewMode) []scen
 	if err != nil {
 		t.Fatalf("BuildTowers %s: %v", mode, err)
 	}
-	byTower, err := kube.BuildPanels(ctx, client, mode, nil)
+	byTower, err := kube.BuildPanels(ctx, client, nil, mode, nil)
 	if err != nil {
 		t.Fatalf("BuildPanels %s: %v", mode, err)
 	}
@@ -296,7 +296,7 @@ func TestAttachPanels_EveryTowerNonNil(t *testing.T) {
 func TestBuildPanels_Empty(t *testing.T) {
 	client := fake.NewSimpleClientset()
 
-	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNode, nil)
+	got, err := kube.BuildPanels(context.Background(), client, nil, scene.ViewModeNode, nil)
 	if err != nil {
 		t.Fatalf("BuildPanels: %v", err)
 	}
@@ -309,14 +309,17 @@ func TestBuildPanels_Empty(t *testing.T) {
 }
 
 // TestBuildPanels_ListForbiddenDegrades proves that when pods can't be listed
-// (a restricted user), BuildPanels degrades to a non-nil empty map with an
-// informational error rather than hard-failing (ADR-0002), mirroring
-// BuildTowers.
+// cluster-wide AND no per-namespace fallback source is available (neither
+// Namespaces nor, absent a dynamic client, Projects), BuildPanels degrades to a
+// non-nil empty map with an informational error rather than hard-failing
+// (ADR-0002), mirroring BuildTowers' TestBuildTowers_NamespaceMode_NoSourceDegrades.
 func TestBuildPanels_ListForbiddenDegrades(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	client.PrependReactor("list", "pods", forbiddenPodList())
+	client.PrependReactor("list", "namespaces", forbiddenNamespaceList())
 
-	got, err := kube.BuildPanels(context.Background(), client, scene.ViewModeNamespace, nil)
+	// nil dynamic client → no OpenShift Project fallback available either.
+	got, err := kube.BuildPanels(context.Background(), client, nil, scene.ViewModeNamespace, nil)
 	if err == nil {
 		t.Fatal("expected an informational error when pods can't be listed, got nil")
 	}
@@ -325,5 +328,126 @@ func TestBuildPanels_ListForbiddenDegrades(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("byTower = %+v, want empty on degradation", got)
+	}
+}
+
+// TestBuildPanels_PerNamespaceFallback_Namespaces proves that when pods can't
+// be listed cluster-wide but Namespaces are listable (and pods are listable
+// per-namespace), BuildPanels falls back to one Pods(ns).List per Namespace and
+// still produces real Panels, rather than degrading to empty. This is the
+// vanilla-Kubernetes shape of the fallback (no dynamic client involved).
+func TestBuildPanels_PerNamespaceFallback_Namespaces(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		namespace("team-a"), namespace("team-b"),
+		pod("team-a", "web", "node-1", corev1.PodRunning),
+		pod("team-b", "api", "node-2", corev1.PodRunning),
+	)
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		// Only forbid the cluster-wide (all-namespaces) list; a namespace-scoped
+		// list still passes through to the fake clientset's normal handling.
+		if la, ok := action.(k8stesting.ListAction); ok && la.GetNamespace() == "" {
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "pods"}, "", errors.New("cannot list pods at the cluster scope"))
+		}
+		return false, nil, nil
+	})
+
+	got, err := kube.BuildPanels(context.Background(), client, nil, scene.ViewModeNamespace, nil)
+	if err != nil {
+		t.Fatalf("BuildPanels per-namespace fallback: %v", err)
+	}
+	if n := len(got["team-a"]); n != 1 || got["team-a"][0].Pod != "web" {
+		t.Errorf("team-a panels = %+v, want [web]", got["team-a"])
+	}
+	if n := len(got["team-b"]); n != 1 || got["team-b"][0].Pod != "api" {
+		t.Errorf("team-b panels = %+v, want [api]", got["team-b"])
+	}
+}
+
+// TestBuildPanels_OpenShiftProjectFallback covers issue #55's acceptance
+// criterion directly: a project-scoped OpenShift user who can list their own
+// Projects but not pods (or Namespaces) at the cluster scope still gets real
+// Panels on their Towers, built by listing pods once per admitted Project,
+// rather than an empty Panel set (ADR-0002 graceful degradation avoided).
+func TestBuildPanels_OpenShiftProjectFallback(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		pod("team-a", "web", "node-1", corev1.PodRunning),
+		pod("team-b", "api", "node-2", corev1.PodRunning),
+		pod("other", "ignored", "node-3", corev1.PodRunning),
+	)
+	// Only cluster-wide pod listing is forbidden — a namespace-scoped list still
+	// passes through, matching a project-scoped OpenShift user who lacks
+	// cluster-level `list pods` but has it within their own Projects.
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if la, ok := action.(k8stesting.ListAction); ok && la.GetNamespace() == "" {
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "pods"}, "", errors.New("cannot list pods at the cluster scope"))
+		}
+		return false, nil, nil
+	})
+	client.PrependReactor("list", "namespaces", forbiddenNamespaceList())
+
+	// The user's accessible Projects are a subset of the cluster's Namespaces
+	// (CONTEXT.md's Project definition) — "other" has pods but is not one of
+	// this user's Projects, so it must not contribute a Panel.
+	dyn := projectDynamicClient(project("team-a"), project("team-b"))
+
+	towers := []scene.Tower{
+		{Name: "team-a", Grid: scene.GridPosition{Col: 0, Row: 0}},
+		{Name: "team-b", Grid: scene.GridPosition{Col: 1, Row: 0}},
+	}
+
+	byTower, err := kube.BuildPanels(context.Background(), client, dyn, scene.ViewModeNamespace, nil)
+	if err != nil {
+		t.Fatalf("BuildPanels openshift project fallback: %v", err)
+	}
+	got := kube.AttachPanels(towers, byTower)
+
+	if got := panelsOf(t, got, "team-a"); len(got) != 1 || got[0].Pod != "web" {
+		t.Errorf("team-a panels = %+v, want [web]", got)
+	}
+	if got := panelsOf(t, got, "team-b"); len(got) != 1 || got[0].Pod != "api" {
+		t.Errorf("team-b panels = %+v, want [api]", got)
+	}
+	if _, ok := byTower["other"]; ok {
+		t.Errorf("byTower has an entry for %q, an un-admitted Project's namespace", "other")
+	}
+}
+
+// TestBuildPanels_PerNamespaceFallback_SkipsFailingNamespace proves that a
+// namespace whose own pod listing fails during the fallback is skipped (and
+// logged) rather than aborting every other admitted namespace's Panels.
+func TestBuildPanels_PerNamespaceFallback_SkipsFailingNamespace(t *testing.T) {
+	client := fake.NewSimpleClientset(
+		namespace("ok"), namespace("broken"),
+		pod("ok", "web", "node-1", corev1.PodRunning),
+		pod("broken", "api", "node-2", corev1.PodRunning),
+	)
+	client.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		la, ok := action.(k8stesting.ListAction)
+		if !ok {
+			return false, nil, nil
+		}
+		switch la.GetNamespace() {
+		case "":
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "pods"}, "", errors.New("cannot list pods at the cluster scope"))
+		case "broken":
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Resource: "pods"}, "", errors.New("cannot list pods in this namespace"))
+		default:
+			return false, nil, nil
+		}
+	})
+
+	got, err := kube.BuildPanels(context.Background(), client, nil, scene.ViewModeNamespace, nil)
+	if err != nil {
+		t.Fatalf("BuildPanels: %v", err)
+	}
+	if n := len(got["ok"]); n != 1 || got["ok"][0].Pod != "web" {
+		t.Errorf("ok panels = %+v, want [web]", got["ok"])
+	}
+	if _, present := got["broken"]; present {
+		t.Errorf("byTower has an entry for the namespace whose own list failed: %+v", got["broken"])
 	}
 }

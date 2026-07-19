@@ -58,9 +58,13 @@ const blinkDebounce = 500 * time.Millisecond
 // requests more than the mode already reads. Per ADR-0002 a forbidden or absent
 // resource degrades gracefully: an informer that cannot watch simply delivers no
 // events (its errors are logged by client-go), pods still flow, and the initial
-// snapshot is unaffected. (The OpenShift Project-fallback resource is not watched
-// for deltas; a new Project appears only on the next snapshot/reconnect — the
-// watch-side analogue of BuildPanels' deferred Project fallback, issue #55.)
+// snapshot is unaffected. (The OpenShift Project-fallback resource is not
+// watched for deltas — nor is a Pods informer scoped per-Project — so on a
+// project-scoped OpenShift user's cluster a new Project, or a pod change only
+// visible via the per-Project pod-listing fallback (issue #55), appears only on
+// the next snapshot/reconnect rather than as a live delta. That live-watch gap
+// remains open; every rebuild still reflects real cluster state via BuildScene,
+// so it self-corrects on the next snapshot.)
 type SceneWatcher struct {
 	rebuild func(context.Context) scene.SceneState
 	factory informers.SharedInformerFactory

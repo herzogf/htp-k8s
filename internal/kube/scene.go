@@ -46,7 +46,7 @@ func BuildScene(ctx context.Context, client kubernetes.Interface, dyn dynamic.In
 	// to the admitted namespaces. It is nil (admit all) except in that Node-mode
 	// case, so the common paths do no extra work.
 	admitNamespace := filter.podNamespacePredicate(ctx, client, dyn, mode)
-	byTower, err := BuildPanels(ctx, client, mode, admitNamespace)
+	byTower, err := BuildPanels(ctx, client, dyn, mode, admitNamespace)
 	if err != nil {
 		log.Printf("build panels: %v", err)
 	}
