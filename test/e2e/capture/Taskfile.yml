@@ -21,18 +21,27 @@ tasks:
       Reuses web/node_modules via the same runtime-only symlink `record` (via
       run.sh) creates, since these scripts have no dependencies of their own;
       requires `task web:install` (or `npm ci` in web/) to have been run
-      first.
+      first. Shares run.sh's exact guarded create/remove lifecycle for that
+      symlink (lib/node-modules-symlink.sh, issue #130) — removed on both the
+      happy path and via the trap below, matching `record`'s own discipline;
+      concurrent `capture:record`/`capture:test` runs remain unsupported
+      (see that file's header comment).
     cmds:
+      # Explicit `bash -c` (rather than Task's default POSIX-ish `sh`
+      # interpreter, which rejects this multi-signal `trap ... EXIT INT TERM
+      # HUP` with "invalid signal specification") — matches run.sh, which
+      # this task shares its symlink helper with and is itself a bash script.
       - |
-        set -euo pipefail
-        WEB_NODE_MODULES="{{.TASKFILE_DIR}}/../../../web/node_modules"
-        if [ ! -d "${WEB_NODE_MODULES}" ]; then
-          echo "ERROR: ${WEB_NODE_MODULES} not found — run 'npm ci' in web/ (or 'task web:install') first." >&2
-          exit 1
-        fi
-        ln -sfn "$(cd "${WEB_NODE_MODULES}" && pwd)" "{{.TASKFILE_DIR}}/node_modules"
-        cd "{{.TASKFILE_DIR}}"
-        node_modules/.bin/vitest run
+        bash -c '
+          set -euo pipefail
+          source "{{.TASKFILE_DIR}}/lib/node-modules-symlink.sh"
+          LINK="{{.TASKFILE_DIR}}/node_modules"
+          WEB_NODE_MODULES="{{.TASKFILE_DIR}}/../../../web/node_modules"
+          trap "remove_capture_node_modules_symlink \"${LINK}\"" EXIT INT TERM HUP
+          create_capture_node_modules_symlink "${LINK}" "${WEB_NODE_MODULES}"
+          cd "{{.TASKFILE_DIR}}"
+          node_modules/.bin/vitest run
+        '
 
   record:
     desc: >

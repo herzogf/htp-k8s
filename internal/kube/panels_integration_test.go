@@ -61,7 +61,7 @@ func TestBuildPanels_RealCluster(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildTowers %s: %v", mode, err)
 		}
-		byTower, err := kube.BuildPanels(ctx, c.Clientset, mode, nil)
+		byTower, err := kube.BuildPanels(ctx, c.Clientset, dyn, mode, nil)
 		if err != nil {
 			t.Fatalf("BuildPanels %s: %v", mode, err)
 		}

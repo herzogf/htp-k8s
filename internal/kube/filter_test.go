@@ -236,7 +236,10 @@ func TestBuildScene_NamespaceMode_NameFilter(t *testing.T) {
 		pod("team-a", "web", "node-1", corev1.PodRunning),
 	)
 
-	got := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNamespace, mustNameFilter(t, "openshift-*"))
+	got, err := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNamespace, mustNameFilter(t, "openshift-*"))
+	if err != nil {
+		t.Fatalf("BuildScene: %v", err)
+	}
 
 	if want := []string{"openshift-api"}; !reflect.DeepEqual(towerNames(got.Towers), want) {
 		t.Fatalf("tower names = %v, want %v", towerNames(got.Towers), want)
@@ -256,7 +259,10 @@ func TestBuildScene_NodeMode_NameFilterScopesPods(t *testing.T) {
 		pod("team-a", "web", "node-2", corev1.PodRunning),
 	)
 
-	got := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, mustNameFilter(t, "openshift-*"))
+	got, err := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, mustNameFilter(t, "openshift-*"))
+	if err != nil {
+		t.Fatalf("BuildScene: %v", err)
+	}
 
 	if want := []string{"node-1", "node-2"}; !reflect.DeepEqual(towerNames(got.Towers), want) {
 		t.Fatalf("tower names = %v, want %v (Node Towers never hidden by the filter)", towerNames(got.Towers), want)
@@ -278,7 +284,10 @@ func TestBuildScene_NodeMode_LabelFilterScopesPods(t *testing.T) {
 		pod("payments", "ledger", "node-2", corev1.PodRunning),
 	)
 
-	got := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, mustLabelFilter(t, "team=platform"))
+	got, err := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, mustLabelFilter(t, "team=platform"))
+	if err != nil {
+		t.Fatalf("BuildScene: %v", err)
+	}
 
 	if want := []string{"node-1", "node-2"}; !reflect.DeepEqual(towerNames(got.Towers), want) {
 		t.Fatalf("tower names = %v, want both Nodes", towerNames(got.Towers))
@@ -297,7 +306,10 @@ func TestBuildScene_NoFilterKeepsEveryPod(t *testing.T) {
 		pod("team-a", "web", "node-1", corev1.PodRunning),
 	)
 
-	got := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, kube.NamespaceFilter{})
+	got, err := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, kube.NamespaceFilter{})
+	if err != nil {
+		t.Fatalf("BuildScene: %v", err)
+	}
 
 	if want := []string{"apiserver", "web"}; !reflect.DeepEqual(panelPods(got.Towers), want) {
 		t.Fatalf("panel pods = %v, want %v (nothing hidden by default)", panelPods(got.Towers), want)
@@ -318,7 +330,10 @@ func TestBuildScene_NodeMode_LabelFilter_FailsOpenWhenUnresolvable(t *testing.T)
 	client.PrependReactor("list", "namespaces", forbiddenNamespaceList())
 
 	// nil dynamic client → no Project fallback → the label filter can't resolve.
-	got := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, mustLabelFilter(t, "team=platform"))
+	got, err := kube.BuildScene(context.Background(), client, nil, scene.ViewModeNode, mustLabelFilter(t, "team=platform"))
+	if err != nil {
+		t.Fatalf("BuildScene: %v", err)
+	}
 
 	if want := []string{"gateway", "ledger"}; !reflect.DeepEqual(panelPods(got.Towers), want) {
 		t.Fatalf("panel pods = %v, want %v (fail-open: all pods admitted)", panelPods(got.Towers), want)
