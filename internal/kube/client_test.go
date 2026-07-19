@@ -71,6 +71,16 @@ func TestRestConfig_ExplicitKUBECONFIG_NeverRedirected(t *testing.T) {
 	if strings.Contains(err.Error(), containerKubeconfigPath) {
 		t.Errorf("an explicit KUBECONFIG was redirected to the container default: %v", err)
 	}
+	// This is the same plain client-go error test/e2e/container-kubeconfig/
+	// run.sh's Test 3b greps the real container's output for, as positive
+	// proof that subtest reached this exact code path rather than passing
+	// vacuously (issue #129). Asserted here via clientcmd.ErrEmptyConfig
+	// itself, not a hardcoded copy of its text, so a future client-go bump
+	// that changes the wording fails this fast `go test` instead of surfacing
+	// only as a confusing run.sh e2e-job failure.
+	if !strings.Contains(err.Error(), clientcmd.ErrEmptyConfig.Error()) {
+		t.Errorf("restConfig() error = %v, want it to contain the plain client-go empty-config message %q", err, clientcmd.ErrEmptyConfig.Error())
+	}
 }
 
 // TestKubeconfigUnreadable covers the issue #128 permission classifier as a
