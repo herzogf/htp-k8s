@@ -223,11 +223,25 @@ wait_http_200() {
 # startup log line (proof of "correctly bound to loopback", not merely
 # "the port didn't answer" — see that test's header comment for why the
 # distinction matters).
+#
+# Captures `docker logs` into a variable FIRST, then greps the variable via a
+# here-string, rather than `docker logs ... | grep -q ...`: under this
+# script's `set -o pipefail` (line 85), a live pipe into `grep -q` is a real
+# bug, not a style choice — `grep -q` exits the instant it finds a match,
+# which can close the pipe's read end while `docker logs` still has buffered
+# output left to write; the resulting SIGPIPE gives `docker logs` exit 141,
+# and pipefail then reports the WHOLE pipeline as failed even though grep
+# genuinely matched. Racy (only fires depending on scheduling/buffering), so
+# it can pass for a long time before failing on a real match — see the git
+# history of this function for the concrete case that surfaced it. A
+# here-string has no pipe at all, so there is nothing for grep's early exit
+# to race against.
 wait_log_contains() {
-  local name="$1" pattern="$2" timeout="$3" deadline
+  local name="$1" pattern="$2" timeout="$3" deadline logs
   deadline=$((SECONDS + timeout))
   while :; do
-    if docker logs "${name}" 2>&1 | grep -q -- "${pattern}"; then
+    logs="$(docker logs "${name}" 2>&1)"
+    if grep -q -- "${pattern}" <<<"${logs}"; then
       return 0
     fi
     if [ "${SECONDS}" -ge "${deadline}" ]; then
@@ -274,9 +288,16 @@ case "${resp}" in
   exit 1
   ;;
 esac
-if ! docker logs "${name}" 2>&1 | grep -q "detected view mode:"; then
+# Captured first, then matched via a here-string rather than piped straight
+# into `grep -q` — see wait_log_contains's header comment above for why a
+# live `docker logs | grep -q` pipeline is a real bug under this script's
+# `set -o pipefail`, not just a style preference. Capturing once here also
+# means the failure branch below can reuse the same log text instead of
+# calling `docker logs` a second time.
+logs="$(docker logs "${name}" 2>&1)"
+if ! grep -q "detected view mode:" <<<"${logs}"; then
   echo "FAIL: container never logged a successful permission probe (detected view mode); the fallback path may not have actually reached the cluster. Log:" >&2
-  docker logs "${name}" >&2 || true
+  echo "${logs}" >&2
   exit 1
 fi
 docker rm -f "${name}" >/dev/null 2>&1
@@ -304,19 +325,19 @@ if [ "${rc}" -ne 1 ]; then
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q "permission denied"; then
+if ! grep -q "permission denied" <<<"${out}"; then
   echo "FAIL: expected a permission-denied failure (0600 kubeconfig, no --user), got a different error. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q -- '--user "\$(id -u):\$(id -g)"'; then
+if ! grep -q -- '--user "\$(id -u):\$(id -g)"' <<<"${out}"; then
   echo "FAIL: permission diagnostic does not name --user \"\$(id -u):\$(id -g)\". Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
 # Must NOT be confused with the missing-mount diagnostic (test 4) — a file IS
 # mounted here, so that wording would be actively misleading.
-if echo "${out}" | grep -q "run with -v"; then
+if grep -q "run with -v" <<<"${out}"; then
   echo "FAIL: got the missing-mount diagnostic for a file that IS mounted (just unreadable). Output:" >&2
   echo "${out}" >&2
   exit 1
@@ -396,7 +417,7 @@ fi
 # TestRestConfig_ExplicitKUBECONFIG_NeverRedirected, which asserts this same
 # text); the issue's literal suggestion would have been a permanently-failing
 # assertion, not a stronger one.
-if ! echo "${out}" | grep -q "no configuration has been provided"; then
+if ! grep -q "no configuration has been provided" <<<"${out}"; then
   echo "FAIL: did not get the expected plain client-go empty-config error — the container may have failed for an unrelated reason before ever reaching the KUBECONFIG resolution this test exercises. Output:" >&2
   echo "${out}" >&2
   exit 1
@@ -410,12 +431,12 @@ fi
 # "config" (mirrors internal/kube/client_test.go's
 # TestRestConfig_ExplicitKUBECONFIG_NeverRedirected, which checks the same
 # thing against a bogus path).
-if echo "${out}" | grep -q "container default"; then
+if grep -q "container default" <<<"${out}"; then
   echo "FAIL: an explicit KUBECONFIG was redirected to the container default — it must never be second-guessed. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if echo "${out}" | grep -q "/kube/config"; then
+if grep -q "/kube/config" <<<"${out}"; then
   echo "FAIL: error unexpectedly names the container default path /kube/config; explicit KUBECONFIG must never be redirected. Output:" >&2
   echo "${out}" >&2
   exit 1
@@ -451,17 +472,17 @@ if [ "${rc}" -ne 1 ]; then
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q "/kube/config"; then
+if ! grep -q "/kube/config" <<<"${out}"; then
   echo "FAIL: diagnostic does not name /kube/config. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if ! echo "${out}" | grep -q -- "-v \$HOME/.kube/config:/kube/config:ro"; then
+if ! grep -q -- "-v \$HOME/.kube/config:/kube/config:ro" <<<"${out}"; then
   echo "FAIL: diagnostic does not name the -v flag to run with. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
-if echo "${out}" | grep -q -- '--user'; then
+if grep -q -- '--user' <<<"${out}"; then
   echo "FAIL: got the permission diagnostic for a mount that doesn't exist at all. Output:" >&2
   echo "${out}" >&2
   exit 1
