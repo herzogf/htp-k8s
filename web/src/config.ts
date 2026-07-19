@@ -1,14 +1,25 @@
-/** Default WebSocket URL used when `VITE_WS_URL` isn't set at build time. */
-export const DEFAULT_WS_URL = 'ws://localhost:8080/ws'
-
 /**
- * Returns the WebSocket URL the scene should connect to, configurable via
- * the `VITE_WS_URL` build-time environment variable so the same build can
- * point at different backends (local dev, CI, a packaged binary's own
- * address) without a code change.
+ * Returns the WebSocket URL the scene should connect to.
+ *
+ * Defaults to same-origin: the scheme and host are derived from
+ * `window.location` (`https:` → `wss:`, else `ws:`), matching how the single
+ * binary serves the UI, `/ws`, and `/api` from one origin (ADR-0001). That
+ * means a stock build works unmodified no matter which host/port the binary
+ * is actually reached on — including remotely, and behind a TLS reverse
+ * proxy.
+ *
+ * `VITE_WS_URL` remains a build-time escape hatch for a genuinely
+ * cross-origin setup. It should not be needed for local development either:
+ * `vite.config.ts` proxies `/ws` to the backend so the dev server is
+ * same-origin too.
  */
 export function getWebSocketUrl(): string {
-  return import.meta.env.VITE_WS_URL ?? DEFAULT_WS_URL
+  const explicit = import.meta.env.VITE_WS_URL
+  if (explicit) {
+    return explicit
+  }
+  const { protocol, host } = window.location
+  return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}/ws`
 }
 
 /**

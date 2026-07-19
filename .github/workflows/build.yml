@@ -428,6 +428,12 @@ jobs:
         run: ./test/e2e/kwok/seed.sh
 
       - name: Run Playwright e2e suite
+        env:
+          # Deliberately non-default: CI must not exercise the one port
+          # (8080) a regression to a hardcoded ws://localhost:8080/ws would
+          # still pass on (issue #146 — the frontend now derives its /ws/
+          # /api target from window.location, so any port must work).
+          HTP_K8S_E2E_PORT: "8099"
         run: task web:e2e
 
       # Screenshots, video, and traces are the visual proof of behavior

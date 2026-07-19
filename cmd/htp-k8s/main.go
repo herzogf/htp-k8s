@@ -34,15 +34,16 @@ import (
 // BREAKING CHANGE, but narrower than it first looks: this does NOT newly
 // break the primary "load the page in a browser on another machine" case —
 // that was already broken on the OLD all-interfaces default too, because the
-// released frontend's WebSocket target is baked to ws://localhost:8080/ws
-// regardless of where the page was loaded from (web/src/config.ts's
-// DEFAULT_WS_URL), so a remote browser already got a blank/stalled page
-// there, not a working live scene. What silently breaks on upgrade: anyone
-// reaching /api endpoints directly from another host (curl, custom tooling,
-// monitoring), and anyone who had already rebuilt the frontend with a
-// matching VITE_WS_URL to make real remote viewing work — both now also need
-// -addr/HTP_K8S_ADDR. See run()'s startup log line, which always states the
-// listen address and, when it's loopback, exactly how to widen it — the
+// released frontend's WebSocket target used to be baked to
+// ws://localhost:8080/ws regardless of where the page was loaded from, so a
+// remote browser already got a blank/stalled page there, not a working live
+// scene. Issue #146 removed that: the frontend now derives its /ws and /api
+// target from the page's own origin, so widening -addr/HTP_K8S_ADDR alone is
+// now sufficient for a remote browser too — no frontend rebuild needed. What
+// silently breaks on upgrade: anyone reaching /api endpoints directly from
+// another host (curl, custom tooling, monitoring) needs -addr/HTP_K8S_ADDR
+// widened same as before. See run()'s startup log line, which always states
+// the listen address and, when it's loopback, exactly how to widen it — the
 // operator finds out from the log, not by discovering the app is
 // unreachable from elsewhere.
 //
@@ -304,7 +305,7 @@ func run(args []string, env func(string) string) error {
 func logListenAddr(addr string) {
 	log.Printf("htp-k8s backend listening on %s", addr)
 	if isLoopbackAddr(addr) {
-		log.Printf("bound to loopback only — reachable from this machine, not from other hosts. To expose it, set -addr :8080 or HTP_K8S_ADDR=:8080 (see README.md for the security implications and what a remote browser additionally needs)")
+		log.Printf("bound to loopback only — reachable from this machine, not from other hosts. To expose it, set -addr :8080 or HTP_K8S_ADDR=:8080 — that alone is now enough for a remote browser (see README.md for the security implications)")
 		return
 	}
 	log.Printf("WARNING: bound to %s (not loopback-only) with no authentication — anyone who can reach this port gets read-only access to your cluster under your credentials", addr)
