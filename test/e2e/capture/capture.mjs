@@ -281,19 +281,11 @@ async function captureFlight(browser) {
 }
 
 // This process's tree lives in its own process group (run.sh's launch site
-// sets that up deliberately with `set -m`), so it does NOT get a raw
-// terminal Ctrl-C's kernel broadcast at all — nor, it turns out, would that
-// broadcast have done anything useful even without that isolation: bash
-// sets SIGINT/SIGQUIT to SIG_IGN for asynchronous (backgrounded, no job
-// control) commands in a script, so before this process group isolation
-// existed, node — and everything it forked, including Chromium — was
-// already ignoring a plain Ctrl-C's SIGINT outright (confirmed empirically,
-// see the #130 PR discussion). Own our own teardown here instead of relying
-// on any such implicit broadcast: run.sh's `stop_capture` is what actually
-// reaches this process, sending SIGTERM (or SIGKILL, on escalation) whether
-// the run was interrupted via Ctrl-C or a targeted `kill <run.sh PID>` —
-// both funnel through the same trap in run.sh, so there's no meaningful
-// distinction between them from this process's point of view. Since
+// sets that up with `set -m`), isolated from run.sh's own. run.sh's
+// `stop_capture` is what actually reaches this process — sending SIGTERM,
+// then SIGKILL on escalation — whether the run was interrupted via Ctrl-C
+// or a targeted `kill <run.sh PID>`; both funnel through the same trap in
+// run.sh, so there's no meaningful distinction between them here. Since
 // Chromium is a grandchild (spawned by Playwright underneath node), if this
 // process dies without an explicit browser.close() first, Chromium is
 // simply orphaned — reparented, not killed. Node's default action for
@@ -301,15 +293,16 @@ async function captureFlight(browser) {
 // without running any `finally` block, so this must be an explicit
 // handler, not reliance on main()'s try/finally above — and all three
 // signals are covered (not just TERM/INT), matching run.sh's own `trap
-// cleanup EXIT INT TERM HUP` (a bare SIGHUP, e.g. a closed terminal, would
-// otherwise take the un-owned path).
+// cleanup EXIT INT TERM HUP`. Full rationale for the process-group
+// isolation itself, and what it does and doesn't change about which
+// signals reach this process directly: see the #130 PR discussion.
 //
 // This handler is a best-effort belt, not the sole safety net: if
 // browser.close() itself hangs (a wedged browser), run.sh's stop_capture
-// now escalates to SIGKILL against this process's whole process GROUP
-// (node + Chromium + all of its descendants), not just this PID, and
-// verifies the group is actually empty afterward — see that function's
-// comment (issue #130). `shuttingDown` itself is declared up top, alongside
+// escalates to SIGKILL against this process's whole process GROUP (node +
+// Chromium + all of its descendants), not just this PID, and verifies the
+// group is actually empty afterward — see that function's comment (issue
+// #130). `shuttingDown` itself is declared up top, alongside
 // `browser`/`browserPromise` — main() reads it too (see there).
 async function shutdown(signal) {
   if (shuttingDown) return
