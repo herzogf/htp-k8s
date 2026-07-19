@@ -32,6 +32,17 @@ import { unwrap, yawFromQuaternion } from './quat.mjs'
  * @typedef {{ elapsedMs: number, quat: [number, number, number, number] }} PoseSample
  */
 
+// The single source of truth for analyzePoseTrace's optional-option
+// defaults below. analyze.mjs's CLI imports these directly (rather than
+// hardcoding its own copies of the same numbers) so the two can't drift
+// apart silently — the fixture regression test in analysis.test.mjs calls
+// analyzePoseTrace() without passing these options at all, so it only ever
+// exercises whatever is defined HERE; a CLI-only copy going stale would go
+// uncaught by that test (issue #130).
+export const DEFAULT_CADENCE_S = 0.178
+export const DEFAULT_GAP_MERGE_S = 0.3
+export const DEFAULT_TOP_N = 15
+
 /** Builds the (seconds, unwrapped-yaw-radians) series from raw pose samples. */
 export function buildSeries(samples) {
   const ts = samples.map((s) => s.elapsedMs / 1000)
@@ -132,7 +143,14 @@ export function saturationClusters(rateSeries, threshold, gapMerge) {
  *   it's derived from Demo Mode's max yaw rate rather than hardcoded.
  */
 export function analyzePoseTrace(samples, options) {
-  const { label, source, cadence = 0.178, threshold, gapMerge = 0.3, topN = 15 } = options
+  const {
+    label,
+    source,
+    cadence = DEFAULT_CADENCE_S,
+    threshold,
+    gapMerge = DEFAULT_GAP_MERGE_S,
+    topN = DEFAULT_TOP_N,
+  } = options
   const { ts, yaw } = buildSeries(samples)
   const duration = ts[ts.length - 1]
 

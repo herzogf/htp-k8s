@@ -27,6 +27,7 @@
 
 import { chromium } from '@playwright/test'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -64,8 +65,44 @@ let startTime = null
 let frameCount = 0
 let stopping = false
 
+// Tracked at module scope so the signal handlers below (registered once, at
+// import time — see the bottom of this file) can reach whatever browser is
+// currently open (or currently launching), without threading it through
+// every function.
+//
+// browserPromise is assigned SYNCHRONOUSLY, in the same tick as the
+// chromium.launch() call below — deliberately BEFORE that call is awaited.
+// A signal landing during the launch window (chromium.launch() has already
+// forked the browser process but hasn't resolved yet) would otherwise find
+// `browser` still null, so closeBrowser() would no-op and exit, orphaning
+// the very process launch just spawned — exactly the leak class issue #130
+// exists to close. Tracking the in-flight promise instead means
+// closeBrowser() can await it and close whatever it produces, however late
+// the signal arrives.
+let browserPromise = null
+let browser = null
+
+// Set once a signal handler has taken ownership of teardown (see the
+// bottom of this file). main() checks this after awaiting its own launch
+// so it can't stomp closeBrowser()'s `browser = null` completion marker by
+// re-assigning a (by-then-already-closed) browser back into it — a benign
+// race in practice (browser.close() is idempotent and the process is about
+// to exit either way), but `browser = null` is meant to read as "no
+// browser is currently open", and blindly reassigning after teardown has
+// already run breaks that invariant for no benefit.
+let shuttingDown = false
+
 async function main() {
-  const browser = await chromium.launch({ headless: true })
+  browserPromise = chromium.launch({ headless: true })
+  const launched = await browserPromise
+  if (shuttingDown) {
+    // A signal already fired while launch was in flight; closeBrowser()
+    // (called from the shutdown handler) already raced this same await and
+    // has since moved on — let it own the close, don't touch module state.
+    await launched.close().catch(() => {})
+    return
+  }
+  browser = launched
   // Everything from here on can throw (bounded waits below, Demo Mode not
   // active, ffmpeg/CDP errors) — always close the browser on the way out so
   // a failed capture doesn't leave an orphaned headless Chromium process
@@ -73,8 +110,28 @@ async function main() {
   try {
     await captureFlight(browser)
   } finally {
-    await browser.close().catch(() => {})
+    await closeBrowser()
   }
+}
+
+// closeBrowser: idempotent (safe to call from both the normal finally above
+// and a signal handler firing concurrently/afterward) and never throws —
+// browser.close() itself can reject if the browser process is already
+// gone, which must not turn "we're shutting down anyway" into an unhandled
+// rejection.
+async function closeBrowser() {
+  if (!browser && browserPromise) {
+    // Launch is (or was) still in flight — wait for it so we can close
+    // whatever it produces rather than orphaning it. Bounded by
+    // Playwright's own launch timeout, so this can't hang forever even if
+    // launch itself never resolves.
+    browser = await browserPromise.catch(() => null)
+  }
+  if (!browser) return
+  const b = browser
+  browser = null
+  browserPromise = null
+  await b.close().catch(() => {})
 }
 
 async function captureFlight(browser) {
@@ -221,6 +278,49 @@ async function captureFlight(browser) {
     `Captured ${frameMeta.length} frames, ${poseSamples.length} pose samples, ${towers.length} towers.`,
   )
   console.log(`Last frame elapsedMs: ${frameMeta[frameMeta.length - 1]?.elapsedMs}`)
+}
+
+// This process's tree lives in its own process group (run.sh's launch site
+// sets that up with `set -m`), isolated from run.sh's own. run.sh's
+// `stop_capture` is what actually reaches this process — sending SIGTERM,
+// then SIGKILL on escalation — whether the run was interrupted via Ctrl-C
+// or a targeted `kill <run.sh PID>`; both funnel through the same trap in
+// run.sh, so there's no meaningful distinction between them here. Since
+// Chromium is a grandchild (spawned by Playwright underneath node), if this
+// process dies without an explicit browser.close() first, Chromium is
+// simply orphaned — reparented, not killed. Node's default action for
+// SIGTERM/SIGINT/SIGHUP with no listener is to terminate immediately
+// without running any `finally` block, so this must be an explicit
+// handler, not reliance on main()'s try/finally above — and all three
+// signals are covered (not just TERM/INT), matching run.sh's own `trap
+// cleanup EXIT INT TERM HUP`. Full rationale for the process-group
+// isolation itself, and what it does and doesn't change about which
+// signals reach this process directly: see the #130 PR discussion.
+//
+// This handler is a best-effort belt, not the sole safety net: if
+// browser.close() itself hangs (a wedged browser), run.sh's stop_capture
+// escalates to SIGKILL against this process's whole process GROUP (node +
+// Chromium + all of its descendants), not just this PID, and verifies the
+// group is actually empty afterward — see that function's comment (issue
+// #130). `shuttingDown` itself is declared up top, alongside
+// `browser`/`browserPromise` — main() reads it too (see there).
+async function shutdown(signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.error(`\nReceived ${signal}, closing the browser before exiting...`)
+  await closeBrowser()
+  // 128+N is the conventional exit code for "terminated by signal N" (N =
+  // SIGTERM 15, SIGINT 2, SIGHUP 1) — distinguishes a clean signal-initiated
+  // teardown from a genuine capture failure (plain exit(1)) in logs.
+  process.exit(128 + (os.constants.signals[signal] ?? 0))
+}
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(signal, () => {
+    shutdown(signal).catch((e) => {
+      console.error('shutdown handler itself failed:', e)
+      process.exit(1)
+    })
+  })
 }
 
 main().catch((e) => {
