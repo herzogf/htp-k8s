@@ -166,6 +166,19 @@ release:
   # instance — keep the flag on it; removing it would silently regress a
   # published release's verification instructions to the weaker form.
   #
+  # The footer's old attestation block also carried a digest-pinning note
+  # ("pin @sha256:... if you need the guarantee to hold even if the tag
+  # were ever repointed") — that moved to README.md's Supply chain section
+  # too, right after its two `gh attestation verify` commands, for the same
+  # reason as `--signer-workflow` above: it's now the only shipped copy of
+  # the attestation instructions, so it's the only place that sentence can
+  # live. If this footer or README's Supply chain section is restructured
+  # again, both the `--signer-workflow` flag AND the digest-pinning sentence
+  # need to move together — losing either one silently weakens the
+  # published verification story. (The further guardrail about NOT copying
+  # this tag-based pattern onto a moving tag without a digest instruction,
+  # issue #64, lives as a comment on that issue, not here or in an ADR.)
+  #
   # NOTE the leading blank line: GoReleaser's body template joins the
   # changelog and this footer with exactly ONE newline (see
   # internal/pipe/release/body.go), so a footer starting directly with `---`
@@ -189,7 +202,7 @@ release:
     - `ghcr.io/herzogf/htp-k8s:latest` also points at this release
     {{- end }}
 
-    Pull/run and verify: [README](https://github.com/herzogf/htp-k8s#readme), [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image).
+    Pull/run: [README Quickstart](https://github.com/herzogf/htp-k8s#quickstart); verify: [README Supply chain](https://github.com/herzogf/htp-k8s#supply-chain); details: [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image).
 
 snapshot:
   version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"

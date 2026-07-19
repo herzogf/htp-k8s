@@ -103,13 +103,17 @@ Every release is built in CI with **keyless, Sigstore-backed attestations** — 
 
 ```bash
 # the release binary you downloaded
-gh attestation verify htp-k8s_0.3.0_linux_amd64.tar.gz --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
+gh attestation verify htp-k8s_0.3.0_linux_amd64.tar.gz \
+  --repo herzogf/htp-k8s \
+  --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
 
 # the container image (the tag resolves to the multi-arch index)
-gh attestation verify oci://ghcr.io/herzogf/htp-k8s:v0.3.0 --repo herzogf/htp-k8s --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
+gh attestation verify oci://ghcr.io/herzogf/htp-k8s:v0.3.0 \
+  --repo herzogf/htp-k8s \
+  --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
 ```
 
-A passing check means the artifact was built by this repo's release workflow and hasn't been tampered with since. More on the posture: [ADR-0005](docs/adr/0005-supply-chain-security-posture.md).
+A passing check means the artifact was built by this repo's release workflow and hasn't been tampered with since. Both commands print the resolved digest — pin `@sha256:…` instead of the tag if you need that guarantee to hold even if the tag were ever repointed. More on the posture: [ADR-0005](docs/adr/0005-supply-chain-security-posture.md).
 
 ## Docs & further reading
 
