@@ -19,12 +19,13 @@ import (
 // TestAllowedHosts_IPLiteralAlwaysTrusted proves any IP-address-literal Host
 // (v4 or v6, any port, and regardless of AllowedHosts' configured entries) is
 // always trusted. This is what makes a wildcard -addr bind (":8080" — the
-// only option inside a container; see all three docker run recipes in
-// README.md) reachable by IP address with zero -allowed-hosts configuration
-// (issue #163 / ADR-0013): DNS rebinding requires resolving a *name*, and a
-// Host that's already a bare IP was never routed through DNS. 0.0.0.0 and ::
-// are deliberately included — they're IP literals like any other, and there
-// is no addr-derived special case left to disagree with that.
+// only option inside a container) reachable by IP address with zero
+// -allowed-hosts configuration (issue #163 / ADR-0013 — see its "What's
+// trusted" section for exactly which README.md docker run recipes that
+// covers): DNS rebinding requires resolving a *name*, and a Host that's
+// already a bare IP was never routed through DNS. 0.0.0.0 and :: are
+// deliberately included — they're IP literals like any other, and there is
+// no addr-derived special case left to disagree with that.
 func TestAllowedHosts_IPLiteralAlwaysTrusted(t *testing.T) {
 	var allowed server.AllowedHosts // zero value: nothing explicitly configured
 	for _, host := range []string{
@@ -294,6 +295,27 @@ func TestHostAllowlist_ProtectsUnregisteredAPIRoutesAutomatically(t *testing.T) 
 	}
 }
 
+// TestHostAllowlist_NonCanonicalPathStillGated pins that a path containing
+// dot-segments ("/api/../api/config" — the raw, uncleaned form net/http hands
+// the outer middleware; net/http's own path-cleaning, which would redirect
+// this to "/api/config", only runs inside the mux, one layer further in) is
+// still recognised by gatedPath's prefix match and rejected for an untrusted
+// Host. Review verified this and other non-canonical forms
+// ("//////api/config", "/api%2fconfig") empirically; this pins the one most
+// likely to drift silently if gatedPath's matching strategy ever changes.
+func TestHostAllowlist_NonCanonicalPathStillGated(t *testing.T) {
+	cfg := wsAllowlistConfig(server.NewAllowedHosts(nil))
+	req := httptest.NewRequest(http.MethodGet, "/api/../api/config", nil)
+	req.Host = "evil.com:8080"
+	rec := httptest.NewRecorder()
+
+	server.NewHandler(cfg).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a non-canonical /api/../api/config path with an untrusted Host", rec.Code)
+	}
+}
+
 // TestHostAllowlist_HealthzAndRootExempt proves /healthz and the static
 // frontend at "/" are reachable regardless of Host — they carry no cluster
 // data and must stay available (e.g. for a Kubernetes readiness probe) even
@@ -321,14 +343,14 @@ func TestHostAllowlist_HealthzAndRootExempt(t *testing.T) {
 // -allowed-hosts configured, that a server is reachable by a client
 // connecting via a concrete IP address. This is the exact shape a container
 // deployment needs: -addr :8080 (a wildcard bind — the only option inside a
-// container; see all three docker run recipes in README.md) is reached from
-// outside by an IP address, e.g. http://192.168.1.5:8080, with nothing
-// configured. Loopback is used here only for test portability (no stable
-// non-loopback interface in every CI sandbox); the mechanism being proved —
-// IP-literal Host trust — is address-family/scope agnostic, so this
-// generalises. Unlike the rest of this file, this test exercises a real
-// listener end to end, closing the "every host-allowlist test is
-// unit-level" gap flagged in review.
+// container; see ADR-0013's "What's trusted" section for exactly which
+// README.md docker run recipes use it) is reached from outside by an IP
+// address, e.g. http://192.168.1.5:8080, with nothing configured. Loopback
+// is used here only for test portability (no stable non-loopback interface
+// in every CI sandbox); the mechanism being proved — IP-literal Host trust —
+// is address-family/scope agnostic, so this generalises. Unlike the rest of
+// this file, this test exercises a real listener end to end, closing the
+// "every host-allowlist test is unit-level" gap flagged in review.
 func TestHostAllowlist_RealListener_WildcardBindReachableByIP_NoConfig(t *testing.T) {
 	cfg := server.Config{
 		Snapshot:     server.StaticSnapshot(scene.SceneState{ViewMode: scene.ViewModeNamespace}),

@@ -64,7 +64,11 @@ func (a AllowedHosts) add(host string) {
 //     unconditionally, with no Origin gate either.
 //
 // Anything else must be on the explicit list NewAllowedHosts builds from
-// -allowed-hosts/HTP_K8S_ALLOWED_HOSTS.
+// -allowed-hosts/HTP_K8S_ALLOWED_HOSTS. Matching is exact against the two
+// forms above and against the configured list — no normalization beyond
+// stripping a port and lower-casing — so near-miss spellings fail closed
+// rather than being coerced into a match: a trailing-dot FQDN ("localhost.",
+// "127.0.0.1.") is rejected, not treated as equivalent to the dotless form.
 func (a AllowedHosts) Permits(hostHeader string) bool {
 	host := strings.ToLower(hostOnly(hostHeader))
 	if host == "" {
