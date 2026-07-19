@@ -87,11 +87,16 @@ changelog:
   use: git
   sort: asc
   filters:
+    # Matches both unscoped ("docs: …") and scoped conventional-commit forms
+    # ("docs(#105): …", "chore(process): …") — a bare "^docs:" etc. only
+    # matches the former and silently let every scoped commit of these types
+    # through into shipped release notes (found via the v0.3.0-rc.1 dry-run;
+    # see the PR that added this comment).
     exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"
-      - "^ci:"
+      - "^docs(\\(.*\\))?:"
+      - "^test(\\(.*\\))?:"
+      - "^chore(\\(.*\\))?:"
+      - "^ci(\\(.*\\))?:"
       - "Merge pull request"
       - "Merge branch"
 
@@ -138,9 +143,11 @@ release:
   # only covers archives — see issue #98) and does NOT show a `cosign verify`
   # example (no bare cosign signature is emitted yet — that's issue #100 to
   # decide). The `docker run` line mirrors the README's current "real network
-  # address" example (explicit `-e KUBECONFIG`, plus the README's `# then open
-  # http://localhost:8080` follow-up so the reader has a next step); issue
-  # #113 may change the KUBECONFIG default. Deliberately NOT copying the
+  # address" example verbatim, including the README's `# then open
+  # http://localhost:8080` follow-up so the reader has a next step. #113/#124
+  # made the image default `KUBECONFIG` to `/kube/config`, so — like the
+  # README — this no longer sets `-e KUBECONFIG` explicitly; keep the two in
+  # sync if that default ever changes again. Deliberately NOT copying the
   # README's local-cluster recipes (`--network kind`+`--internal` for kind,
   # `--network host` for k3d/minikube/Docker Desktop) here — a release-notes
   # reader is more likely pointing at a remote/real cluster than a local one
@@ -212,14 +219,13 @@ release:
     ```bash
     docker run --rm -p 127.0.0.1:8080:8080 \
       --user "$(id -u):$(id -g)" \
-      -e KUBECONFIG=/kube/config \
       -e HTP_K8S_ADDR=:8080 \
       -v "$HOME/.kube/config:/kube/config:ro" \
       ghcr.io/herzogf/htp-k8s:{{ .Tag }}
     # then open http://localhost:8080
     ```
 
-    (`--user "$(id -u):$(id -g)"` reads your `0600` kubeconfig; `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats (Windows, root shells): [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image); design reasoning: [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-secure-by-default-network-binding.md).)
+    (`--user "$(id -u):$(id -g)"` is needed because of kubeconfig file permissions (`0600`); `-e HTP_K8S_ADDR=:8080` is required because `-p` doesn't reach the container's own loopback. Details and caveats (Windows, root shells): [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image); design reasoning: [ADR-0012](https://github.com/herzogf/htp-k8s/blob/main/docs/adr/0012-secure-by-default-network-binding.md).)
     {{- if not .Prerelease }}
 
     `:latest` also points at this release.
