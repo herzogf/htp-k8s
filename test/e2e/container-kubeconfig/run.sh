@@ -94,11 +94,16 @@ log() { printf '\n=== [container-kubeconfig] %s\n' "$*"; }
 # (restConfig's doc comment in internal/kube/client.go calls this out
 # explicitly), but the `stat` below needs exactly one real file to check the
 # 0600 premise against. In CI, KUBECONFIG is always the single file
-# kind-action wrote, so this never fires there — but the documented local
-# invocation above (`KUBECONFIG=$HOME/.kube/config ... run.sh`) is exactly
-# the kind of value a developer's shell might carry a longer, colon-joined
-# KUBECONFIG in already. Fail with a clear, actionable message rather than
-# a bare, confusing `stat: cannot stat` on a path containing a literal ':'.
+# kind-action wrote (build.yml sets it to just $HOME/.kube/config), so this
+# never fires there — but a developer running the documented local invocation
+# above (`KUBECONFIG=$HOME/.kube/config ... run.sh`) may already have a
+# longer, colon-joined KUBECONFIG set in their own shell, which this script
+# can't meaningfully check a single mode against. Fail with a clear,
+# actionable message rather than a bare, confusing `stat: cannot stat` on a
+# path containing a literal ':' (issue #129 — keeping this a hard failure
+# rather than e.g. checking only the first entry via `${KUBECONFIG%%:*}` was
+# a deliberate maintainer call: that would silently stat the wrong file and
+# weaken the #128 0600 premise this script exists to check).
 case "${KUBECONFIG}" in
 *:*)
   echo "FAIL: KUBECONFIG (${KUBECONFIG}) is a colon-separated list of files. This script needs a single kubeconfig file to check the issue #128 permission premise against — re-run with KUBECONFIG set to just the one file kind wrote (e.g. KUBECONFIG=\$HOME/.kube/config)." >&2
@@ -379,6 +384,18 @@ fi
 # KUBECONFIG set to this same nonexistent path) — proof this container
 # genuinely reached and exercised the code path under test, not merely that
 # two unrelated strings happen to be missing from whatever it did output.
+#
+# Issue #129 itself suggested `grep -q /custom/kubeconfig` here. That path
+# deliberately does NOT appear in the error and can't be used: KUBECONFIG
+# feeds client-go's Precedence chain, not its ExplicitPath, and
+# clientcmd's loader silently skips missing Precedence entries rather than
+# naming them (k8s.io/client-go/tools/clientcmd/loader.go, Load()) — so the
+# chain ends up empty and clientcmd reports the same path-free
+# ErrEmptyConfig used above, never the file's own path. Confirmed against a
+# real build (see internal/kube/client_test.go's
+# TestRestConfig_ExplicitKUBECONFIG_NeverRedirected, which asserts this same
+# text); the issue's literal suggestion would have been a permanently-failing
+# assertion, not a stronger one.
 if ! echo "${out}" | grep -q "no configuration has been provided"; then
   echo "FAIL: did not get the expected plain client-go empty-config error — the container may have failed for an unrelated reason before ever reaching the KUBECONFIG resolution this test exercises. Output:" >&2
   echo "${out}" >&2
