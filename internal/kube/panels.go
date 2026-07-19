@@ -171,23 +171,44 @@ func namespaceScopedPods(ctx context.Context, client kubernetes.Interface, dyn d
 		pods []corev1.Pod
 		err  error
 	}
-	results := make(chan nsResult, len(names))
-	sem := make(chan struct{}, namespaceScopedPodsConcurrency)
-	var wg sync.WaitGroup
-	for _, ns := range names {
-		wg.Add(1)
-		go func(ns string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
-			if err != nil {
-				results <- nsResult{ns: ns, err: err}
-				return
-			}
-			results <- nsResult{ns: ns, pods: list.Items}
-		}(ns)
+
+	// A fixed pool of at most namespaceScopedPodsConcurrency workers pulling
+	// from jobs, rather than one goroutine per name up front — the idiomatic
+	// shape for N in the hundreds (ADR-0004 scale), and it caps the goroutine
+	// count outright rather than just the in-flight List count. jobs and
+	// results are both safe to under-drain: jobs is fed by its own goroutine
+	// that always finishes sending (each worker keeps consuming until it's
+	// closed) and results is buffered to len(names) (every worker's send
+	// always succeeds), so an early return below (the ctx-cut-short case)
+	// leaves nothing blocked — every worker and the feeder still runs to
+	// completion in the background, no goroutine leak.
+	workers := namespaceScopedPodsConcurrency
+	if workers > len(names) {
+		workers = len(names)
 	}
+	jobs := make(chan string)
+	results := make(chan nsResult, len(names))
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ns := range jobs {
+				list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+				if err != nil {
+					results <- nsResult{ns: ns, err: err}
+					continue
+				}
+				results <- nsResult{ns: ns, pods: list.Items}
+			}
+		}()
+	}
+	go func() {
+		for _, ns := range names {
+			jobs <- ns
+		}
+		close(jobs)
+	}()
 	go func() {
 		wg.Wait()
 		close(results)

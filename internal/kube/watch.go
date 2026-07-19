@@ -498,10 +498,17 @@ func (w *SceneWatcher) run(ctx context.Context) {
 // regardless of how much of the fallback actually completed, so scene.Diff
 // would broadcast a panelRemoved for every Panel every client had, on what may
 // be a single transient timeout. Skipping the publish trades that mass wipe for
-// one rebuild cycle of staleness: nothing is silently lost, because the next
-// trigger reconciles fully against live cluster state again, same as any other
-// coalesced/missed event (see the type doc's self-correcting design) — it is
-// simply not treated as truth until a rebuild actually succeeds.
+// staleness lasting until a rebuild succeeds: nothing is silently lost — each
+// trigger still reconciles fully against live cluster state, same as any other
+// coalesced/missed event (see the type doc's self-correcting design) — the
+// scene is just not treated as truth in the meantime. For a TRANSIENT
+// degradation that is one rebuild cycle, as intended; but the guard fires on
+// ANY non-nil error, including a persistent one (e.g. cluster-wide pods
+// forbidden with no Namespace/Project source at all — podsForPanels/BuildTowers
+// error the same way on every rebuild), in which case the scene stays frozen
+// and every informer event is silently dropped until whatever is broken is
+// fixed. That is still the right trade over publishing wrong data as truth
+// (see the type doc), just not bounded to "one cycle" in general.
 func (w *SceneWatcher) rebuildAndBroadcast(ctx context.Context) {
 	next, err := w.rebuild(ctx)
 	if err != nil {
