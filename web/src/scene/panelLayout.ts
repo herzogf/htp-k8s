@@ -42,18 +42,38 @@ const PANEL_TOP_MARGIN = 0.4
 export const PANEL_FACES_PER_TOWER = 4
 
 /**
+ * ROW_EPSILON absorbs floating-point noise in the height↔rows round-trip
+ * (#59 review finding): `heightForRows` and `panelRowsPerFace` are exact
+ * inverses in real-number math, but IEEE-754 subtraction/division on their
+ * literal constants (0.4, 0.34, 0.5, …) can land a hair under the true
+ * integer boundary — e.g. `heightForRows(32)` then fed back through the
+ * un-nudged `(height - margin - size) / pitch` lands at `30.999999999999996`,
+ * which `Math.floor` truncates to 30 instead of 31, silently handing back one
+ * row too few. A caller that then sizes a face's capacity off that short
+ * count draws its LAST Panel exactly on top of its FIRST — invisible
+ * z-fighting overlap, not a visible overflow, which is what made this the
+ * dangerous direction to get wrong. Nudging the dividend by a tiny epsilon
+ * before flooring costs nothing at any real (non-boundary) height — it only
+ * ever changes the result exactly at the boundary a real `heightForRows`
+ * output can land on.
+ */
+const ROW_EPSILON = 1e-6
+
+/**
  * panelRowsPerFace is how many rows of Panels fit down one Tower face at a
  * given Tower `height`, top-down: the first row sits just below the cap (after
  * {@link PANEL_TOP_MARGIN}) and each following row steps {@link PANEL_PITCH}
  * lower, until the next row would put a Panel's bottom edge through the floor.
  * This is the per-face capacity #59's four-faces-before-growing-height rule is
- * built on: {@link sceneTowerHeight} multiplies it by {@link PANELS_PER_ROW} and
- * {@link PANEL_FACES_PER_TOWER} to get one Tower's total capacity at `height`,
- * and {@link panelInstances} calls it again (on the resolved scene height) to
- * know where a Panel's row wraps to the next face.
+ * built on: {@link sceneRowsPerFace} multiplies it by {@link PANELS_PER_ROW} and
+ * {@link PANEL_FACES_PER_TOWER} to get one Tower's total capacity at `height`.
+ * See {@link ROW_EPSILON} for why the division is nudged before flooring.
  */
 export function panelRowsPerFace(height: number): number {
-  return Math.max(1, Math.floor((height - PANEL_TOP_MARGIN - PANEL_SIZE) / PANEL_PITCH) + 1)
+  return Math.max(
+    1,
+    Math.floor((height - PANEL_TOP_MARGIN - PANEL_SIZE) / PANEL_PITCH + ROW_EPSILON) + 1,
+  )
 }
 
 /**
@@ -66,27 +86,58 @@ function heightForRows(rows: number): number {
 }
 
 /**
- * sceneTowerHeight is the single, scene-wide Tower height #59 requires: driven
- * by the busiest Tower's pod count, and applied to every Tower in the scene (see
- * {@link towerPlacements}'s `height` param and `Tower.tsx`'s `height` prop) so
- * the skyline stays uniform — a Tower with fewer Pods simply has unfilled
- * faces, it is never rendered shorter than another.
+ * sceneRowsPerFace is the single INTEGER row-per-face count #59's placement
+ * math is built on: driven by the busiest Tower's Pod count, exactly (never
+ * derived by flooring a height back down — see {@link ROW_EPSILON}'s doc
+ * comment for why that round-trip is the dangerous direction to get wrong).
+ * {@link sceneTowerHeight} and {@link panelInstances} both call this SAME
+ * function — rather than one deriving its row count from the other's already-
+ * rounded height — so they can never independently drift apart by the one row
+ * a float round-trip can silently lose.
  *
- * Stays at the resting {@link TOWER_HEIGHT} as long as the busiest Tower's Pods
- * fit across its four faces at that height (see {@link panelRowsPerFace}); once
- * that capacity is exceeded, this grows to the smallest height whose four-face
- * capacity fits the busiest Tower's Pod count exactly (#59's "fill all four
- * sides first, then grow height" order — growth is scene-wide and uniform, not
+ * Stays at the resting {@link TOWER_HEIGHT}'s own row count as long as the
+ * busiest Tower's Pods fit across its four faces at that height; once that
+ * capacity is exceeded, this is the smallest row count whose four-face
+ * capacity fits the busiest Tower's Pod count (#59's "fill all four sides
+ * first, then grow height" order — growth is scene-wide and uniform, not
  * per-Tower, so no Tower is ever shorter than another).
  */
-export function sceneTowerHeight(towers: readonly Tower[]): number {
+export function sceneRowsPerFace(towers: readonly Tower[]): number {
   const maxPanels = towers.reduce((max, tower) => Math.max(max, tower.panels.length), 0)
-  const baseCapacity = panelRowsPerFace(TOWER_HEIGHT) * PANELS_PER_ROW * PANEL_FACES_PER_TOWER
+  const baseRows = panelRowsPerFace(TOWER_HEIGHT)
+  const baseCapacity = baseRows * PANELS_PER_ROW * PANEL_FACES_PER_TOWER
   if (maxPanels <= baseCapacity) {
-    return TOWER_HEIGHT
+    return baseRows
   }
-  const rowsNeeded = Math.ceil(maxPanels / (PANELS_PER_ROW * PANEL_FACES_PER_TOWER))
-  return Math.max(TOWER_HEIGHT, heightForRows(rowsNeeded))
+  return Math.ceil(maxPanels / (PANELS_PER_ROW * PANEL_FACES_PER_TOWER))
+}
+
+/**
+ * sceneTowerHeight is the single, scene-wide Tower height #59 requires: the
+ * world-space height {@link heightForRows} derives from {@link
+ * sceneRowsPerFace}'s exact integer row count, applied to every Tower in the
+ * scene (see {@link towerPlacements}'s `height` param and `Tower.tsx`'s
+ * `height` prop) so the skyline stays uniform — a Tower with fewer Pods
+ * simply has unfilled faces, it is never rendered shorter than another.
+ * Stays at the resting {@link TOWER_HEIGHT} exactly (not a recomputed
+ * float that merely rounds to it) while `sceneRowsPerFace` stays at its own
+ * resting row count.
+ *
+ * Deliberately NO hysteresis: this is a pure function of `towers` alone,
+ * recomputed fresh on every call, with no memory of a previous height to
+ * damp against. A Tower's Pod count oscillating right across a row-boundary
+ * (e.g. 372 ↔ 373 Pods at the resting-height boundary) would make the whole
+ * scene's height — and every Panel's Y — pulse in lockstep every time. Flagged
+ * as a conscious deferral rather than an oversight: real Pod counts move in
+ * discrete Kubernetes scheduling events, not a tight jitter around one exact
+ * boundary, so this hasn't been observed to matter in practice: revisit with
+ * a `Math.max` against a previously-rendered height or a small deadband if it
+ * ever does.
+ */
+export function sceneTowerHeight(towers: readonly Tower[]): number {
+  const rows = sceneRowsPerFace(towers)
+  const baseRows = panelRowsPerFace(TOWER_HEIGHT)
+  return rows <= baseRows ? TOWER_HEIGHT : heightForRows(rows)
 }
 
 /**
@@ -179,10 +230,24 @@ export interface PanelInstance {
  * it — which is what makes later click-picking (#20) instance-aware.
  */
 export function panelInstances(towers: readonly Tower[]): PanelInstance[] {
+  // Called WITHOUT a height, so placements[i].position[1] is the default
+  // resting TOWER_HEIGHT / 2 — deliberately unused below (only position[0]/[2]
+  // are read; every Panel's own Y comes from `height` a few lines down
+  // instead). Flagged so a future addition of a Y-dependent term here doesn't
+  // silently read the wrong (resting, not scene-uniform) value — Scene.tsx's
+  // own towerPlacements(towers, sceneTowerHeight(towers)) call is the one
+  // that must stay in step with this function's `height` below.
   const placements = towerPlacements(towers)
-  const height = sceneTowerHeight(towers)
-  const rowsPerFace = panelRowsPerFace(height)
+  // rowsPerFace comes straight from sceneRowsPerFace's exact INTEGER row
+  // count — the same one sceneTowerHeight derives its world-space `height`
+  // from below — rather than independently re-deriving row count by flooring
+  // that height back down. Two independent derivations of "how many rows
+  // fit" can drift apart by exactly one row under floating-point rounding
+  // (see ROW_EPSILON's doc comment); routed through one shared integer
+  // instead, this and sceneTowerHeight can never disagree.
+  const rowsPerFace = sceneRowsPerFace(towers)
   const faceCapacity = rowsPerFace * PANELS_PER_ROW
+  const height = sceneTowerHeight(towers)
 
   return towers.flatMap((tower, towerIndex) => {
     const [towerX, , towerZ] = placements[towerIndex].position
@@ -190,9 +255,9 @@ export function panelInstances(towers: readonly Tower[]): PanelInstance[] {
     return tower.panels.map((panel, panelIndex) => {
       // Fill all four faces before wrapping back around (defensive: a single
       // Tower's own Pod count never exceeds the scene-wide capacity
-      // sceneTowerHeight sized `height` to, since it was sized to the busiest
-      // Tower — but modulo keeps this total rather than silently truncating if
-      // that invariant is ever violated).
+      // faceCapacity × PANEL_FACES_PER_TOWER, since rowsPerFace was sized to
+      // the busiest Tower — but modulo keeps this total rather than silently
+      // truncating if that invariant is ever violated).
       const face = Math.floor(panelIndex / faceCapacity) % PANEL_FACES_PER_TOWER
       const indexInFace = panelIndex % faceCapacity
       const col = indexInFace % PANELS_PER_ROW

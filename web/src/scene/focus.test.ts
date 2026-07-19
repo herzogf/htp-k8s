@@ -76,6 +76,45 @@ describe('panelFocusPose', () => {
   it('gets much closer than a Tower focus (close enough to read one Panel)', () => {
     expect(PANEL_VIEW_DISTANCE).toBeLessThan(TOWER_VIEW_DISTANCE)
   })
+
+  // #59: a Panel can now be on any of the Tower's four faces (panelLayout.ts's
+  // facePlacement), each with its own rotationY. Focus must stand OUTSIDE the
+  // Tower on that same face's normal, or a right/back/left-face Panel's Focus
+  // flies the camera straight into the Tower prism (a regression #59 nearly
+  // introduced — panelFocusPose is the one other consumer of Panel orientation
+  // besides the renderer itself).
+  it('stands outside the right (+X) face for a Panel rotated Math.PI / 2', () => {
+    const panel: [number, number, number] = [1.5, 4.2, 3.1]
+    const { position, target } = panelFocusPose(panel, Math.PI / 2)
+    expect(target).toEqual(panel)
+    expect(position[0]).toBeCloseTo(panel[0] + PANEL_VIEW_DISTANCE)
+    expect(position[1]).toBeCloseTo(panel[1])
+    expect(position[2]).toBeCloseTo(panel[2])
+  })
+
+  it('stands outside the back (-Z) face for a Panel rotated Math.PI', () => {
+    const panel: [number, number, number] = [1.5, 4.2, 3.1]
+    const { position } = panelFocusPose(panel, Math.PI)
+    expect(position[0]).toBeCloseTo(panel[0])
+    expect(position[2]).toBeCloseTo(panel[2] - PANEL_VIEW_DISTANCE)
+  })
+
+  it('stands outside the left (-X) face for a Panel rotated -Math.PI / 2', () => {
+    const panel: [number, number, number] = [1.5, 4.2, 3.1]
+    const { position } = panelFocusPose(panel, -Math.PI / 2)
+    expect(position[0]).toBeCloseTo(panel[0] - PANEL_VIEW_DISTANCE)
+    expect(position[2]).toBeCloseTo(panel[2])
+  })
+
+  it('always stands PANEL_VIEW_DISTANCE outside the Panel, whatever the face', () => {
+    const panel: [number, number, number] = [-2, 1, 5]
+    for (const rotationY of [0, Math.PI / 2, Math.PI, -Math.PI / 2, 1.234]) {
+      const { position } = panelFocusPose(panel, rotationY)
+      const dx = position[0] - panel[0]
+      const dz = position[2] - panel[2]
+      expect(Math.hypot(dx, dz)).toBeCloseTo(PANEL_VIEW_DISTANCE)
+    }
+  })
 })
 
 describe('easeInOutCubic', () => {

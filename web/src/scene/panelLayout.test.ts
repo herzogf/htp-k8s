@@ -9,6 +9,7 @@ import {
   panelInstances,
   panelRowsPerFace,
   resolvePanel,
+  sceneRowsPerFace,
   sceneTowerHeight,
 } from './panelLayout'
 import { TOWER_FOOTPRINT, TOWER_HEIGHT, towerPlacements } from './towerLayout'
@@ -237,6 +238,118 @@ describe('panelInstances: four-face wrap (#59)', () => {
     // the floor, never above the cap.
     expect(instances.every((p) => p.position[1] >= PANEL_SIZE / 2)).toBe(true)
     expect(instances.every((p) => p.position[1] <= TOWER_HEIGHT - PANEL_SIZE / 2)).toBe(true)
+  })
+})
+
+/**
+ * Measures the two horizontal geometry constants {@link facePlacement} bakes
+ * in (the standoff distance off a face and half a row's width) empirically,
+ * from a single centred row of Panels on the front face — rather than
+ * importing the private PANEL_STANDOFF/PANEL_PITCH constants — so the real
+ * containment tests below can assert an ACTUAL horizontal bound per Panel,
+ * not just a vertical (Y) one. This is what review finding #4 asked for:
+ * "the containment test doesn't test containment" — the previous 100+-Pod
+ * test only ever checked Y.
+ */
+function measureFaceGeometry(): { standoff: number; halfRowWidth: number } {
+  const panels = Array.from({ length: PANELS_PER_ROW }, (_, i) => makePanel({ pod: `ref-${i}` }))
+  const [placement] = towerPlacements([makeTower({ name: 'ref' })])
+  const instances = panelInstances([makeTower({ name: 'ref', panels })])
+  const standoff = instances[0].position[2] - placement.position[2]
+  const halfRowWidth = Math.max(
+    ...instances.map((p) => Math.abs(p.position[0] - placement.position[0])),
+  )
+  return { standoff, halfRowWidth }
+}
+
+/**
+ * Asserts every one of `instances` is ACTUALLY contained within its Tower's
+ * geometry at `height`: exactly one horizontal axis pinned to the face
+ * standoff (front/back = ±Z, right/left = ±X — {@link facePlacement}'s four
+ * faces), the other horizontal axis within the row's half-width, and Y within
+ * the Tower's vertical span. A real footprint/height containment check, not
+ * just the old test's Y-only bound.
+ */
+function assertContained(
+  instances: ReturnType<typeof panelInstances>,
+  placement: { position: readonly [number, number, number] },
+  height: number,
+  geometry: { standoff: number; halfRowWidth: number },
+): void {
+  const EPS = 1e-6
+  for (const instance of instances) {
+    const dx = instance.position[0] - placement.position[0]
+    const dz = instance.position[2] - placement.position[2]
+    const onZFace = Math.abs(Math.abs(dz) - geometry.standoff) < EPS
+    const onXFace = Math.abs(Math.abs(dx) - geometry.standoff) < EPS
+    expect(onZFace || onXFace).toBe(true)
+    if (onZFace) {
+      expect(Math.abs(dx)).toBeLessThanOrEqual(geometry.halfRowWidth + EPS)
+    } else {
+      expect(Math.abs(dz)).toBeLessThanOrEqual(geometry.halfRowWidth + EPS)
+    }
+    expect(instance.position[1]).toBeGreaterThanOrEqual(PANEL_SIZE / 2 - EPS)
+    expect(instance.position[1]).toBeLessThanOrEqual(height - PANEL_SIZE / 2 + EPS)
+  }
+}
+
+describe('panelInstances: growth-path containment (#59 review findings 3 & 4)', () => {
+  const geometry = measureFaceGeometry()
+
+  it('stays contained (real X/Y/Z bounds, not just Y) for a busy Tower in the non-growing regime', () => {
+    const podCount = 120
+    const towers = [
+      makeTower({
+        panels: Array.from({ length: podCount }, (_, i) => makePanel({ pod: `p-${i}` })),
+      }),
+    ]
+    const height = sceneTowerHeight(towers)
+    const [placement] = towerPlacements(towers, height)
+
+    assertContained(panelInstances(towers), placement, height, geometry)
+  })
+
+  it('stays contained AND collision-free once the scene has grown past the resting height', () => {
+    // Several pod counts spanning multiple row-boundary crossings well past
+    // where sceneTowerHeight must grow — including 373, the exact count the
+    // review's floating-point round-trip finding was reproduced against.
+    for (const podCount of [BASE_TOWER_CAPACITY + 1, 200, 373, 500, 1000]) {
+      const towers = [
+        makeTower({
+          panels: Array.from({ length: podCount }, (_, i) => makePanel({ pod: `p-${i}` })),
+        }),
+      ]
+      const height = sceneTowerHeight(towers)
+      expect(height).toBeGreaterThan(TOWER_HEIGHT)
+      const [placement] = towerPlacements(towers, height)
+      const instances = panelInstances(towers)
+
+      assertContained(instances, placement, height, geometry)
+
+      // The real regression a lost row causes: the last Panel silently
+      // wraps back onto an earlier one (identical rendered position) instead
+      // of visibly overflowing — assert every rendered position is unique.
+      const positions = new Set(instances.map((p) => p.position.join(',')))
+      expect(positions.size).toBe(podCount)
+    }
+  })
+
+  it('panelRowsPerFace(sceneTowerHeight(towers)) matches sceneRowsPerFace(towers) at every row boundary (ROW_EPSILON regression guard)', () => {
+    // The exact composition the review found losing a row to floating-point
+    // rounding: re-deriving row count by flooring the already-rounded height
+    // back down. panelInstances itself no longer does this (it calls
+    // sceneRowsPerFace directly — see its own comment), but this pins the
+    // composition safe anyway, in case anything else ever does it.
+    for (let rows = 12; rows <= 100; rows++) {
+      const podCount = rows * PANELS_PER_ROW * PANEL_FACES_PER_TOWER
+      const towers = [
+        makeTower({
+          panels: Array.from({ length: podCount }, (_, i) => makePanel({ pod: `p-${i}` })),
+        }),
+      ]
+      const height = sceneTowerHeight(towers)
+      expect(panelRowsPerFace(height)).toBe(sceneRowsPerFace(towers))
+    }
   })
 })
 

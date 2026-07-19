@@ -1032,6 +1032,134 @@ describe('the orbit-and-bob fallback', () => {
   })
 })
 
+/**
+ * #59 lets every Tower in a busy scene render at a SINGLE uniform height
+ * taller than the resting TOWER_HEIGHT (panelLayout.ts's sceneTowerHeight).
+ * Before this describe block's fix, every one of Demo Mode's altitude
+ * thresholds (the overview band, the aim ceiling, the Tower-box clearance)
+ * stayed pinned to the resting height regardless — a grown scene's "over the
+ * rooftops" overview pass could fly BELOW the real roofline, and the
+ * nearest-Tower pull measured clearance against a shorter box than the one
+ * actually rendered. These tests exercise a scene grown well past the
+ * resting height and assert the tour's altitude program tracks the ACTUAL
+ * roofline derived from the real Tower placements (ADR-0010's "no magic
+ * numbers" property), not the fixed constant.
+ */
+describe('altitude bands scale with the scene-wide Tower height (#59)', () => {
+  // Double the resting height — comfortably past what any pre-#59 fixed
+  // constant would clear.
+  const GROWN_HEIGHT = TOWER_HEIGHT * 2
+  const restingPlacements = grid(5, 5)
+  const grownTowers: Tower[] = []
+  for (let row = 0; row < 5; row++) {
+    for (let col = 0; col < 5; col++) {
+      grownTowers.push(makeTower({ name: `t-${col}-${row}`, grid: { col, row } }))
+    }
+  }
+  const grownPlacements = towerPlacements(grownTowers, GROWN_HEIGHT)
+
+  it("derives the tour's roofline from the real (grown) Tower placements, not the resting TOWER_HEIGHT", () => {
+    const tour = createDemoTour({ seed: 1, placements: grownPlacements, entry: ORIGIN_POSE })
+    expect(tour.kind).toBe('canyon')
+    if (tour.kind !== 'canyon') return
+    expect(tour.bands.rooflineY).toBe(GROWN_HEIGHT)
+    // Every band keeps the exact same fraction of the roofline the
+    // resting-height constant was tuned at.
+    const factor = GROWN_HEIGHT / TOWER_HEIGHT
+    expect(tour.bands.overviewMin).toBeCloseTo(OVERVIEW_ALTITUDE_MIN * factor)
+    expect(tour.bands.overviewMax).toBeCloseTo(OVERVIEW_ALTITUDE_MAX * factor)
+    expect(tour.bands.canyonMin).toBeCloseTo(CANYON_ALTITUDE_MIN * factor)
+    expect(tour.bands.canyonMax).toBeCloseTo(CANYON_ALTITUDE_MAX * factor)
+    expect(tour.bands.aimCeiling).toBeCloseTo(LOOKAT_AIM_CEILING * factor)
+  })
+
+  it('is byte-identical to the resting-height bands for a scene that never grows — every pre-#59 test stays valid', () => {
+    const tour = createDemoTour({ seed: 1, placements: restingPlacements, entry: ORIGIN_POSE })
+    expect(tour.kind).toBe('canyon')
+    if (tour.kind !== 'canyon') return
+    expect(tour.bands.rooflineY).toBe(TOWER_HEIGHT)
+    expect(tour.bands.overviewMin).toBe(OVERVIEW_ALTITUDE_MIN)
+    expect(tour.bands.overviewMax).toBe(OVERVIEW_ALTITUDE_MAX)
+    expect(tour.bands.canyonMin).toBe(CANYON_ALTITUDE_MIN)
+    expect(tour.bands.canyonMax).toBe(CANYON_ALTITUDE_MAX)
+    expect(tour.bands.aimCeiling).toBe(LOOKAT_AIM_CEILING)
+  })
+
+  it('reaches overview altitudes that clear the ACTUAL grown roofline — the showcase-camera-clips-through-Towers regression this closes', () => {
+    const tour = createDemoTour({ seed: 42424242, placements: grownPlacements, entry: ORIGIN_POSE })
+    const waypointAltitudes = recordWaypointAltitudes(tour, grownPlacements, 3400)
+    const overviewAltitudes = waypointAltitudes.filter((y) => y > GROWN_HEIGHT)
+
+    // A long walk over paced episodes must reach at least one overview apex
+    // that genuinely clears the grown roofline…
+    expect(overviewAltitudes.length).toBeGreaterThan(0)
+    // …and every one lands inside the GROWN overview band. The resting-height
+    // band (1.1x-1.6x TOWER_HEIGHT) sits entirely BELOW GROWN_HEIGHT here, so
+    // this could only pass if the bands actually scaled with the real Tower
+    // height rather than staying pinned to the old constant.
+    for (const y of overviewAltitudes) {
+      expect(y).toBeGreaterThanOrEqual(GROWN_HEIGHT * 1.1 - 1e-6)
+      expect(y).toBeLessThanOrEqual(GROWN_HEIGHT * 1.6 + 1e-6)
+    }
+  })
+
+  it('measures the nearest-Tower pull’s clearance against the grown roofline, not the resting one', () => {
+    const tour = createDemoTour({ seed: 1, placements: grownPlacements, entry: ORIGIN_POSE })
+    expect(tour.kind).toBe('canyon')
+    if (tour.kind !== 'canyon') return
+
+    // A point ON the GROWN Tower's actual roofline — genuinely at its
+    // surface, so the real clearance is ~0 (nearestTowerPull's strength stays
+    // ≈0 exactly when a Tower already fills the aim point — see its doc
+    // comment). Well above the RESTING roofline, though: the pre-#59 fixed
+    // box would have read this same point as already well clear of the
+    // (wrongly shorter) Tower.
+    const [towerX, , towerZ] = grownPlacements[0].position
+    const point = new Vector3(towerX, GROWN_HEIGHT, towerZ)
+
+    const grownPull = nearestTowerPull(point, grownPlacements, tour.bands)
+    // Default bands (resting roofline) — the pre-#59 behaviour every caller
+    // that doesn't pass bands still gets, and what this fix moves callers off.
+    const restingBandsPull = nearestTowerPull(point, grownPlacements)
+
+    // Against the real, grown roofline the point sits right at the surface
+    // (clearance ≈ 0 → strength ≈ 0); measured against the wrong, shorter
+    // resting box the same point reads as clear above the (assumed) roof, so
+    // clearance — and the pull strength it drives — is spuriously large. That
+    // gap between "actually at the Tower" and "reads as clear of it" is
+    // exactly the clipping-risk #59 opened.
+    expect(grownPull.strength).toBeCloseTo(0, 6)
+    expect(restingBandsPull.strength).toBeGreaterThan(grownPull.strength)
+  })
+
+  it('scales the single-Tower orbit fallback altitude to that Tower’s own grown height too', () => {
+    const [lone] = towerPlacements(
+      [makeTower({ name: 'solo', grid: { col: 0, row: 0 } })],
+      GROWN_HEIGHT,
+    )
+    const tour = createDemoTour({ seed: 1, placements: [lone], entry: ORIGIN_POSE })
+    expect(tour.kind).toBe('orbit')
+
+    const pose = sampleDemoTourPose(tour)
+    // The orbit perches above the Tower's own (grown) centre, scaling with
+    // it — not a fixed offset tuned only for the resting height.
+    expect(pose.position[1]).toBeGreaterThan(GROWN_HEIGHT * 0.9)
+  })
+
+  it('picks up a scene that grows mid-flight: the very next stepDemoTour call reflects the new placements', () => {
+    let tour: DemoTourState = createDemoTour({
+      seed: 1,
+      placements: restingPlacements,
+      entry: ORIGIN_POSE,
+    })
+    expect(tour.kind === 'canyon' && tour.bands.rooflineY).toBe(TOWER_HEIGHT)
+
+    tour = stepDemoTour(tour, 0.1, grownPlacements)
+
+    expect(tour.kind === 'canyon' && tour.bands.rooflineY).toBe(GROWN_HEIGHT)
+  })
+})
+
 describe('sampleDemoIntro', () => {
   const from: Pose = { position: [50, 20, 50], target: [0, 0, 0] }
   const flight = {

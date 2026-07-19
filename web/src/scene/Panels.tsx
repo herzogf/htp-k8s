@@ -331,7 +331,7 @@ export function Panels({ towers }: { towers: readonly Tower[] }) {
       return
     }
     event.stopPropagation()
-    focus?.requestFocus(panelFocusPose(instance.position))
+    focus?.requestFocus(panelFocusPose(instance.position, instance.rotationY))
     select(panelSelection(instance))
   }
 

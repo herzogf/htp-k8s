@@ -92,7 +92,7 @@ export function useDetailTestHook(
         if (!instance) {
           return false
         }
-        focus?.requestFocus(panelFocusPose(instance.position))
+        focus?.requestFocus(panelFocusPose(instance.position, instance.rotationY))
         select(panelSelection(instance))
         return true
       },
