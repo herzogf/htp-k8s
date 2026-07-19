@@ -42,6 +42,9 @@ location a future CI job (issue #8) uploads.
 
 ## Configuration
 
-The WebSocket URL the scene connects to is set at build time via the
-`VITE_WS_URL` environment variable (see `src/config.ts`), defaulting to
-`ws://localhost:8080/ws` when unset.
+The scene connects to `/ws` (and the detail endpoints under `/api`) on the
+page's own origin by default — no configuration needed, in dev or in a
+built binary (see `src/config.ts`). `npm run dev` proxies both to a backend
+on `http://127.0.0.1:8080` (`vite.config.ts`; override with
+`VITE_DEV_BACKEND` if yours is elsewhere). `VITE_WS_URL` / `VITE_API_URL`
+remain build-time escape hatches for a genuinely cross-origin setup.

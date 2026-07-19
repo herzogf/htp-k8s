@@ -3,12 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FakeEventSource } from '../test-support/fakeEventSource'
 import { useLogTail } from './useLogTail'
 
-// getApiBaseUrl() with no VITE_WS_URL derives http://localhost:8080 (see config).
+// getApiBaseUrl() derives the origin from window.location by default (see
+// config); stub it so the derived base is deterministic regardless of
+// jsdom's own default test URL.
 const BASE = 'http://localhost:8080'
 
 beforeEach(() => {
   FakeEventSource.reset()
   vi.stubGlobal('EventSource', FakeEventSource)
+  vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:8080' })
 })
 
 afterEach(() => {
