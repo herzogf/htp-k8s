@@ -30,24 +30,52 @@ name: Release
 #     OPERATIONAL failure, however, DOES fail the release — if Trivy can't run
 #     (auth, image pull, DB download, hang) or the SARIF can't reach the Security
 #     tab, that's a real failure, not a silently-empty security report.
-#   * govulncheck (issue #143) -> a REPORT-ONLY SARIF scan of the exact source
-#     this release builds from, run in the `goreleaser` job (it scans source,
-#     not the built image, so it belongs there rather than in `image` /
-#     `trivy-scan`). Uploaded under its own `govulncheck-release` category,
-#     distinct from build.yml's PR-time `govulncheck` category, so the two
-#     scans don't collide in the Security tab. Deliberately non-blocking here,
-#     unlike the hard PR-time gate in build.yml: that gate already ran against
-#     this exact source at PR time (verify-green-commit above proves it), so
-#     re-running it at release time is about catching drift in govulncheck's
-#     OTHER input — the OSV vulnerability database, which moves independently
-#     of the source and can surface a new CVE between the PR scan and the tag
-#     — not about re-establishing the gate. BLOCKING the release on that
-#     moving target would make releases nondeterministic: the exact same
-#     commit could release cleanly one day and fail the next with no code
-#     change. Matches Trivy's own findings-non-blocking release posture
-#     directly above, for the identical reason — a genuine scan OPERATIONAL
-#     failure still fails the release either way; only findings are
-#     non-blocking.
+#   * `govulncheck-release` (issue #143) -> a REPORT-ONLY SARIF scan of the
+#     exact source this release builds from, in its OWN job (needs only
+#     `verify-green-commit`, runs in parallel with `goreleaser`/`image` — it
+#     consumes none of their output, so there's no ordering dependency).
+#     Deliberately isolated from `goreleaser` rather than added as steps
+#     there (round-4 fix — see below), and uploaded under its own
+#     `govulncheck-release` category, distinct from build.yml's PR-time
+#     `govulncheck` category and from every Trivy category, so nothing
+#     collides in the Security tab. Deliberately non-blocking, unlike the
+#     hard PR-time gate in build.yml: that gate already ran against this
+#     exact source at PR time (verify-green-commit above proves it), so this
+#     scan is about catching drift in govulncheck's OTHER input — the OSV
+#     vulnerability database, which moves independently of the source and can
+#     surface a new CVE between the PR scan and the tag — not about
+#     re-establishing the gate. BLOCKING the release on that moving target
+#     would make releases nondeterministic: the exact same commit could
+#     release cleanly one day and fail the next with no code change. Matches
+#     Trivy's own findings-non-blocking release posture directly above, for
+#     the identical reason — a genuine scan OPERATIONAL failure still fails
+#     the job either way (encoded as an explicit accept-list of exit codes,
+#     not inherited from `-format sarif`'s exit-0-on-findings quirk — see
+#     `.github/actions/govulncheck/action.yml`); only findings are
+#     non-blocking. Because that job's own failure is now what makes the tag
+#     push go red, this DOES add a new availability dependency the release
+#     workflow didn't have before: a `vuln.go.dev` outage fails
+#     `govulncheck-release` (clean, retryable — re-running the job is enough,
+#     nothing needs re-tagging) without blocking the artifact-producing jobs,
+#     the same partial-completion shape `trivy-scan` already has if Trivy's
+#     own DB fetch fails after `image` has already pushed.
+#
+#     Round-4 fix: an earlier version of this ran govulncheck as steps
+#     INSIDE the `goreleaser` job. That wrote `govuln.sarif` into the
+#     checkout `goreleaser` itself uses to run `goreleaser release --clean`
+#     moments later — an UNTRACKED, non-gitignored file, which GoReleaser's
+#     own `git.Pipe` validate step (`internal/pipe/git/git.go`,
+#     `CheckDirty` -> `git status --porcelain`, counts untracked files) reads
+#     as a dirty tree and aborts on, EVERY release, unconditionally. (The
+#     pre-existing `before:` hook that builds the frontend runs AFTER that
+#     validate step in GoReleaser's pipeline, which is why that one doesn't
+#     trip the same trap.) Nothing in `build.yml` runs `release.yml`, so nothing
+#     at PR time could have caught this. Moving the scan to its own job with
+#     its own checkout removes the collision entirely, and as a bonus keeps a
+#     network-fetched third-party binary (`go install`) out of the workspace
+#     that signs attested release artifacts, and gives the SARIF-uploading
+#     `security-events: write` grant its own least-privilege job instead of
+#     widening `goreleaser`'s.
 #
 # All third-party actions are pinned to a commit SHA (repo convention); the
 # trailing comment records the human-readable version.
@@ -171,6 +199,60 @@ jobs:
             sleep "$interval"
           done
 
+  # Isolated from `goreleaser` (issue #143, round 4) — see the workflow
+  # header comment above ("Round-4 fix") for why: govulncheck writes an
+  # untracked, non-gitignored SARIF file, and `goreleaser release --clean`
+  # aborts on a dirty tree. Its own checkout means it can never dirty
+  # anyone else's workspace. Needs only `verify-green-commit` — it consumes
+  # no output from `goreleaser`/`image`, so it runs in parallel with both,
+  # not blocking either from producing artifacts if it fails.
+  govulncheck-release:
+    name: govulncheck scan (release, report-only)
+    needs: verify-green-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Upload the report-only govulncheck SARIF to the Security tab
+      # (issue #143) — same grant the PR-time Backend job and the
+      # release-time Trivy job already carry, for the same reason. Scoped to
+      # this job alone, not `goreleaser` (which holds no security-events
+      # grant at all) — see the header comment's "Round-4 fix" for why.
+      security-events: write
+    env:
+      # Same literal build.yml's Backend job scans (job-level there too) —
+      # keep in sync so the PR-time and release-time scans can't silently
+      # describe different code.
+      GOVULNCHECK_PKGS: ./...
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Pin the Go MINOR + check-latest to scan against the newest
+          # patched 1.26.x (see docs/agents/findings.md and build.yml for the
+          # full why).
+          go-version: "1.26"
+          check-latest: true
+
+      # Report-only (`blocking: "false"`): see the workflow header comment
+      # above for the full rationale (why this job exists despite
+      # verify-green-commit, and why it doesn't gate the release). Uses the
+      # same local composite action, pinned version, and package pattern as
+      # build.yml's PR-time (blocking) call — see
+      # `.github/actions/govulncheck/action.yml` for the shared design.
+      # Category MUST differ from build.yml's PR-time `govulncheck` category
+      # and from every Trivy category (the action's `category` input states
+      # this as a hard rule).
+      - name: govulncheck (report-only)
+        uses: ./.github/actions/govulncheck
+        with:
+          pkgs: ${{ env.GOVULNCHECK_PKGS }}
+          category: govulncheck-release
+          blocking: "false"
+
   goreleaser:
     name: GoReleaser (binaries, checksums, changelog, SBOM)
     needs: verify-green-commit
@@ -184,15 +266,6 @@ jobs:
       # attestations writes the attestation to the repo's attestation store.
       id-token: write
       attestations: write
-      # Upload the report-only govulncheck SARIF to the Security tab
-      # (issue #143) — same grant the PR-time Backend job and the
-      # release-time Trivy job already carry, for the same reason.
-      security-events: write
-    env:
-      # Same pattern build.yml's govulncheck steps scan (job-level there too)
-      # — keep in sync so the PR-time and release-time scans can't silently
-      # describe different code.
-      GOVULNCHECK_PKGS: ./...
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -209,35 +282,6 @@ jobs:
           # Bump this when the project moves to a new Go minor.
           go-version: "1.26"
           check-latest: true
-
-      # Same hand-rolled, explicitly-pinned install build.yml's Backend job
-      # uses (issue #143) — see the comment on that step for why, deliberately,
-      # this isn't the official `golang/govulncheck-action`.
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-
-      # Release-time govulncheck SARIF report (issue #143) — REPORT-ONLY, see
-      # the workflow header comment above for the full rationale (why this
-      # runs despite verify-green-commit, and why it doesn't block). Same
-      # `-format sarif` exit-code behavior as build.yml's PR-time report step:
-      # it never reflects findings (traced to v1.6.0's source there), only a
-      # genuine scan error does — which is exactly Trivy's
-      # findings-non-blocking / operation-failure-blocking shape, gotten here
-      # for free instead of an explicit `exit-code: "0"` knob. No
-      # continue-on-error / if: always() needed, for the same reason.
-      - name: govulncheck (SARIF report)
-        run: govulncheck -format sarif $GOVULNCHECK_PKGS > govuln.sarif
-
-      # Category `govulncheck-release` is deliberately distinct from
-      # build.yml's PR-time `govulncheck` category — mirrors how Trivy
-      # distinguishes `trivy-container` (PR) from
-      # `trivy-release-image-<digest>` (release) — so the two scans land as
-      # separate Security-tab entries instead of one overwriting the other.
-      - name: Upload govulncheck SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
-        with:
-          sarif_file: govuln.sarif
-          category: govulncheck-release
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

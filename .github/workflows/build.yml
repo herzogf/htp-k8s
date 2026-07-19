@@ -120,9 +120,10 @@ jobs:
       # reason (ADR-0005).
       security-events: write
     env:
-      # Single source for the package pattern the two govulncheck steps below
-      # scan (issue #143) — they MUST stay in sync, or the SARIF report and
-      # the pass/fail gate would silently describe different code.
+      # Shared with the govulncheck step below AND with release.yml's
+      # `govulncheck-release` job (issue #143) — one literal so the PR-time
+      # and release-time scans can't silently drift to describe different
+      # code.
       GOVULNCHECK_PKGS: ./...
     steps:
       - name: Checkout
@@ -171,69 +172,25 @@ jobs:
       - name: Test
         run: task test
 
-      # Hand-rolled and explicitly pinned, deliberately NOT the official
-      # `golang/govulncheck-action` (issue #143): its README states the
-      # action hardcodes `go install .../govulncheck@latest` with no version
-      # input, so pinning the ACTION to a SHA still leaves the BINARY
-      # floating — contradicting the SHA-pinning posture reaffirmed in issue
-      # #144. It also documents that with `json`/`sarif` output the action
-      # succeeds even when vulnerabilities are found, with no
-      # `fail-on-findings` input — the same exit-0-on-findings quirk this repo
-      # already hand-rolls around below (release.yml's govulncheck step
-      # reuses this same install + reasoning; see there rather than
-      # duplicating it).
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. govulncheck's
       # reachability analysis (only symbols this code actually calls) makes
       # it the highest-signal, lowest-noise of the three Go vuln signals in
       # this repo (Trivy image scan, Dependabot, govulncheck) — worth
-      # blocking on (issue #143).
-      #
-      # Findings were previously invisible outside the Actions log (issue
-      # #143). The obvious fix — add `-format sarif` to the existing gating
-      # invocation — is a trap: verified against v1.6.0's source, only the
-      # TEXT handler's Flush (internal/scan/text.go) ever returns
-      # errVulnerabilitiesFound (exit 3); the SARIF handler's Flush
-      # (internal/sarif/handler.go) returns nil unconditionally, so
-      # `govulncheck -format sarif` exits 0 even when it finds a reachable
-      # vulnerability (confirmed against a throwaway module calling a known
-      # GO-2026-5026-affected symbol). Relying on that exit code for the gate
-      # would make it pass vacuously.
-      #
-      # So this is deliberately TWO invocations, ordered so the report always
-      # lands before the gate can fail the job:
-      - name: govulncheck (SARIF report)
-        # No continue-on-error / if: always() needed: -format sarif's own
-        # exit code already never reflects findings (see above), so this step
-        # only fails on a genuine scan error (bad package pattern, vuln-DB
-        # fetch failure) — the same "operational failure fails loud, findings
-        # don't" shape the Trivy steps use, here for free rather than
-        # constructed.
-        run: govulncheck -format sarif $GOVULNCHECK_PKGS > govuln.sarif
-
-      # Runs only after the report step above succeeds — no
-      # continue-on-error, no if: always() (mirrors the Trivy upload's
-      # ordering-based invariant, see the Container scan job below): a real
-      # SARIF lands in the Security tab, or the job goes red here, before
-      # ever reaching the gate. A distinct `govulncheck` category keeps this
-      # from colliding with Trivy's `trivy-container` /
-      # `trivy-release-image-<digest>` categories.
-      - name: Upload govulncheck SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+      # blocking on (issue #143). SARIF report + Security-tab upload +
+      # blocking gate all live in the local `govulncheck` composite action
+      # (`.github/actions/govulncheck`) — see its `action.yml` for the full
+      # design rationale (why not `-format sarif`'s own exit code, why not
+      # the official `golang/govulncheck-action`, the pinned version). This
+      # is the PR-time, blocking call (`blocking` defaults to "true"); the
+      # release-time call in `release.yml` is report-only and uses a
+      # different category — every category in this repo must be unique
+      # across ALL SARIF uploads (see the action's `category` input).
+      - name: govulncheck
+        uses: ./.github/actions/govulncheck
         with:
-          sarif_file: govuln.sarif
+          pkgs: ${{ env.GOVULNCHECK_PKGS }}
           category: govulncheck
-
-      # The actual blocking gate (issue #1 / ADR-0005): a second, plain-text
-      # invocation, which DOES exit 3 on a reachable finding (unlike
-      # `-format sarif` above). Placed last so the report has already reached
-      # the Security tab before this can fail the job — findings still block
-      # the PR, they're just no longer invisible while doing so (issue #143).
-      - name: govulncheck (gate)
-        run: govulncheck $GOVULNCHECK_PKGS
 
   frontend:
     name: Frontend (Node)

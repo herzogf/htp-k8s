@@ -1,0 +1,116 @@
+name: govulncheck scan
+description: >
+  Install govulncheck at the version pinned below, generate a SARIF report,
+  upload it to the Security tab, and (by default) fail the job on any
+  reachable finding. Callers set `blocking: "false"` for a report-only scan.
+
+# Single source of truth for the govulncheck version (issue #143 round 4):
+# previously duplicated as a literal `@v1.6.0` in both build.yml and
+# release.yml with nothing binding them. Bump the version in exactly ONE
+# place — the `go install` line in the "Install govulncheck" step below.
+#
+# Deliberately NOT the official `golang/govulncheck-action`: its `action.yml`
+# hardcodes `go install golang.org/x/vuln/cmd/govulncheck@latest` with no
+# version input, so pinning the ACTION to a SHA still leaves the BINARY
+# floating — contradicting the SHA-pinning posture reaffirmed in issue #144.
+# Its README (lines 78-80) separately documents that with `json`/`sarif`
+# output the action succeeds even when vulnerabilities are found, with no
+# `fail-on-findings` input — the same exit-0-on-findings quirk this action
+# hand-rolls around below (see "Generate SARIF report"), so adopting the
+# official action would still require re-implementing this same logic on top
+# of it, for no reduction in custom code.
+#
+# Callers MUST checkout the repo and set up Go (the version/minor pinning
+# rationale lives with each caller's own `setup-go` step, e.g. build.yml's
+# Backend job) before using this action — it only installs the govulncheck
+# binary, it does not provision a Go toolchain.
+
+inputs:
+  pkgs:
+    description: >
+      Package pattern to scan, e.g. "./...". Callers scanning the same
+      source from more than one workflow (PR-time and release-time, issue
+      #143) should share one literal (e.g. a job-level env var) so the two
+      scans can't silently drift to describe different code.
+    required: true
+  category:
+    description: >
+      SARIF category for the Security-tab upload. RULE: every SARIF upload
+      in this repo — every call site of this action, and every Trivy
+      upload — needs a category unique among ALL of them; a collision
+      silently overwrites one result set with another instead of erroring.
+      PR-time and release-time calls of this action in particular must use
+      different categories even though they scan the same code.
+    required: true
+  blocking:
+    description: >
+      "true" (default): also run a second, gating invocation that fails
+      this action's step on any reachable finding — the PR-time posture
+      (issue #1 / ADR-0005). "false": report only, matching Trivy's
+      release-time `exit-code: "0"` posture — only a genuine scan error
+      fails.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Install govulncheck
+      shell: bash
+      run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+    # `-format sarif`'s own exit code never reflects findings — traced in
+    # v1.6.0's source: `errVulnerabilitiesFound` (exit 3) is returned only by
+    # the TEXT handler's `Flush` (internal/scan/text.go); the SARIF handler's
+    # `Flush` (internal/sarif/handler.go) returns nil unconditionally.
+    # Confirmed empirically against a module calling a known
+    # GO-2026-5026-affected symbol: `-format sarif` exits 0 with the finding
+    # present in the output at `level: "error"`.
+    #
+    # So this step does NOT trust "exit 0 = no findings" or rely on that
+    # quirk implicitly — it explicitly accepts exit 0 (clean) OR exit 3
+    # (findings; harmless dead code today, since sarif mode doesn't actually
+    # return it, but future-proofs against a govulncheck version that starts
+    # returning 3 for every format) and fails loud on anything else, which is
+    # the only way to reach this branch today: a genuine scan error (bad
+    # package pattern, vuln-DB fetch failure). That failure is loud in BOTH
+    # blocking and report-only mode — findings are optionally non-blocking,
+    # a broken scan never is.
+    - name: Generate SARIF report
+      shell: bash
+      env:
+        PKGS: ${{ inputs.pkgs }}
+      run: |
+        set +e
+        govulncheck -format sarif $PKGS > govuln.sarif
+        code=$?
+        set -e
+        case "$code" in
+          0|3) ;;
+          *)
+            echo "::error::govulncheck SARIF scan failed operationally (exit $code) — see the job log above for govulncheck's own error output."
+            exit "$code"
+            ;;
+        esac
+
+    # Runs only after the report step above succeeds — no continue-on-error,
+    # no if: always() (mirrors the Trivy uploads' ordering-based invariant):
+    # a real SARIF lands in the Security tab, or the job goes red here,
+    # before ever reaching the optional gate below.
+    - name: Upload SARIF to Security tab
+      uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+      with:
+        sarif_file: govuln.sarif
+        category: ${{ inputs.category }}
+
+    # The actual blocking gate, only in blocking mode: a second, plain-text
+    # invocation, which DOES exit 3 on a reachable finding (unlike
+    # `-format sarif` above, on this pinned version). Placed last so the
+    # report has already reached the Security tab before this can fail the
+    # step.
+    - name: Gate on findings
+      if: inputs.blocking == 'true'
+      shell: bash
+      env:
+        PKGS: ${{ inputs.pkgs }}
+      run: govulncheck $PKGS
