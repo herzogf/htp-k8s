@@ -171,6 +171,17 @@ jobs:
       - name: Test
         run: task test
 
+      # Hand-rolled and explicitly pinned, deliberately NOT the official
+      # `golang/govulncheck-action` (issue #143): its README states the
+      # action hardcodes `go install .../govulncheck@latest` with no version
+      # input, so pinning the ACTION to a SHA still leaves the BINARY
+      # floating — contradicting the SHA-pinning posture reaffirmed in issue
+      # #144. It also documents that with `json`/`sarif` output the action
+      # succeeds even when vulnerabilities are found, with no
+      # `fail-on-findings` input — the same exit-0-on-findings quirk this repo
+      # already hand-rolls around below (release.yml's govulncheck step
+      # reuses this same install + reasoning; see there rather than
+      # duplicating it).
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
 

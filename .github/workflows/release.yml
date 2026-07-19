@@ -30,16 +30,24 @@ name: Release
 #     OPERATIONAL failure, however, DOES fail the release — if Trivy can't run
 #     (auth, image pull, DB download, hang) or the SARIF can't reach the Security
 #     tab, that's a real failure, not a silently-empty security report.
-#
-# NOT here: govulncheck (issue #143). Its Go-source scan is over the exact
-# code `verify-green-commit` above already proved passed on this SHA in
-# `build.yml`, so re-running it here would rescan identical source — mostly
-# redundant, but not entirely: govulncheck's OTHER input, the OSV vuln
-# database, moves independently of the source, so a CVE published between the
-# main-commit PR scan and the tag would be missed by govulncheck here too.
-# Trivy's release-time scan (above) is what actually catches that gap for the
-# shipped image; PR-time govulncheck remains the authoritative
-# source-reachability signal, not a release-time one.
+#   * govulncheck (issue #143) -> a REPORT-ONLY SARIF scan of the exact source
+#     this release builds from, run in the `goreleaser` job (it scans source,
+#     not the built image, so it belongs there rather than in `image` /
+#     `trivy-scan`). Uploaded under its own `govulncheck-release` category,
+#     distinct from build.yml's PR-time `govulncheck` category, so the two
+#     scans don't collide in the Security tab. Deliberately non-blocking here,
+#     unlike the hard PR-time gate in build.yml: that gate already ran against
+#     this exact source at PR time (verify-green-commit above proves it), so
+#     re-running it at release time is about catching drift in govulncheck's
+#     OTHER input — the OSV vulnerability database, which moves independently
+#     of the source and can surface a new CVE between the PR scan and the tag
+#     — not about re-establishing the gate. BLOCKING the release on that
+#     moving target would make releases nondeterministic: the exact same
+#     commit could release cleanly one day and fail the next with no code
+#     change. Matches Trivy's own findings-non-blocking release posture
+#     directly above, for the identical reason — a genuine scan OPERATIONAL
+#     failure still fails the release either way; only findings are
+#     non-blocking.
 #
 # All third-party actions are pinned to a commit SHA (repo convention); the
 # trailing comment records the human-readable version.
@@ -176,6 +184,15 @@ jobs:
       # attestations writes the attestation to the repo's attestation store.
       id-token: write
       attestations: write
+      # Upload the report-only govulncheck SARIF to the Security tab
+      # (issue #143) — same grant the PR-time Backend job and the
+      # release-time Trivy job already carry, for the same reason.
+      security-events: write
+    env:
+      # Same pattern build.yml's govulncheck steps scan (job-level there too)
+      # — keep in sync so the PR-time and release-time scans can't silently
+      # describe different code.
+      GOVULNCHECK_PKGS: ./...
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -192,6 +209,35 @@ jobs:
           # Bump this when the project moves to a new Go minor.
           go-version: "1.26"
           check-latest: true
+
+      # Same hand-rolled, explicitly-pinned install build.yml's Backend job
+      # uses (issue #143) — see the comment on that step for why, deliberately,
+      # this isn't the official `golang/govulncheck-action`.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      # Release-time govulncheck SARIF report (issue #143) — REPORT-ONLY, see
+      # the workflow header comment above for the full rationale (why this
+      # runs despite verify-green-commit, and why it doesn't block). Same
+      # `-format sarif` exit-code behavior as build.yml's PR-time report step:
+      # it never reflects findings (traced to v1.6.0's source there), only a
+      # genuine scan error does — which is exactly Trivy's
+      # findings-non-blocking / operation-failure-blocking shape, gotten here
+      # for free instead of an explicit `exit-code: "0"` knob. No
+      # continue-on-error / if: always() needed, for the same reason.
+      - name: govulncheck (SARIF report)
+        run: govulncheck -format sarif $GOVULNCHECK_PKGS > govuln.sarif
+
+      # Category `govulncheck-release` is deliberately distinct from
+      # build.yml's PR-time `govulncheck` category — mirrors how Trivy
+      # distinguishes `trivy-container` (PR) from
+      # `trivy-release-image-<digest>` (release) — so the two scans land as
+      # separate Security-tab entries instead of one overwriting the other.
+      - name: Upload govulncheck SARIF to Security tab
+        uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+        with:
+          sarif_file: govuln.sarif
+          category: govulncheck-release
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
