@@ -27,7 +27,7 @@ func TestTowerDetail_ReturnsJSON(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/towers/node-a", nil)
+	req := trustedRequest(http.MethodGet, "/api/towers/node-a")
 	server.NewHandler(cfg).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -51,7 +51,7 @@ func TestTowerDetail_DegradedStillOK(t *testing.T) {
 		},
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/towers/node-a", nil)
+	req := trustedRequest(http.MethodGet, "/api/towers/node-a")
 	server.NewHandler(cfg).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -68,7 +68,7 @@ func TestTowerDetail_DegradedStillOK(t *testing.T) {
 
 func TestTowerDetail_NilProvider_Unavailable(t *testing.T) {
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/towers/node-a", nil)
+	req := trustedRequest(http.MethodGet, "/api/towers/node-a")
 	server.NewHandler(server.Config{}).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusServiceUnavailable {
@@ -90,7 +90,7 @@ func TestPodDetail_ReturnsJSON(t *testing.T) {
 		},
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/pods/default/web", nil)
+	req := trustedRequest(http.MethodGet, "/api/pods/default/web")
 	server.NewHandler(cfg).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
@@ -112,7 +112,7 @@ func TestPodDetail_ProviderError_NotFound(t *testing.T) {
 		},
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/pods/default/ghost", nil)
+	req := trustedRequest(http.MethodGet, "/api/pods/default/ghost")
 	server.NewHandler(cfg).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
@@ -140,7 +140,7 @@ func TestDetailEndpoints_ReadOnly(t *testing.T) {
 	for _, p := range paths {
 		for _, m := range methods {
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, httptest.NewRequest(m, p, nil))
+			handler.ServeHTTP(rec, trustedRequest(m, p))
 			if rec.Code != http.StatusMethodNotAllowed {
 				t.Errorf("%s %s = %d, want 405 (read-only)", m, p, rec.Code)
 			}
@@ -157,7 +157,7 @@ func TestPodLogTail_SSEFraming(t *testing.T) {
 		},
 	}
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/pods/default/web/logtail", nil)
+	req := trustedRequest(http.MethodGet, "/api/pods/default/web/logtail")
 	server.NewHandler(cfg).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {

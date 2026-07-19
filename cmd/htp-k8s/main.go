@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -142,6 +143,15 @@ type options struct {
 	// launch (-demo/HTP_K8S_DEMO). Orthogonal to demoSeed — a seed can be
 	// preset without auto-starting the flight.
 	demoAutostart bool
+	// allowedHosts is the extra Host-header allowlist entries for /ws and
+	// /api (-allowed-hosts/HTP_K8S_ALLOWED_HOSTS, issue #163, ADR-0013),
+	// beyond what server.NewAllowedHosts always trusts on its own regardless
+	// of -addr: any IP-address-literal Host (so a widened -addr, including a
+	// wildcard bind, needs nothing extra for a browser reaching it by IP) and
+	// localhost/*.localhost. Needed for a reverse proxy or a DNS-name
+	// deployment, which -addr's own value can never cover — -addr is never
+	// itself a source of trust here, only the IP-literal/localhost rule is.
+	allowedHosts []string
 }
 
 // parseFlags parses the CLI flags into runtime options, applying environment
@@ -175,6 +185,8 @@ func parseFlags(args []string, env func(string) string) (options, error) {
 		"seed for Demo Mode's canyon-tour PRNG (ADR-0010); a random seed is chosen at startup if unset. Overrides HTP_K8S_DEMO_SEED")
 	demo := fs.Bool("demo", demoDefault,
 		"auto-start Demo Mode at launch; independent of -demo-seed. Overrides HTP_K8S_DEMO")
+	allowedHostsRaw := fs.String("allowed-hosts", env("HTP_K8S_ALLOWED_HOSTS"),
+		"comma-separated bare hostnames (no scheme, no path; wildcards like *.example.com are not supported) that /ws and /api additionally trust in the HTTP Host header, beyond what's always trusted with no configuration: any IP-address-literal Host (so a widened -addr, including a wildcard bind, needs nothing extra) and localhost/*.localhost (issue #163). Needed for a reverse proxy or a DNS-name deployment. Overrides HTP_K8S_ALLOWED_HOSTS")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -187,7 +199,50 @@ func parseFlags(args []string, env func(string) string) (options, error) {
 	if err != nil {
 		return options{}, err
 	}
-	return options{addr: *addr, filter: filter, demoSeed: demoSeed, demoAutostart: *demo}, nil
+	allowedHosts := splitAllowedHosts(*allowedHostsRaw)
+	if err := validateAllowedHosts(allowedHosts); err != nil {
+		return options{}, err
+	}
+	return options{
+		addr:          *addr,
+		filter:        filter,
+		demoSeed:      demoSeed,
+		demoAutostart: *demo,
+		allowedHosts:  allowedHosts,
+	}, nil
+}
+
+// splitAllowedHosts parses the comma-separated -allowed-hosts/
+// HTP_K8S_ALLOWED_HOSTS value into individual hostnames, trimming whitespace
+// and dropping empty entries (so a trailing comma or extra spaces don't
+// produce a spurious blank entry).
+func splitAllowedHosts(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var hosts []string
+	for _, h := range strings.Split(raw, ",") {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
+// validateAllowedHosts rejects -allowed-hosts entries that look like a URL
+// (a scheme, e.g. "http://foo.com") or carry a path ("/") rather than a bare
+// hostname. Without this, hostOnly("http://foo.com") would silently parse out
+// "http" as the "hostname" — a pasted URL becomes a useless allowlist entry
+// that only surfaces later as an opaque 403, instead of failing loudly at
+// startup where the mistake is obvious.
+func validateAllowedHosts(hosts []string) error {
+	for _, h := range hosts {
+		if strings.Contains(h, "://") || strings.Contains(h, "/") {
+			return fmt.Errorf("invalid -allowed-hosts entry %q: expected a bare hostname (e.g. %q), not a URL or path", h, "example.com")
+		}
+	}
+	return nil
 }
 
 // resolveDemoSeed parses the -demo-seed/HTP_K8S_DEMO_SEED value into the seed
@@ -262,6 +317,11 @@ func run(args []string, env func(string) string) error {
 		Handler: server.NewHandler(server.Config{
 			DemoSeed:      opts.demoSeed,
 			DemoAutostart: opts.demoAutostart,
+			// The Host allowlist for /ws and /api (issue #163, ADR-0013): any
+			// IP-literal Host and localhost/*.localhost are always trusted,
+			// independent of -addr; opts.allowedHosts adds any -allowed-hosts
+			// entries for a reverse proxy or a DNS-name deployment.
+			AllowedHosts: server.NewAllowedHosts(opts.allowedHosts),
 			Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
 				return watcher.SnapshotAndSubscribe()
 			},
@@ -305,7 +365,7 @@ func run(args []string, env func(string) string) error {
 func logListenAddr(addr string) {
 	log.Printf("htp-k8s backend listening on %s", addr)
 	if isLoopbackAddr(addr) {
-		log.Printf("bound to loopback only — reachable from this machine, not from other hosts. To expose it, set -addr :8080 or HTP_K8S_ADDR=:8080 — that alone is now enough for a remote browser (see README.md for the security implications)")
+		log.Printf("bound to loopback only — reachable from this machine, not from other hosts. To expose it, set -addr :8080 or HTP_K8S_ADDR=:8080 — that alone is now enough for a remote browser reaching it by IP address; a DNS hostname (e.g. behind a reverse proxy) additionally needs -allowed-hosts/HTP_K8S_ALLOWED_HOSTS (see README.md for the security implications)")
 		return
 	}
 	log.Printf("WARNING: bound to %s (not loopback-only) with no authentication — anyone who can reach this port gets read-only access to your cluster under your credentials", addr)

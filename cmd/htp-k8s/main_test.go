@@ -280,6 +280,84 @@ func TestParseFlags_DemoSeedAndAutostartAreOrthogonal(t *testing.T) {
 	}
 }
 
+// TestParseFlags_AllowedHostsDefaultsToNil proves no flag or env leaves
+// allowedHosts empty — server.NewAllowedHosts still trusts IP-literal and
+// localhost/*.localhost Hosts on its own regardless of -addr, so an operator
+// on the defaults (including a widened wildcard -addr reached by IP) needs
+// nothing extra.
+func TestParseFlags_AllowedHostsDefaultsToNil(t *testing.T) {
+	opts, err := parseFlags(nil, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.allowedHosts != nil {
+		t.Fatalf("allowedHosts = %v, want nil with no flag or env", opts.allowedHosts)
+	}
+}
+
+// TestParseFlags_AllowedHostsFlag proves -allowed-hosts splits on commas and
+// trims whitespace, dropping empty entries.
+func TestParseFlags_AllowedHostsFlag(t *testing.T) {
+	opts, err := parseFlags([]string{"-allowed-hosts", "k8s.example.com, proxy.internal:8443,, other.example.com "}, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	want := []string{"k8s.example.com", "proxy.internal:8443", "other.example.com"}
+	if len(opts.allowedHosts) != len(want) {
+		t.Fatalf("allowedHosts = %v, want %v", opts.allowedHosts, want)
+	}
+	for i := range want {
+		if opts.allowedHosts[i] != want[i] {
+			t.Fatalf("allowedHosts = %v, want %v", opts.allowedHosts, want)
+		}
+	}
+}
+
+// TestParseFlags_AllowedHostsFromEnv proves HTP_K8S_ALLOWED_HOSTS is honored,
+// mirroring the addr/filter env precedent.
+func TestParseFlags_AllowedHostsFromEnv(t *testing.T) {
+	opts, err := parseFlags(nil, envMap(map[string]string{"HTP_K8S_ALLOWED_HOSTS": "k8s.example.com"}))
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if len(opts.allowedHosts) != 1 || opts.allowedHosts[0] != "k8s.example.com" {
+		t.Fatalf("allowedHosts = %v, want [k8s.example.com]", opts.allowedHosts)
+	}
+}
+
+// TestParseFlags_AllowedHostsFlagOverridesEnv proves flag > env precedence
+// for -allowed-hosts/HTP_K8S_ALLOWED_HOSTS.
+func TestParseFlags_AllowedHostsFlagOverridesEnv(t *testing.T) {
+	opts, err := parseFlags(
+		[]string{"-allowed-hosts", "flag.example.com"},
+		envMap(map[string]string{"HTP_K8S_ALLOWED_HOSTS": "env.example.com"}),
+	)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if len(opts.allowedHosts) != 1 || opts.allowedHosts[0] != "flag.example.com" {
+		t.Fatalf("allowedHosts = %v, want [flag.example.com]", opts.allowedHosts)
+	}
+}
+
+// TestParseFlags_AllowedHostsRejectsURL proves an -allowed-hosts entry that
+// looks like a URL (a scheme) is rejected at startup rather than silently
+// becoming a useless allowlist entry (hostOnly("http://foo.com") would parse
+// out "http" as the "hostname") that only surfaces later as an opaque 403.
+func TestParseFlags_AllowedHostsRejectsURL(t *testing.T) {
+	if _, err := parseFlags([]string{"-allowed-hosts", "http://k8s.example.com"}, noEnv); err == nil {
+		t.Fatal("expected an error for an -allowed-hosts entry containing a scheme, got nil")
+	}
+}
+
+// TestParseFlags_AllowedHostsRejectsPath proves an -allowed-hosts entry
+// carrying a path is rejected the same way — a bare hostname is required.
+func TestParseFlags_AllowedHostsRejectsPath(t *testing.T) {
+	if _, err := parseFlags([]string{"-allowed-hosts", "k8s.example.com/app"}, noEnv); err == nil {
+		t.Fatal("expected an error for an -allowed-hosts entry containing a path, got nil")
+	}
+}
+
 func TestVersionRequested(t *testing.T) {
 	cases := []struct {
 		name string
