@@ -294,7 +294,20 @@ esac
 # `set -o pipefail`, not just a style preference. Capturing once here also
 # means the failure branch below can reuse the same log text instead of
 # calling `docker logs` a second time.
-logs="$(docker logs "${name}" 2>&1)"
+#
+# This assignment is a top-level statement (unlike wait_log_contains's,
+# which only ever runs inside an `if !` condition and so has `set -e`
+# suppressed by the shell around it) — a failing `docker logs` here would
+# otherwise trip `set -e` and exit immediately, with docker's own error text
+# silently swallowed inside `logs` (folded in via 2>&1) rather than printed.
+# The explicit `|| { ... }` below prints that text and fails loudly instead,
+# so a `docker logs` failure can't regress into exactly the silent-failure
+# class this PR exists to remove.
+logs="$(docker logs "${name}" 2>&1)" || {
+  echo "FAIL: docker logs ${name} failed. Output:" >&2
+  echo "${logs}" >&2
+  exit 1
+}
 if ! grep -q "detected view mode:" <<<"${logs}"; then
   echo "FAIL: container never logged a successful permission probe (detected view mode); the fallback path may not have actually reached the cluster. Log:" >&2
   echo "${logs}" >&2
