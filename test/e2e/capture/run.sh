@@ -78,7 +78,15 @@ export KUBECONFIG="${OUT_DIR}/kubeconfig"
 # Chromium build web/e2e's Playwright suite uses), point a runtime-only
 # symlink at web/node_modules just for the capture step. Git-ignored (see
 # .gitignore); cleaned up below and by the trap.
+#
+# Taskfile.yml's `test` task points the same symlink at web/node_modules for
+# its own (unrelated) reasons — the guarded create/remove lifecycle is
+# shared via lib/node-modules-symlink.sh (issue #130) so the two callers
+# can't drift out of sync with each other.
 CAPTURE_NODE_MODULES_LINK="${SCRIPT_DIR}/node_modules"
+WEB_NODE_MODULES="${REPO_ROOT}/web/node_modules"
+# shellcheck source=lib/node-modules-symlink.sh
+source "${SCRIPT_DIR}/lib/node-modules-symlink.sh"
 
 log() { printf '\n=== [capture] %s\n' "$*"; }
 
@@ -86,22 +94,10 @@ log "Output directory: ${OUT_DIR}"
 log "Kubeconfig (isolated to this run): ${KUBECONFIG}"
 
 # Fail fast, BEFORE the ~2-minute build+cluster-create below, rather than
-# opaquely mid-capture (issue #120 review):
-#   - web/node_modules must exist for the symlink trick above to work at all.
-#   - CAPTURE_NODE_MODULES_LINK must not already exist as something other
-#     than a symlink we manage — `ln -sfn` silently nests the new symlink
-#     INSIDE a pre-existing real directory of that name instead of erroring,
-#     which would both fail to expose @playwright/test and leave the trap's
-#     `[ -L ... ]` cleanup guard unable to recognise (and thus not clean up)
-#     the mess.
-if [ ! -d "${REPO_ROOT}/web/node_modules" ]; then
-  echo "ERROR: ${REPO_ROOT}/web/node_modules not found — run 'npm ci' in web/ (or 'task web:install') first." >&2
-  exit 1
-fi
-if [ -e "${CAPTURE_NODE_MODULES_LINK}" ] && [ ! -L "${CAPTURE_NODE_MODULES_LINK}" ]; then
-  echo "ERROR: ${CAPTURE_NODE_MODULES_LINK} exists and is not a symlink this tool manages — remove it manually and re-run." >&2
-  exit 1
-fi
+# opaquely mid-capture (issue #120 review) — see
+# lib/node-modules-symlink.sh's check_capture_node_modules_prereqs for what
+# this guards against.
+check_capture_node_modules_prereqs "${CAPTURE_NODE_MODULES_LINK}" "${WEB_NODE_MODULES}"
 
 # ---------------------------------------------------------------------------
 # Cleanup discipline (issue #120: "this project has repeatedly leaked
@@ -144,32 +140,47 @@ stop_app() {
 }
 
 # stop_capture: same verify+escalate discipline as stop_app, for the
-# backgrounded capture.mjs (node + its headless Chromium child). Deliberately
-# run FIRST in cleanup() (see below): a targeted `kill <run.sh PID>` (as
-# opposed to Ctrl-C, which signals the whole process group) can otherwise
-# leave capture.mjs running orphaned while the rest of cleanup proceeds —
-# including delete_frame_cache's rm -rf of the very directory it's still
-# writing frames into (issue #120 review).
+# backgrounded capture.mjs (node + its headless Chromium child and further
+# Chromium-internal grandchildren: zygotes, gpu-process, renderer).
+# Deliberately run FIRST in cleanup() (see below): every exit path this
+# script takes (Ctrl-C, a targeted `kill <run.sh PID>`, or a normal
+# successful run) reaches this function through the same
+# `trap cleanup EXIT INT TERM HUP`, and cleanup ordering here is what keeps
+# delete_frame_cache's rm -rf below from racing capture.mjs still writing
+# into that very directory (issue #120 review).
+#
+# Signals and verifies the whole process GROUP (`-CAPTURE_PID`, via pgrep
+# -g), not just the tracked node PID — see the capture-launch site's
+# comment on why CAPTURE_PID is also that tree's pgid. This matters because
+# capture.mjs's own SIGTERM/SIGINT/SIGHUP handler (which closes the browser
+# before exiting) is a best-effort belt: if it hangs — e.g. browser.close()
+# wedged — the SIGKILL escalation below MUST still reach Chromium directly,
+# since SIGKILL can't be caught and a PID-only kill of node alone would
+# orphan it. Verifying via pgrep against the group, not `kill -0` against
+# the one PID, means this function's "gone" claim actually covers the whole
+# tree (issue #130).
 stop_capture() {
   if [ -z "${CAPTURE_PID}" ]; then
     return 0
   fi
-  if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
-    kill "${CAPTURE_PID}" 2>/dev/null || true
+  if pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1; then
+    kill -TERM -- "-${CAPTURE_PID}" 2>/dev/null || true
     for _ in $(seq 1 20); do
-      kill -0 "${CAPTURE_PID}" 2>/dev/null || break
+      pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1 || break
       sleep 0.5
     done
-    if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
-      echo "WARNING: capture process ${CAPTURE_PID} did not exit on SIGTERM; sending SIGKILL" >&2
-      kill -9 "${CAPTURE_PID}" 2>/dev/null || true
+    if pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1; then
+      echo "WARNING: capture process group ${CAPTURE_PID} did not exit on SIGTERM; sending SIGKILL to the whole group" >&2
+      kill -KILL -- "-${CAPTURE_PID}" 2>/dev/null || true
       sleep 0.5
     fi
   fi
-  if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
-    echo "ERROR: capture process ${CAPTURE_PID} is still alive after cleanup — giving up" >&2
+  if pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1; then
+    echo "ERROR: capture process group ${CAPTURE_PID} still has members after cleanup — giving up" >&2
+    pgrep -a -g "${CAPTURE_PID}" >&2 || true
     return 1
   fi
+  echo "Verified: capture process group ${CAPTURE_PID} (node + Chromium) is gone."
   CAPTURE_PID=""
   return 0
 }
@@ -235,15 +246,6 @@ delete_frame_cache() {
   return 0
 }
 
-# remove_symlink: idempotent. Only ever removes something WE created (a
-# symlink at this exact path) — never a real directory, even one accidentally
-# left at this path by something else.
-remove_symlink() {
-  if [ -L "${CAPTURE_NODE_MODULES_LINK}" ]; then
-    rm -f "${CAPTURE_NODE_MODULES_LINK}"
-  fi
-}
-
 cleanup() {
   local status=$?
   log "Cleanup: tearing down the capture process, the app, the kind cluster, and the frame cache"
@@ -251,7 +253,7 @@ cleanup() {
   # <run.sh PID>` rather than Ctrl-C — see stop_capture's comment), it must
   # stop writing into frames/ before delete_frame_cache below rm -rf's it.
   stop_capture || true
-  remove_symlink
+  remove_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}"
   stop_app || true
   delete_cluster || true
   delete_kubeconfig
@@ -319,13 +321,25 @@ echo "App is healthy."
 # 4. Capture: raw CDP screencast + pose trace + tower layout (capture.mjs).
 # ---------------------------------------------------------------------------
 log "Capturing (${DURATION_MS}ms @ ${WIDTH}x${HEIGHT})"
-ln -sfn "${REPO_ROOT}/web/node_modules" "${CAPTURE_NODE_MODULES_LINK}"
+create_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}" "${WEB_NODE_MODULES}"
 # Backgrounded (rather than run synchronously in the foreground) so
 # CAPTURE_PID is tracked and stop_capture can kill it from cleanup() if this
 # script is interrupted mid-capture (issue #120 review) — `wait` below still
 # blocks until it finishes and propagates its exit status under `set -e`,
 # so this has the same "capture failure aborts the script" behavior as a
 # plain foreground invocation.
+#
+# `set -m` (job control) around JUST this backgrounding, so this job gets
+# its OWN process group (pgid == CAPTURE_PID), isolated from run.sh's own.
+# That's what lets stop_capture aim `kill -- -CAPTURE_PID` at exactly
+# capture.mjs's tree (node + Chromium + everything Chromium forks) without
+# ever being able to hit run.sh itself. Turned back off immediately after
+# so it doesn't affect anything else in this script. Full rationale,
+# including why this is NOT primarily about Ctrl-C (the naive read of
+# "give it its own process group"), the SIGINT/SIGHUP behavior difference
+# this introduces, and the subshell/pipeline edge cases for the assertion
+# below: see the #130 PR discussion.
+set -m
 node "${SCRIPT_DIR}/capture.mjs" \
   --out-dir "${OUT_DIR}" \
   --duration-ms "${DURATION_MS}" \
@@ -333,9 +347,47 @@ node "${SCRIPT_DIR}/capture.mjs" \
   --width "${WIDTH}" \
   --height "${HEIGHT}" &
 CAPTURE_PID=$!
+set +m
+# Self-checking assertion: stop_capture's group-based verification
+# (pgrep -g "${CAPTURE_PID}") depends on pgid == CAPTURE_PID actually
+# holding — true for a plain backgrounded command or `( ... ) &` under
+# `set -m`, but NOT for a pipeline (`cmd | cmd &` puts $! on the LAST
+# stage but the pgid on the FIRST), so a future edit changing this launch's
+# shape could break it silently.
+#
+# Gated on `ps` itself succeeding, NOT on a preceding `kill -0` check: a
+# `kill -0` immediately before `ps` still leaves a TOCTOU gap wide enough
+# for a realistically-instant capture.mjs failure (bad flag, missing
+# Playwright browser, module-resolution error) to exit in between the two,
+# which would otherwise make THIS check's own "process group" error fire
+# and swallow the real one (verified empirically — see the #130 PR
+# discussion). `ps` failing (process already gone, for any reason,
+# including that race) must fall straight through to `wait` below, which is
+# what surfaces capture.mjs's actual exit status and stderr, exactly as it
+# did before this PR (issue #120's "fails fast and legibly") — never
+# synthesize a misleading error in its place. `ps` SUCCEEDING is what
+# actually matters in practice anyway: this whole capture normally runs for
+# minutes, so by the time this line runs, "is capture.mjs still alive right
+# now" is never in doubt except in exactly the fast-failure case above.
+# `set +e`/`set -e` bracket this specific command (rather than `|| true` on
+# the assignment) so CAPTURE_PS_STATUS captures ps's REAL exit status —
+# `CAPTURE_PS_OUTPUT="$(ps ...)" || true` would make the whole statement
+# always report success, losing exactly the "did ps actually find it"
+# signal this check depends on.
+set +e
+CAPTURE_PS_OUTPUT="$(ps -o pgid= -p "${CAPTURE_PID}" 2>/dev/null)"
+CAPTURE_PS_STATUS=$?
+set -e
+if [ "${CAPTURE_PS_STATUS}" -eq 0 ]; then
+  CAPTURE_PGID="$(printf '%s' "${CAPTURE_PS_OUTPUT}" | tr -d ' ')"
+  if [ "${CAPTURE_PGID}" != "${CAPTURE_PID}" ]; then
+    echo "ERROR: capture.mjs's process group (${CAPTURE_PGID:-unknown}) is not its own PID (${CAPTURE_PID}) — stop_capture's group-based cleanup would silently miss it. Aborting." >&2
+    exit 1
+  fi
+fi
 wait "${CAPTURE_PID}"
 CAPTURE_PID=""
-remove_symlink
+remove_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}"
 
 # App and cluster are no longer needed once the capture is on disk — stop
 # them now (via the same verifying functions the trap uses, not a
