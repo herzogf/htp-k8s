@@ -81,6 +81,18 @@ type Config struct {
 	// autostart false) when unset, which is itself a well-formed response.
 	DemoSeed      int64
 	DemoAutostart bool
+
+	// AllowedHosts is the Host-header allowlist enforced on /ws and /api by
+	// hostAllowlist (issue #163 / ADR-0013): a request whose Host isn't
+	// trusted is rejected, UNCONDITIONALLY — independent of whatever Origin
+	// header (if any) it carries. This is what stops DNS rebinding, which
+	// makes Origin and Host both name the attacker's host, and which a
+	// same-origin check (or a check that only applies when Origin is
+	// present) cannot catch. The zero value AllowedHosts{} still trusts
+	// IP-literal and "localhost"/"*.localhost" hosts on its own (see
+	// AllowedHosts.Permits); build this via server.NewAllowedHosts to
+	// additionally trust -allowed-hosts entries.
+	AllowedHosts AllowedHosts
 }
 
 // StaticSnapshot adapts a fixed SceneState into a Config.Snapshot function,
@@ -91,13 +103,17 @@ func StaticSnapshot(state scene.SceneState) func(context.Context) scene.SceneSta
 
 // upgrader upgrades HTTP connections to WebSocket connections for /ws.
 //
-// CheckOrigin allows all origins: /ws has no auth/session state yet, and
-// the frontend dev server (Vite, on its own port) needs to reach the
-// backend across origins during local development. Revisit if/when this
-// endpoint carries anything sensitive.
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+// CheckOrigin is deliberately left unset (issue #163 / ADR-0013): gorilla's
+// default (checkSameOrigin) already does the right thing — allow when no
+// Origin header is present (non-browser clients: curl, other tooling, the
+// e2e harness), otherwise require Origin to match the request Host. A prior
+// version of this Upgrader set CheckOrigin to unconditionally return true,
+// which let any website a browser visited read the live cluster topology
+// over /ws; that override is gone, not replaced by a hand-rolled check, so
+// this tracks gorilla's own (audited) behaviour. Same-origin alone does not
+// stop DNS rebinding, though — see hostAllowlist below and ADR-0013 for the
+// second, independent layer that closes that gap for /ws and /api both.
+var upgrader = websocket.Upgrader{}
 
 // NewHandler builds the HTTP handler for the htp-k8s backend: a health
 // check at "/healthz", a WebSocket endpoint at "/ws" that sends the current
@@ -118,7 +134,12 @@ func NewHandler(cfg Config) http.Handler {
 	// SceneState (ADR-0008); see config.go.
 	mux.HandleFunc("GET /api/config", handleAppConfig(cfg))
 	mux.Handle("GET /", http.FileServerFS(frontendFS()))
-	return mux
+	// The Host allowlist (issue #163 / ADR-0013) wraps the WHOLE mux, not each
+	// route individually: gatedPath decides per-request which paths it
+	// actually enforces (/ws and /api/*, per its own doc comment), so a
+	// future /api/* route added above is protected automatically — there's no
+	// per-route wrapper to remember or forget.
+	return hostAllowlist(cfg.AllowedHosts, mux)
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {

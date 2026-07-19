@@ -25,6 +25,20 @@ var testConfig = server.Config{
 	Snapshot: server.StaticSnapshot(scene.SceneState{ViewMode: scene.ViewModeNamespace}),
 }
 
+// trustedRequest returns an httptest request for path with Host set to an
+// IP-literal value (server.AllowedHosts.Permits always trusts these — issue
+// #163 / ADR-0013), standing in for a legitimate same-origin client.
+// httptest.NewRequest defaults Host to "example.com" for a bare path, which
+// the Host allowlist correctly does NOT trust; tests that aren't specifically
+// exercising the allowlist itself (hostallowlist_test.go) use this instead,
+// so they keep exercising their own handler logic rather than tripping over
+// an unrelated 403.
+func trustedRequest(method, path string) *http.Request {
+	req := httptest.NewRequest(method, path, nil)
+	req.Host = "127.0.0.1"
+	return req
+}
+
 func TestHealthz_OK(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -319,9 +333,11 @@ func TestWS_ClosedDeltaChannelEndsConnection(t *testing.T) {
 
 // TestWS_RejectsNonUpgradeRequest exercises /ws with a plain HTTP GET (no
 // WebSocket upgrade headers), which the upgrader should reject rather than
-// serve as a normal response.
+// serve as a normal response. Uses trustedRequest so this specifically
+// exercises the upgrader's own rejection, not an unrelated Host-allowlist 403
+// (hostallowlist_test.go covers that separately).
 func TestWS_RejectsNonUpgradeRequest(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	req := trustedRequest(http.MethodGet, "/ws")
 	rec := httptest.NewRecorder()
 
 	server.NewHandler(testConfig).ServeHTTP(rec, req)
