@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/client-go/kubernetes"
@@ -142,6 +143,13 @@ type options struct {
 	// launch (-demo/HTP_K8S_DEMO). Orthogonal to demoSeed — a seed can be
 	// preset without auto-starting the flight.
 	demoAutostart bool
+	// allowedHosts is the extra Host-header allowlist entries for /ws and
+	// /api (-allowed-hosts/HTP_K8S_ALLOWED_HOSTS, issue #163, ADR-0013),
+	// beyond what server.NewAllowedHosts always trusts on its own (loopback,
+	// and addr when it names a concrete IP). Needed for a reverse proxy or
+	// any DNS-name deployment; a wildcard bind (":8080") can't derive its own
+	// reachable name, so that case genuinely requires this.
+	allowedHosts []string
 }
 
 // parseFlags parses the CLI flags into runtime options, applying environment
@@ -175,6 +183,8 @@ func parseFlags(args []string, env func(string) string) (options, error) {
 		"seed for Demo Mode's canyon-tour PRNG (ADR-0010); a random seed is chosen at startup if unset. Overrides HTP_K8S_DEMO_SEED")
 	demo := fs.Bool("demo", demoDefault,
 		"auto-start Demo Mode at launch; independent of -demo-seed. Overrides HTP_K8S_DEMO")
+	allowedHostsRaw := fs.String("allowed-hosts", env("HTP_K8S_ALLOWED_HOSTS"),
+		"comma-separated extra hostnames /ws and /api trust in the HTTP Host header (ports ignored), beyond loopback and the host -addr names (issue #163); needed for a reverse proxy or a wildcard -addr bind, which can't derive its own reachable name. Overrides HTP_K8S_ALLOWED_HOSTS")
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -187,7 +197,31 @@ func parseFlags(args []string, env func(string) string) (options, error) {
 	if err != nil {
 		return options{}, err
 	}
-	return options{addr: *addr, filter: filter, demoSeed: demoSeed, demoAutostart: *demo}, nil
+	return options{
+		addr:          *addr,
+		filter:        filter,
+		demoSeed:      demoSeed,
+		demoAutostart: *demo,
+		allowedHosts:  splitAllowedHosts(*allowedHostsRaw),
+	}, nil
+}
+
+// splitAllowedHosts parses the comma-separated -allowed-hosts/
+// HTP_K8S_ALLOWED_HOSTS value into individual hostnames, trimming whitespace
+// and dropping empty entries (so a trailing comma or extra spaces don't
+// produce a spurious blank entry).
+func splitAllowedHosts(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var hosts []string
+	for _, h := range strings.Split(raw, ",") {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
 }
 
 // resolveDemoSeed parses the -demo-seed/HTP_K8S_DEMO_SEED value into the seed
@@ -262,6 +296,11 @@ func run(args []string, env func(string) string) error {
 		Handler: server.NewHandler(server.Config{
 			DemoSeed:      opts.demoSeed,
 			DemoAutostart: opts.demoAutostart,
+			// The Host allowlist for /ws and /api (issue #163, ADR-0013):
+			// loopback and the addr host (if a concrete IP) are always
+			// trusted; opts.allowedHosts adds any -allowed-hosts entries for
+			// reverse-proxy/DNS-name deployments or a wildcard bind.
+			AllowedHosts: server.NewAllowedHosts(opts.addr, opts.allowedHosts),
 			Subscribe: func(context.Context) (scene.SceneState, <-chan scene.SceneDelta, func()) {
 				return watcher.SnapshotAndSubscribe()
 			},

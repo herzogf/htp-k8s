@@ -81,6 +81,16 @@ type Config struct {
 	// autostart false) when unset, which is itself a well-formed response.
 	DemoSeed      int64
 	DemoAutostart bool
+
+	// AllowedHosts is the Host-header allowlist enforced on /ws and /api by
+	// hostAllowlist (issue #163 / ADR-0013), guarding against DNS rebinding —
+	// a distinct threat from the Origin check above, since rebinding makes
+	// Origin and Host both name the attacker's host, so same-origin alone
+	// doesn't help. The zero value AllowedHosts{} trusts nothing with an
+	// Origin header present, which would reject every browser request; callers
+	// build this via server.NewAllowedHosts so loopback and the server's own
+	// bind address are trusted without configuration.
+	AllowedHosts AllowedHosts
 }
 
 // StaticSnapshot adapts a fixed SceneState into a Config.Snapshot function,
@@ -91,13 +101,17 @@ func StaticSnapshot(state scene.SceneState) func(context.Context) scene.SceneSta
 
 // upgrader upgrades HTTP connections to WebSocket connections for /ws.
 //
-// CheckOrigin allows all origins: /ws has no auth/session state yet, and
-// the frontend dev server (Vite, on its own port) needs to reach the
-// backend across origins during local development. Revisit if/when this
-// endpoint carries anything sensitive.
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
+// CheckOrigin is deliberately left unset (issue #163 / ADR-0013): gorilla's
+// default (checkSameOrigin) already does the right thing — allow when no
+// Origin header is present (non-browser clients: curl, other tooling, the
+// e2e harness), otherwise require Origin to match the request Host. A prior
+// version of this Upgrader set CheckOrigin to unconditionally return true,
+// which let any website a browser visited read the live cluster topology
+// over /ws; that override is gone, not replaced by a hand-rolled check, so
+// this tracks gorilla's own (audited) behaviour. Same-origin alone does not
+// stop DNS rebinding, though — see hostAllowlist below and ADR-0013 for the
+// second, independent layer that closes that gap for /ws and /api both.
+var upgrader = websocket.Upgrader{}
 
 // NewHandler builds the HTTP handler for the htp-k8s backend: a health
 // check at "/healthz", a WebSocket endpoint at "/ws" that sends the current
@@ -106,17 +120,21 @@ var upgrader = websocket.Upgrader{
 func NewHandler(cfg Config) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealthz)
-	mux.HandleFunc("GET /ws", newWSHandler(cfg))
+	// /ws and every /api/* route are wrapped in the Host allowlist (issue #163
+	// / ADR-0013) — the DNS-rebinding defense that a same-origin check alone
+	// can't provide. /healthz and the static frontend at / carry no cluster
+	// data, so they stay unwrapped.
+	mux.Handle("GET /ws", hostAllowlist(cfg.AllowedHosts, newWSHandler(cfg)))
 	// On-demand Detail Popup endpoints (issue #23). All read-only GETs — the
 	// ServeMux rejects any other method with 405, so no mutating verb is reachable
 	// on this data path (ADR-0003). The more specific /logtail pattern coexists
 	// with the pod-detail pattern; Go's ServeMux routes the longer match first.
-	mux.HandleFunc("GET /api/towers/{name}", handleTowerDetail(cfg))
-	mux.HandleFunc("GET /api/pods/{namespace}/{name}", handlePodDetail(cfg))
-	mux.HandleFunc("GET /api/pods/{namespace}/{name}/logtail", handlePodLogTail(cfg))
+	mux.Handle("GET /api/towers/{name}", hostAllowlist(cfg.AllowedHosts, handleTowerDetail(cfg)))
+	mux.Handle("GET /api/pods/{namespace}/{name}", hostAllowlist(cfg.AllowedHosts, handlePodDetail(cfg)))
+	mux.Handle("GET /api/pods/{namespace}/{name}/logtail", hostAllowlist(cfg.AllowedHosts, handlePodLogTail(cfg)))
 	// The frontend's startup-config channel (issue #91) — deliberately not on
 	// SceneState (ADR-0008); see config.go.
-	mux.HandleFunc("GET /api/config", handleAppConfig(cfg))
+	mux.Handle("GET /api/config", hostAllowlist(cfg.AllowedHosts, handleAppConfig(cfg)))
 	mux.Handle("GET /", http.FileServerFS(frontendFS()))
 	return mux
 }

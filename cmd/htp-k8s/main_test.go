@@ -280,6 +280,64 @@ func TestParseFlags_DemoSeedAndAutostartAreOrthogonal(t *testing.T) {
 	}
 }
 
+// TestParseFlags_AllowedHostsDefaultsToNil proves no flag or env leaves
+// allowedHosts empty — server.NewAllowedHosts still trusts loopback and the
+// addr host on its own, so an operator on the defaults needs nothing extra.
+func TestParseFlags_AllowedHostsDefaultsToNil(t *testing.T) {
+	opts, err := parseFlags(nil, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if opts.allowedHosts != nil {
+		t.Fatalf("allowedHosts = %v, want nil with no flag or env", opts.allowedHosts)
+	}
+}
+
+// TestParseFlags_AllowedHostsFlag proves -allowed-hosts splits on commas and
+// trims whitespace, dropping empty entries.
+func TestParseFlags_AllowedHostsFlag(t *testing.T) {
+	opts, err := parseFlags([]string{"-allowed-hosts", "k8s.example.com, proxy.internal:8443,, other.example.com "}, noEnv)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	want := []string{"k8s.example.com", "proxy.internal:8443", "other.example.com"}
+	if len(opts.allowedHosts) != len(want) {
+		t.Fatalf("allowedHosts = %v, want %v", opts.allowedHosts, want)
+	}
+	for i := range want {
+		if opts.allowedHosts[i] != want[i] {
+			t.Fatalf("allowedHosts = %v, want %v", opts.allowedHosts, want)
+		}
+	}
+}
+
+// TestParseFlags_AllowedHostsFromEnv proves HTP_K8S_ALLOWED_HOSTS is honored,
+// mirroring the addr/filter env precedent.
+func TestParseFlags_AllowedHostsFromEnv(t *testing.T) {
+	opts, err := parseFlags(nil, envMap(map[string]string{"HTP_K8S_ALLOWED_HOSTS": "k8s.example.com"}))
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if len(opts.allowedHosts) != 1 || opts.allowedHosts[0] != "k8s.example.com" {
+		t.Fatalf("allowedHosts = %v, want [k8s.example.com]", opts.allowedHosts)
+	}
+}
+
+// TestParseFlags_AllowedHostsFlagOverridesEnv proves flag > env precedence
+// for -allowed-hosts/HTP_K8S_ALLOWED_HOSTS.
+func TestParseFlags_AllowedHostsFlagOverridesEnv(t *testing.T) {
+	opts, err := parseFlags(
+		[]string{"-allowed-hosts", "flag.example.com"},
+		envMap(map[string]string{"HTP_K8S_ALLOWED_HOSTS": "env.example.com"}),
+	)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if len(opts.allowedHosts) != 1 || opts.allowedHosts[0] != "flag.example.com" {
+		t.Fatalf("allowedHosts = %v, want [flag.example.com]", opts.allowedHosts)
+	}
+}
+
 func TestVersionRequested(t *testing.T) {
 	cases := []struct {
 		name string
