@@ -177,44 +177,47 @@ jobs:
       # blocking on (issue #143).
       #
       # Findings were previously invisible outside the Actions log (issue
-      # #143) because plain-text `govulncheck ./...` exits non-zero on a
-      # finding, which would abort the step before a SARIF could ever be
-      # produced or uploaded. `set +e` here defers that failure: the SARIF
-      # (`-format sarif`, valid regardless of whether findings exist — only
-      # the process exit code differs) is always captured to disk and the
-      # exit code is stashed in an output, so the upload step below always
-      # has something to upload. The job still fails on findings, just one
-      # step later, after the report has landed.
-      - name: govulncheck
-        id: govulncheck
-        run: |
-          set +e
-          govulncheck -format sarif ./... > govuln.sarif
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+      # #143). The obvious fix — add `-format sarif` to the existing gating
+      # invocation — is a trap: verified against v1.6.0's source, only the
+      # TEXT handler's Flush (internal/scan/text.go) ever returns
+      # errVulnerabilitiesFound (exit 3); the SARIF handler's Flush
+      # (internal/sarif/handler.go) returns nil unconditionally, so
+      # `govulncheck -format sarif` exits 0 even when it finds a reachable
+      # vulnerability (confirmed against a throwaway module calling a known
+      # GO-2026-5026-affected symbol). Relying on that exit code for the gate
+      # would make it pass vacuously.
+      #
+      # So this is deliberately TWO invocations, ordered so the report always
+      # lands before the gate can fail the job:
+      - name: govulncheck (SARIF report)
+        # No continue-on-error / if: always() needed: -format sarif's own
+        # exit code already never reflects findings (see above), so this step
+        # only fails on a genuine scan error (bad package pattern, vuln-DB
+        # fetch failure) — the same "operational failure fails loud, findings
+        # don't" shape the Trivy steps use, here for free rather than
+        # constructed.
+        run: govulncheck -format sarif ./... > govuln.sarif
 
-      # if: always() so a real SARIF lands in the Security tab whether or not
-      # the govulncheck step above found something (or, in principle, errored
-      # in some other way) — mirrors the upload invariant the Trivy jobs use,
-      # even though the `set +e` above already keeps this step reachable on
-      # its own. A distinct `govulncheck` category keeps this from colliding
-      # with Trivy's `trivy-container` / `trivy-release-image-<digest>`
-      # categories in the Security tab (issue #143).
+      # Runs only after the report step above succeeds — no
+      # continue-on-error, no if: always() (mirrors the Trivy upload's
+      # ordering-based invariant, see the Container scan job below): a real
+      # SARIF lands in the Security tab, or the job goes red here, before
+      # ever reaching the gate. A distinct `govulncheck` category keeps this
+      # from colliding with Trivy's `trivy-container` /
+      # `trivy-release-image-<digest>` categories.
       - name: Upload govulncheck SARIF to Security tab
-        if: always()
         uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
         with:
           sarif_file: govuln.sarif
           category: govulncheck
 
-      # Explicit, separate failure step (rather than letting the govulncheck
-      # step itself fail) so the SARIF upload above is never skipped: findings
-      # still block the PR (issue #1 / ADR-0005), they're just no longer
-      # invisible while doing so (issue #143).
-      - name: Fail on govulncheck findings
-        if: steps.govulncheck.outputs.exit_code != '0'
-        run: |
-          echo "::error::govulncheck found reachable vulnerabilities (exit ${{ steps.govulncheck.outputs.exit_code }}). See the Security tab (category: govulncheck) for details, or run 'govulncheck ./...' locally."
-          exit 1
+      # The actual blocking gate (issue #1 / ADR-0005): a second, plain-text
+      # invocation, which DOES exit 3 on a reachable finding (unlike
+      # `-format sarif` above). Placed last so the report has already reached
+      # the Security tab before this can fail the job — findings still block
+      # the PR, they're just no longer invisible while doing so (issue #143).
+      - name: govulncheck (gate)
+        run: govulncheck ./...
 
   frontend:
     name: Frontend (Node)

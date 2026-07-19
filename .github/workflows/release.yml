@@ -31,6 +31,16 @@ name: Release
 #     (auth, image pull, DB download, hang) or the SARIF can't reach the Security
 #     tab, that's a real failure, not a silently-empty security report.
 #
+# NOT here: govulncheck (issue #143). Its Go-source scan is over the exact
+# code `verify-green-commit` above already proved passed on this SHA in
+# `build.yml`, so re-running it here would rescan identical source — mostly
+# redundant, but not entirely: govulncheck's OTHER input, the OSV vuln
+# database, moves independently of the source, so a CVE published between the
+# main-commit PR scan and the tag would be missed by govulncheck here too.
+# Trivy's release-time scan (above) is what actually catches that gap for the
+# shipped image; PR-time govulncheck remains the authoritative
+# source-reachability signal, not a release-time one.
+#
 # All third-party actions are pinned to a commit SHA (repo convention); the
 # trailing comment records the human-readable version.
 
