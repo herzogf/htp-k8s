@@ -906,6 +906,20 @@ function rooflineFromPlacements(placements: readonly TowerPlacement[]): number {
   return placements.length === 0 ? TOWER_HEIGHT : placements[0].position[1] * 2
 }
 
+/**
+ * {@link altitudeBandsForRoofline} for `placements`' scene-wide roofline
+ * ({@link rooflineFromPlacements}), short-circuiting to the already-built
+ * {@link DEFAULT_ALTITUDE_BANDS} at the (overwhelmingly common — most scenes
+ * never grow past it) resting height instead of allocating an equal-valued
+ * object fresh. {@link stepDemoTour} calls this every frame, so skipping the
+ * allocation on the common path is cheap render-loop garbage avoided for
+ * free — a grown scene still recomputes (and re-allocates) exactly as before.
+ */
+function bandsForPlacements(placements: readonly TowerPlacement[]): AltitudeBands {
+  const rooflineY = rooflineFromPlacements(placements)
+  return rooflineY === TOWER_HEIGHT ? DEFAULT_ALTITUDE_BANDS : altitudeBandsForRoofline(rooflineY)
+}
+
 // ---------------------------------------------------------------------------
 // Seeded PRNG
 // ---------------------------------------------------------------------------
@@ -2292,7 +2306,7 @@ export function createDemoTour(params: {
   // to the scene's ACTUAL (possibly grown, uniform-across-Towers) roofline —
   // see AltitudeBands' doc comment — rather than staying pinned to the
   // resting TOWER_HEIGHT.
-  const bands = altitudeBandsForRoofline(rooflineFromPlacements(params.placements))
+  const bands = bandsForPlacements(params.placements)
   const graph = buildCanyonGraph(params.placements)
   if (!graph) {
     return orbitTourState(params.seed, fallbackCenter(params.placements), bands)
@@ -2481,8 +2495,11 @@ export function stepDemoTour(
   // frame (not just at createDemoTour time), so a scene that grows/shrinks
   // uniform height mid-flight (a Tower's Pod count crossing the four-face
   // capacity while Demo Mode is already running) is reflected within the
-  // current frame — see AltitudeBands' doc comment.
-  const bands = altitudeBandsForRoofline(rooflineFromPlacements(placements))
+  // current frame — see AltitudeBands' doc comment. bandsForPlacements
+  // reuses the shared DEFAULT_ALTITUDE_BANDS object at the (overwhelmingly
+  // common) resting height rather than allocating an equal-valued one fresh
+  // every frame of the render loop.
+  const bands = bandsForPlacements(placements)
   if (state.kind === 'orbit') {
     const graph = buildCanyonGraph(placements)
     if (graph) {
