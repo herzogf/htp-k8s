@@ -1,5 +1,12 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
 # Shared guarded lifecycle for test/e2e/capture's runtime-only `node_modules`
-# symlink onto web/node_modules (issue #130).
+# symlink onto web/node_modules (issue #130). Not executable on its own —
+# meant to be sourced (see Usage below); the shebang and the shellcheck
+# directive above exist only so ad-hoc `shellcheck` invocations against this
+# file (which can't otherwise infer its dialect from a file with no
+# extension-based hint or direct execution) know to parse it as bash.
 #
 # Both `run.sh` (the `record` Task, via capture.mjs's @playwright/test import)
 # and Taskfile.yml's `test` task (via node_modules/.bin/vitest) point this
@@ -18,13 +25,16 @@
 # by two callers staying in sync by hand.
 #
 # This does NOT make the two callers safe to run concurrently against each
-# other — they still share one path, by necessity: Node's module resolution
+# other. Sharing the one path is inherent — Node's module resolution
 # algorithm only ever looks for a directory literally named `node_modules`,
 # so the two callers can't be given distinct symlink names while both still
-# work. What this DOES guarantee is that neither caller ever corrupts or
-# silently no-ops on a path already occupied by something unexpected, and
-# that both clean up after themselves the same way. Running `task
-# capture:record` and `task capture:test` concurrently remains unsupported.
+# work. The LACK of serialization between them is not inherent, just not
+# attempted here: a flock around create/remove would fix it if concurrent
+# `capture:record`/`capture:test` runs ever become a real workflow, rather
+# than the corner case they are today. What this file DOES guarantee in the
+# meantime is that neither caller ever corrupts or silently no-ops on a path
+# already occupied by something unexpected, and that both clean up after
+# themselves the same way.
 #
 # Usage (source into a caller that has already set its own `set -euo
 # pipefail` or equivalent — this file defines functions only, and doesn't set
@@ -68,11 +78,19 @@ check_capture_node_modules_prereqs() {
 # concurrent run, however unsupported, leaving something unexpected at the
 # link path) and then creates the symlink. Idempotent (`ln -sfn` on a symlink
 # this tool already manages just re-points it at the same target).
+#
+# The `|| return 1` on the prereqs call is deliberate, not decorative: this
+# function must not depend on the CALLER having `set -e` active to abort on
+# a failed check. Both current call sites do set it, but bash disables
+# `errexit` inside a function/subshell used as part of a conditional (an
+# `if`/`&&`/`||`) regardless of the caller's own setting — sourced this way,
+# a failed check would otherwise silently fall through to `ln -sfn`, which
+# is exactly the nested-symlink corruption the guard exists to prevent.
 create_capture_node_modules_symlink() {
   local link="$1"
   local web_node_modules="$2"
 
-  check_capture_node_modules_prereqs "${link}" "${web_node_modules}"
+  check_capture_node_modules_prereqs "${link}" "${web_node_modules}" || return 1
   ln -sfn "$(cd "${web_node_modules}" && pwd)" "${link}"
 }
 

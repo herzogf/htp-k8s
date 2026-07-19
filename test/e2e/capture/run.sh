@@ -140,43 +140,50 @@ stop_app() {
 }
 
 # stop_capture: same verify+escalate discipline as stop_app, for the
-# backgrounded capture.mjs (node + its headless Chromium child). Deliberately
+# backgrounded capture.mjs (node + its headless Chromium child and further
+# Chromium-internal grandchildren: zygotes, gpu-process, renderer). Deliberately
 # run FIRST in cleanup() (see below): a targeted `kill <run.sh PID>` (as
-# opposed to Ctrl-C, which signals the whole process group) can otherwise
-# leave capture.mjs running orphaned while the rest of cleanup proceeds —
-# including delete_frame_cache's rm -rf of the very directory it's still
-# writing frames into (issue #120 review).
+# opposed to Ctrl-C, which the kernel delivers to the whole foreground
+# process group) can otherwise leave capture.mjs running orphaned while the
+# rest of cleanup proceeds — including delete_frame_cache's rm -rf of the
+# very directory it's still writing frames into (issue #120 review).
 #
-# This only signals the tracked node PID — Chromium is a grandchild, spawned
-# by Playwright underneath node, so the SIGKILL escalation two blocks down
-# would (before issue #130) orphan it: SIGKILL cannot be caught, so node has
-# no chance to close its browser on the way out, and an orphaned child is
-# reparented rather than killed alongside it. capture.mjs now owns its own
-# teardown instead of relying on this function reaching it in time: it
-# installs SIGTERM/SIGINT handlers that close the browser (killing Chromium
-# and all of its own subprocesses) before the process exits, so the SIGTERM
-# sent below is normally enough on its own — the SIGKILL escalation here
-# remains only as a last resort if that handler itself hangs.
+# Signals and verifies the whole process GROUP (`-CAPTURE_PID`, via pgrep
+# -g), not just the tracked node PID — see the capture-launch site's
+# comment on why CAPTURE_PID is also that tree's pgid. This matters at BOTH
+# ends: capture.mjs installs its own SIGTERM/SIGINT/SIGHUP handler that
+# closes the browser before exiting (so the graceful path below is normally
+# enough on its own, and closes even a browser still mid-launch when the
+# signal arrives), but if that handler itself hangs — e.g. browser.close()
+# wedged against an unresponsive browser — the SIGKILL escalation MUST still
+# reach Chromium directly, since SIGKILL can't be caught and a PID-only kill
+# of node alone would orphan it at that point. Verifying via pgrep against
+# the group (not `kill -0` against the one PID) means this function's
+# "gone" claim actually covers the whole tree, matching this repo's
+# documented discipline that "each step verifies its own result" (issue
+# #130).
 stop_capture() {
   if [ -z "${CAPTURE_PID}" ]; then
     return 0
   fi
-  if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
-    kill "${CAPTURE_PID}" 2>/dev/null || true
+  if pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1; then
+    kill -TERM -- "-${CAPTURE_PID}" 2>/dev/null || true
     for _ in $(seq 1 20); do
-      kill -0 "${CAPTURE_PID}" 2>/dev/null || break
+      pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1 || break
       sleep 0.5
     done
-    if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
-      echo "WARNING: capture process ${CAPTURE_PID} did not exit on SIGTERM; sending SIGKILL" >&2
-      kill -9 "${CAPTURE_PID}" 2>/dev/null || true
+    if pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1; then
+      echo "WARNING: capture process group ${CAPTURE_PID} did not exit on SIGTERM; sending SIGKILL to the whole group" >&2
+      kill -KILL -- "-${CAPTURE_PID}" 2>/dev/null || true
       sleep 0.5
     fi
   fi
-  if kill -0 "${CAPTURE_PID}" 2>/dev/null; then
-    echo "ERROR: capture process ${CAPTURE_PID} is still alive after cleanup — giving up" >&2
+  if pgrep -g "${CAPTURE_PID}" >/dev/null 2>&1; then
+    echo "ERROR: capture process group ${CAPTURE_PID} still has members after cleanup — giving up" >&2
+    pgrep -a -g "${CAPTURE_PID}" >&2 || true
     return 1
   fi
+  echo "Verified: capture process group ${CAPTURE_PID} (node + Chromium) is gone."
   CAPTURE_PID=""
   return 0
 }
@@ -324,6 +331,21 @@ create_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}" "${WEB_NODE_M
 # blocks until it finishes and propagates its exit status under `set -e`,
 # so this has the same "capture failure aborts the script" behavior as a
 # plain foreground invocation.
+#
+# `set -m` (job control) around JUST this backgrounding: without it, a
+# background job in a non-interactive script inherits THIS SCRIPT's own
+# process group, which is why Ctrl-C (a kernel broadcast to the whole
+# foreground process group) has always reached Chromium's descendants too.
+# A targeted `kill <run.sh PID>` doesn't get that broadcast, so
+# stop_capture below needs to be able to signal capture.mjs's tree on its
+# own — which requires that tree to have its OWN process group, isolated
+# from run.sh's, so signaling it can never also hit run.sh itself. Job
+# control assigns a fresh pgid (== CAPTURE_PID) to exactly this job when
+# backgrounded; every process capture.mjs/Chromium subsequently forks
+# inherits that same pgid (confirmed empirically — see the #130 PR
+# discussion), so `-CAPTURE_PID` reaches the whole tree. Turned back off
+# immediately after so it doesn't affect anything else in this script.
+set -m
 node "${SCRIPT_DIR}/capture.mjs" \
   --out-dir "${OUT_DIR}" \
   --duration-ms "${DURATION_MS}" \
@@ -331,6 +353,7 @@ node "${SCRIPT_DIR}/capture.mjs" \
   --width "${WIDTH}" \
   --height "${HEIGHT}" &
 CAPTURE_PID=$!
+set +m
 wait "${CAPTURE_PID}"
 CAPTURE_PID=""
 remove_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}"

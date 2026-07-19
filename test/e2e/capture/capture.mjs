@@ -27,6 +27,7 @@
 
 import { chromium } from '@playwright/test'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { parseArgs } from 'node:util'
 
@@ -66,11 +67,24 @@ let stopping = false
 
 // Tracked at module scope so the signal handlers below (registered once, at
 // import time — see the bottom of this file) can reach whatever browser is
-// currently open, without threading it through every function.
+// currently open (or currently launching), without threading it through
+// every function.
+//
+// browserPromise is assigned SYNCHRONOUSLY, in the same tick as the
+// chromium.launch() call below — deliberately BEFORE that call is awaited.
+// A signal landing during the launch window (chromium.launch() has already
+// forked the browser process but hasn't resolved yet) would otherwise find
+// `browser` still null, so closeBrowser() would no-op and exit, orphaning
+// the very process launch just spawned — exactly the leak class issue #130
+// exists to close. Tracking the in-flight promise instead means
+// closeBrowser() can await it and close whatever it produces, however late
+// the signal arrives.
+let browserPromise = null
 let browser = null
 
 async function main() {
-  browser = await chromium.launch({ headless: true })
+  browserPromise = chromium.launch({ headless: true })
+  browser = await browserPromise
   // Everything from here on can throw (bounded waits below, Demo Mode not
   // active, ffmpeg/CDP errors) — always close the browser on the way out so
   // a failed capture doesn't leave an orphaned headless Chromium process
@@ -88,9 +102,17 @@ async function main() {
 // gone, which must not turn "we're shutting down anyway" into an unhandled
 // rejection.
 async function closeBrowser() {
+  if (!browser && browserPromise) {
+    // Launch is (or was) still in flight — wait for it so we can close
+    // whatever it produces rather than orphaning it. Bounded by
+    // Playwright's own launch timeout, so this can't hang forever even if
+    // launch itself never resolves.
+    browser = await browserPromise.catch(() => null)
+  }
   if (!browser) return
   const b = browser
   browser = null
+  browserPromise = null
   await b.close().catch(() => {})
 }
 
@@ -240,27 +262,38 @@ async function captureFlight(browser) {
   console.log(`Last frame elapsedMs: ${frameMeta[frameMeta.length - 1]?.elapsedMs}`)
 }
 
-// run.sh's stop_capture signals this process's PID directly on a targeted
-// `kill <run.sh PID>` (as opposed to Ctrl-C, which the kernel delivers to
-// the whole foreground process group, Chromium included) — SIGTERM,
-// escalating to SIGKILL if that doesn't land within ~10s. Own our own
-// teardown here rather than relying on stop_capture reaching Chromium in
-// time: it's a grandchild of this process (spawned by Playwright underneath
+// run.sh's stop_capture signals this process directly on a targeted `kill
+// <run.sh PID>` (as opposed to Ctrl-C, which the kernel delivers to the
+// whole foreground process group, Chromium included). Own our own teardown
+// here rather than relying on the signal reaching Chromium some other way:
+// it's a grandchild of this process (spawned by Playwright underneath
 // node), so if this process dies without an explicit browser.close() first,
-// Chromium is simply orphaned — reparented, not killed — and SIGKILL can't
-// be caught to give us a last chance once escalation is reached (issue
-// #130). Node's default action for SIGTERM/SIGINT with no listener is to
-// terminate immediately without running any `finally` block, so this must
-// be an explicit handler, not reliance on main()'s try/finally above.
+// Chromium is simply orphaned — reparented, not killed. Node's default
+// action for SIGTERM/SIGINT/SIGHUP with no listener is to terminate
+// immediately without running any `finally` block, so this must be an
+// explicit handler, not reliance on main()'s try/finally above — and all
+// three signals are covered (not just TERM/INT), matching run.sh's own
+// `trap cleanup EXIT INT TERM HUP` (a bare SIGHUP, e.g. a closed terminal,
+// would otherwise take the un-owned path).
+//
+// This handler is a best-effort belt, not the sole safety net: if
+// browser.close() itself hangs (a wedged browser), run.sh's stop_capture
+// now escalates to SIGKILL against this process's whole process GROUP
+// (node + Chromium + all of its descendants), not just this PID, and
+// verifies the group is actually empty afterward — see that function's
+// comment (issue #130).
 let shuttingDown = false
 async function shutdown(signal) {
   if (shuttingDown) return
   shuttingDown = true
   console.error(`\nReceived ${signal}, closing the browser before exiting...`)
   await closeBrowser()
-  process.exit(1)
+  // 128+N is the conventional exit code for "terminated by signal N" (N =
+  // SIGTERM 15, SIGINT 2, SIGHUP 1) — distinguishes a clean signal-initiated
+  // teardown from a genuine capture failure (plain exit(1)) in logs.
+  process.exit(128 + (os.constants.signals[signal] ?? 0))
 }
-for (const signal of ['SIGTERM', 'SIGINT']) {
+for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   process.on(signal, () => {
     shutdown(signal).catch((e) => {
       console.error('shutdown handler itself failed:', e)
