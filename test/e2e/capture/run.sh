@@ -78,7 +78,15 @@ export KUBECONFIG="${OUT_DIR}/kubeconfig"
 # Chromium build web/e2e's Playwright suite uses), point a runtime-only
 # symlink at web/node_modules just for the capture step. Git-ignored (see
 # .gitignore); cleaned up below and by the trap.
+#
+# Taskfile.yml's `test` task points the same symlink at web/node_modules for
+# its own (unrelated) reasons — the guarded create/remove lifecycle is
+# shared via lib/node-modules-symlink.sh (issue #130) so the two callers
+# can't drift out of sync with each other.
 CAPTURE_NODE_MODULES_LINK="${SCRIPT_DIR}/node_modules"
+WEB_NODE_MODULES="${REPO_ROOT}/web/node_modules"
+# shellcheck source=lib/node-modules-symlink.sh
+source "${SCRIPT_DIR}/lib/node-modules-symlink.sh"
 
 log() { printf '\n=== [capture] %s\n' "$*"; }
 
@@ -86,22 +94,10 @@ log "Output directory: ${OUT_DIR}"
 log "Kubeconfig (isolated to this run): ${KUBECONFIG}"
 
 # Fail fast, BEFORE the ~2-minute build+cluster-create below, rather than
-# opaquely mid-capture (issue #120 review):
-#   - web/node_modules must exist for the symlink trick above to work at all.
-#   - CAPTURE_NODE_MODULES_LINK must not already exist as something other
-#     than a symlink we manage — `ln -sfn` silently nests the new symlink
-#     INSIDE a pre-existing real directory of that name instead of erroring,
-#     which would both fail to expose @playwright/test and leave the trap's
-#     `[ -L ... ]` cleanup guard unable to recognise (and thus not clean up)
-#     the mess.
-if [ ! -d "${REPO_ROOT}/web/node_modules" ]; then
-  echo "ERROR: ${REPO_ROOT}/web/node_modules not found — run 'npm ci' in web/ (or 'task web:install') first." >&2
-  exit 1
-fi
-if [ -e "${CAPTURE_NODE_MODULES_LINK}" ] && [ ! -L "${CAPTURE_NODE_MODULES_LINK}" ]; then
-  echo "ERROR: ${CAPTURE_NODE_MODULES_LINK} exists and is not a symlink this tool manages — remove it manually and re-run." >&2
-  exit 1
-fi
+# opaquely mid-capture (issue #120 review) — see
+# lib/node-modules-symlink.sh's check_capture_node_modules_prereqs for what
+# this guards against.
+check_capture_node_modules_prereqs "${CAPTURE_NODE_MODULES_LINK}" "${WEB_NODE_MODULES}"
 
 # ---------------------------------------------------------------------------
 # Cleanup discipline (issue #120: "this project has repeatedly leaked
@@ -150,6 +146,17 @@ stop_app() {
 # leave capture.mjs running orphaned while the rest of cleanup proceeds —
 # including delete_frame_cache's rm -rf of the very directory it's still
 # writing frames into (issue #120 review).
+#
+# This only signals the tracked node PID — Chromium is a grandchild, spawned
+# by Playwright underneath node, so the SIGKILL escalation two blocks down
+# would (before issue #130) orphan it: SIGKILL cannot be caught, so node has
+# no chance to close its browser on the way out, and an orphaned child is
+# reparented rather than killed alongside it. capture.mjs now owns its own
+# teardown instead of relying on this function reaching it in time: it
+# installs SIGTERM/SIGINT handlers that close the browser (killing Chromium
+# and all of its own subprocesses) before the process exits, so the SIGTERM
+# sent below is normally enough on its own — the SIGKILL escalation here
+# remains only as a last resort if that handler itself hangs.
 stop_capture() {
   if [ -z "${CAPTURE_PID}" ]; then
     return 0
@@ -235,15 +242,6 @@ delete_frame_cache() {
   return 0
 }
 
-# remove_symlink: idempotent. Only ever removes something WE created (a
-# symlink at this exact path) — never a real directory, even one accidentally
-# left at this path by something else.
-remove_symlink() {
-  if [ -L "${CAPTURE_NODE_MODULES_LINK}" ]; then
-    rm -f "${CAPTURE_NODE_MODULES_LINK}"
-  fi
-}
-
 cleanup() {
   local status=$?
   log "Cleanup: tearing down the capture process, the app, the kind cluster, and the frame cache"
@@ -251,7 +249,7 @@ cleanup() {
   # <run.sh PID>` rather than Ctrl-C — see stop_capture's comment), it must
   # stop writing into frames/ before delete_frame_cache below rm -rf's it.
   stop_capture || true
-  remove_symlink
+  remove_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}"
   stop_app || true
   delete_cluster || true
   delete_kubeconfig
@@ -319,7 +317,7 @@ echo "App is healthy."
 # 4. Capture: raw CDP screencast + pose trace + tower layout (capture.mjs).
 # ---------------------------------------------------------------------------
 log "Capturing (${DURATION_MS}ms @ ${WIDTH}x${HEIGHT})"
-ln -sfn "${REPO_ROOT}/web/node_modules" "${CAPTURE_NODE_MODULES_LINK}"
+create_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}" "${WEB_NODE_MODULES}"
 # Backgrounded (rather than run synchronously in the foreground) so
 # CAPTURE_PID is tracked and stop_capture can kill it from cleanup() if this
 # script is interrupted mid-capture (issue #120 review) — `wait` below still
@@ -335,7 +333,7 @@ node "${SCRIPT_DIR}/capture.mjs" \
 CAPTURE_PID=$!
 wait "${CAPTURE_PID}"
 CAPTURE_PID=""
-remove_symlink
+remove_capture_node_modules_symlink "${CAPTURE_NODE_MODULES_LINK}"
 
 # App and cluster are no longer needed once the capture is on disk — stop
 # them now (via the same verifying functions the trap uses, not a

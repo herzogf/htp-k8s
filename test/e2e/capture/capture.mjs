@@ -64,8 +64,13 @@ let startTime = null
 let frameCount = 0
 let stopping = false
 
+// Tracked at module scope so the signal handlers below (registered once, at
+// import time — see the bottom of this file) can reach whatever browser is
+// currently open, without threading it through every function.
+let browser = null
+
 async function main() {
-  const browser = await chromium.launch({ headless: true })
+  browser = await chromium.launch({ headless: true })
   // Everything from here on can throw (bounded waits below, Demo Mode not
   // active, ffmpeg/CDP errors) — always close the browser on the way out so
   // a failed capture doesn't leave an orphaned headless Chromium process
@@ -73,8 +78,20 @@ async function main() {
   try {
     await captureFlight(browser)
   } finally {
-    await browser.close().catch(() => {})
+    await closeBrowser()
   }
+}
+
+// closeBrowser: idempotent (safe to call from both the normal finally above
+// and a signal handler firing concurrently/afterward) and never throws —
+// browser.close() itself can reject if the browser process is already
+// gone, which must not turn "we're shutting down anyway" into an unhandled
+// rejection.
+async function closeBrowser() {
+  if (!browser) return
+  const b = browser
+  browser = null
+  await b.close().catch(() => {})
 }
 
 async function captureFlight(browser) {
@@ -221,6 +238,35 @@ async function captureFlight(browser) {
     `Captured ${frameMeta.length} frames, ${poseSamples.length} pose samples, ${towers.length} towers.`,
   )
   console.log(`Last frame elapsedMs: ${frameMeta[frameMeta.length - 1]?.elapsedMs}`)
+}
+
+// run.sh's stop_capture signals this process's PID directly on a targeted
+// `kill <run.sh PID>` (as opposed to Ctrl-C, which the kernel delivers to
+// the whole foreground process group, Chromium included) — SIGTERM,
+// escalating to SIGKILL if that doesn't land within ~10s. Own our own
+// teardown here rather than relying on stop_capture reaching Chromium in
+// time: it's a grandchild of this process (spawned by Playwright underneath
+// node), so if this process dies without an explicit browser.close() first,
+// Chromium is simply orphaned — reparented, not killed — and SIGKILL can't
+// be caught to give us a last chance once escalation is reached (issue
+// #130). Node's default action for SIGTERM/SIGINT with no listener is to
+// terminate immediately without running any `finally` block, so this must
+// be an explicit handler, not reliance on main()'s try/finally above.
+let shuttingDown = false
+async function shutdown(signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.error(`\nReceived ${signal}, closing the browser before exiting...`)
+  await closeBrowser()
+  process.exit(1)
+}
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    shutdown(signal).catch((e) => {
+      console.error('shutdown handler itself failed:', e)
+      process.exit(1)
+    })
+  })
 }
 
 main().catch((e) => {

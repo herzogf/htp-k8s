@@ -14,14 +14,24 @@
 
 import fs from 'node:fs'
 import { parseArgs } from 'node:util'
-import { analyzePoseTrace } from './lib/analysis.mjs'
+import {
+  analyzePoseTrace,
+  DEFAULT_CADENCE_S,
+  DEFAULT_GAP_MERGE_S,
+  DEFAULT_TOP_N,
+} from './lib/analysis.mjs'
 
 const { values: args } = parseArgs({
   options: {
     'pose-samples': { type: 'string' },
     label: { type: 'string' },
     out: { type: 'string' },
-    cadence: { type: 'string', default: '0.178' },
+    // cadence/gap-merge/top-n default to the SAME constants
+    // analyzePoseTrace() itself defaults to (lib/analysis.mjs) rather than
+    // duplicating the numbers here — see that file's comment on why: the
+    // fixture regression test only exercises the lib's defaults, so a
+    // CLI-only copy going stale would go uncaught (issue #130).
+    cadence: { type: 'string', default: String(DEFAULT_CADENCE_S) },
     // The saturation threshold is deliberately NOT a single hardcoded
     // number: it's derived from Demo Mode's max yaw rate (VIEW_YAW_MAX_RATE,
     // web/src/scene/demoMode.ts — currently 1.5 rad/s) times a "how close to
@@ -31,8 +41,8 @@ const { values: args } = parseArgs({
     // it's moved since this default was last updated.
     'max-yaw-rate': { type: 'string', default: '1.5' },
     'saturation-fraction': { type: 'string', default: '0.98' },
-    'gap-merge': { type: 'string', default: '0.3' },
-    'top-n': { type: 'string', default: '15' },
+    'gap-merge': { type: 'string', default: String(DEFAULT_GAP_MERGE_S) },
+    'top-n': { type: 'string', default: String(DEFAULT_TOP_N) },
   },
 })
 
