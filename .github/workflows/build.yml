@@ -119,6 +119,11 @@ jobs:
       # (issue #143), same grant the Trivy job already carries for the same
       # reason (ADR-0005).
       security-events: write
+    env:
+      # Single source for the package pattern the two govulncheck steps below
+      # scan (issue #143) — they MUST stay in sync, or the SARIF report and
+      # the pass/fail gate would silently describe different code.
+      GOVULNCHECK_PKGS: ./...
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -196,7 +201,7 @@ jobs:
         # fetch failure) — the same "operational failure fails loud, findings
         # don't" shape the Trivy steps use, here for free rather than
         # constructed.
-        run: govulncheck -format sarif ./... > govuln.sarif
+        run: govulncheck -format sarif $GOVULNCHECK_PKGS > govuln.sarif
 
       # Runs only after the report step above succeeds — no
       # continue-on-error, no if: always() (mirrors the Trivy upload's
@@ -217,7 +222,7 @@ jobs:
       # the Security tab before this can fail the job — findings still block
       # the PR, they're just no longer invisible while doing so (issue #143).
       - name: govulncheck (gate)
-        run: govulncheck ./...
+        run: govulncheck $GOVULNCHECK_PKGS
 
   frontend:
     name: Frontend (Node)
