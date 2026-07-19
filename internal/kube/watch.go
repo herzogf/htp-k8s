@@ -105,7 +105,14 @@ const cacheSyncTimeout = 20 * time.Second
 // per-Namespace/Project-scoped informer set in place of these cluster-scoped
 // ones; tracked separately as issue #161.
 type SceneWatcher struct {
-	rebuild func(context.Context) scene.SceneState
+	// rebuild wraps BuildScene (rebuildTimeout-bounded). Its error return is
+	// non-nil exactly when BuildScene's own build degraded (see BuildScene's
+	// doc): Start's seed uses the returned SceneState regardless (there is no
+	// better fallback for the very first snapshot), but rebuildAndBroadcast
+	// treats a non-nil error as "don't trust this rebuild" and skips
+	// publishing it, keeping the last known-good current instead (see
+	// rebuildAndBroadcast).
+	rebuild func(context.Context) (scene.SceneState, error)
 	factory informers.SharedInformerFactory
 	// informers are the mode-scoped shared informers this watcher drives its
 	// rebuilds from; retained so Start can register handlers and wait for their
@@ -128,9 +135,12 @@ type SceneWatcher struct {
 	// single pending rebuild.
 	trigger chan struct{}
 
-	// synced gates event-driven blinks until the initial caches have synced, so
-	// the flood of pre-existing Events replayed during the initial LIST doesn't
-	// fire a startup blink storm — only Events arriving after sync are activity.
+	// synced gates event-driven blinks until eventsInformer's own initial cache
+	// sync completes, so the flood of pre-existing Events replayed during its
+	// initial LIST doesn't fire a startup blink storm — only Events arriving
+	// after that replay are activity. Set in Start, resolved against
+	// eventsInformer.HasSynced specifically (not the bounded cacheSyncTimeout
+	// wait, which may return before a merely-slow eventsInformer finishes).
 	synced atomic.Bool
 
 	mu          sync.Mutex
@@ -167,7 +177,7 @@ type SceneWatcher struct {
 // filtered identically — the filtered scene is simply the scene, so deltas
 // never reveal a Namespace/Project the snapshot hid.
 func NewSceneWatcher(client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode, filter NamespaceFilter) *SceneWatcher {
-	rebuild := func(ctx context.Context) scene.SceneState {
+	rebuild := func(ctx context.Context) (scene.SceneState, error) {
 		ctx, cancel := context.WithTimeout(ctx, rebuildTimeout)
 		defer cancel()
 		return BuildScene(ctx, client, dyn, mode, filter)
@@ -261,7 +271,16 @@ func (w *SceneWatcher) Start(ctx context.Context) {
 	// Rebuild outside the lock (it lists the API), then assign under it so the
 	// seed is visible to any subscriber with the same happens-before the worker
 	// relies on. Seed the blink homing index from the same scene.
-	seed := w.rebuild(ctx)
+	//
+	// Unlike rebuildAndBroadcast below, a degraded seed is used regardless of
+	// its error (logged, not discarded): current starts at the zero
+	// scene.SceneState, so even a degraded rebuild is strictly more useful as
+	// the very first snapshot than publishing nothing at all — there is no
+	// "last known-good" to prefer over it yet.
+	seed, err := w.rebuild(ctx)
+	if err != nil {
+		log.Printf("scene watcher: initial rebuild degraded: %v", err)
+	}
 	w.mu.Lock()
 	w.current = seed
 	w.panelTower = indexPanelTowers(seed)
@@ -275,28 +294,55 @@ func (w *SceneWatcher) Start(ctx context.Context) {
 	// cacheSyncTimeout and the type doc). Deriving the wait's stop channel from
 	// ctx as well as the timeout still shuts down promptly on real cancellation
 	// (process shutdown); it's only the "wait forever for a sync that will
-	// never happen" case this bounds.
+	// never happen" case this bounds. The informers themselves are NOT stopped
+	// by this bound — factory.Start above already has them running under the
+	// original, unbounded ctx, so one that's merely slow (not forbidden) still
+	// syncs and starts delivering deltas whenever it finishes, however much
+	// later than cacheSyncTimeout that turns out to be.
 	syncCtx, cancelSync := context.WithTimeout(ctx, w.cacheSyncTimeout)
 	synced := w.factory.WaitForCacheSync(syncCtx.Done())
 	cancelSync()
-	for informerType, ok := range synced {
-		if !ok {
-			// The single diagnostic that explains a frozen scene to whoever is
-			// running this for a restricted user: which resource's informer
-			// never synced (almost always a permission denial), so its live
-			// deltas will never arrive even though the initial snapshot above
-			// is still correct. log.Printf reaches stderr unconditionally —
-			// there is no lower-visibility logging path in this codebase (see
-			// issue #103) for this to silently fall into.
-			log.Printf("scene watcher: WARNING: informer for %v did not sync within %s — its resource's live updates will never arrive (the initial snapshot is still valid); see issue #161", informerType, w.cacheSyncTimeout)
+	if ctx.Err() == nil {
+		// Only warn when cacheSyncTimeout, not a real shutdown, is why the wait
+		// ended: if ctx itself is already done here, the process is shutting
+		// down mid-startup, which every informer legitimately fails to sync
+		// against — that's not the "forbidden informer" diagnostic this exists
+		// for, and logging it would be spurious noise on every shutdown.
+		for informerType, ok := range synced {
+			if !ok {
+				// The single diagnostic that explains a frozen scene to whoever
+				// is running this for a restricted user: which resource's
+				// informer hasn't synced within cacheSyncTimeout (almost always
+				// a permission denial for that resource, though — see the
+				// comment above — it may still be a slow-but-healthy cluster
+				// that syncs later and starts delivering deltas from then on).
+				// The initial snapshot is unaffected either way. log.Printf
+				// reaches stderr unconditionally — there is no lower-visibility
+				// logging path in this codebase (see issue #103) for this to
+				// silently fall into.
+				log.Printf("scene watcher: WARNING: informer for %v did not sync within %s — its live updates have not arrived yet (they will start once/if it syncs; the initial snapshot is still valid); see issue #161", informerType, w.cacheSyncTimeout)
+			}
 		}
 	}
 
-	// Caches are synced (or the wait gave up on the ones that never will be):
-	// the pre-existing Events that DID get replayed have already been
-	// suppressed through onEventAdd, so from here a new Event is genuine
-	// activity and may blink.
-	w.synced.Store(true)
+	// synced gates blink suppression of the pre-existing Events replayed during
+	// the informer's initial LIST (see the synced field doc) — it must not flip
+	// true before THAT replay is actually done, or those replayed Events read as
+	// fresh activity (a startup blink storm). The bounded wait above may return
+	// before a merely-slow (not forbidden) eventsInformer has actually finished
+	// its own sync, so this is resolved independently, against eventsInformer's
+	// own HasSynced rather than the bounded wait's outcome: set synced now if
+	// it's already done, otherwise keep waiting for it in the background (under
+	// the original, unbounded ctx — it stops with the watcher, never leaks).
+	if w.eventsInformer.HasSynced() {
+		w.synced.Store(true)
+	} else {
+		go func() {
+			if cache.WaitForCacheSync(ctx.Done(), w.eventsInformer.HasSynced) {
+				w.synced.Store(true)
+			}
+		}()
+	}
 
 	go w.run(ctx)
 }
@@ -440,8 +486,28 @@ func (w *SceneWatcher) run(ctx context.Context) {
 // fans the deltas out to subscribers. A subscriber whose buffer is full is
 // dropped: its channel is closed and it is removed, ending its connection so it
 // reconnects for a fresh snapshot.
+//
+// A degraded rebuild (rebuild's error return non-nil — a Tower or Panel list
+// that failed, see BuildScene) is deliberately NOT published: it is discarded
+// here rather than diffed against current, so current — and so every
+// subscriber — keeps the last known-good scene instead of a wipe. This matters
+// most for the per-Namespace/Project pod-listing fallback (issue #55): its 1+N
+// List calls can plausibly blow rebuildTimeout on namespace COUNT alone at
+// ADR-0004 scale, and without this guard that would previously have published
+// an EMPTY byTower — AttachPanels gives every Tower an empty Panels slice
+// regardless of how much of the fallback actually completed, so scene.Diff
+// would broadcast a panelRemoved for every Panel every client had, on what may
+// be a single transient timeout. Skipping the publish trades that mass wipe for
+// one rebuild cycle of staleness: nothing is silently lost, because the next
+// trigger reconciles fully against live cluster state again, same as any other
+// coalesced/missed event (see the type doc's self-correcting design) — it is
+// simply not treated as truth until a rebuild actually succeeds.
 func (w *SceneWatcher) rebuildAndBroadcast(ctx context.Context) {
-	next := w.rebuild(ctx)
+	next, err := w.rebuild(ctx)
+	if err != nil {
+		log.Printf("scene watcher: rebuild degraded, not publishing over the last known-good scene: %v", err)
+		return
+	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()

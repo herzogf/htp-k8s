@@ -2,6 +2,8 @@ package kube
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 
 	"k8s.io/client-go/dynamic"
@@ -22,16 +24,25 @@ import (
 // Namespace/Project Towers in Namespace-mode, and to the pods' Panels in
 // Node-mode. The zero-value filter admits everything, the no-filter default.
 //
-// Per ADR-0002 it never fails: a Tower- or Panel-listing error (e.g. a restricted
-// user, or the OpenShift Project-fallback path) is logged and degraded to
-// whatever was obtained (possibly none), and the returned SceneState always
-// carries a valid View Mode and a non-nil Towers slice. That keeps the /ws
-// contract — a well-formed frame with a valid viewMode — intact regardless of
-// RBAC.
-func BuildScene(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode, filter NamespaceFilter) scene.SceneState {
-	towers, err := BuildTowers(ctx, client, dyn, mode, filter)
-	if err != nil {
-		log.Printf("build towers: %v", err)
+// Per ADR-0002 it never hard-fails: a Tower- or Panel-listing error (e.g. a
+// restricted user, or the OpenShift Project-fallback path) is logged and
+// degraded to whatever was obtained (possibly none), and the returned
+// SceneState always carries a valid View Mode and a non-nil Towers slice. That
+// keeps the /ws contract — a well-formed frame with a valid viewMode — intact
+// regardless of RBAC.
+//
+// The returned error is a SEPARATE signal on top of that always-valid state:
+// non-nil whenever the Towers or Panels build degraded (the same conditions
+// already logged above), so a caller that has something better to fall back on
+// than "possibly none" — SceneWatcher.rebuildAndBroadcast, which can keep
+// serving its last known-good SceneState instead of publishing this degraded
+// one as truth — can tell the two apart. A caller with nothing better (the
+// very first snapshot, e.g. SceneWatcher.Start's seed) is free to use the
+// returned state regardless, exactly as before this error existed.
+func BuildScene(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface, mode scene.ViewMode, filter NamespaceFilter) (scene.SceneState, error) {
+	towers, towersErr := BuildTowers(ctx, client, dyn, mode, filter)
+	if towersErr != nil {
+		log.Printf("build towers: %v", towersErr)
 	}
 	if towers == nil {
 		// Keep the wire's Towers a JSON array ([]), never null, even when the
@@ -46,13 +57,17 @@ func BuildScene(ctx context.Context, client kubernetes.Interface, dyn dynamic.In
 	// to the admitted namespaces. It is nil (admit all) except in that Node-mode
 	// case, so the common paths do no extra work.
 	admitNamespace := filter.podNamespacePredicate(ctx, client, dyn, mode)
-	byTower, err := BuildPanels(ctx, client, dyn, mode, admitNamespace)
-	if err != nil {
-		log.Printf("build panels: %v", err)
+	byTower, panelsErr := BuildPanels(ctx, client, dyn, mode, admitNamespace)
+	if panelsErr != nil {
+		log.Printf("build panels: %v", panelsErr)
 	}
 	// Nest each Tower's Panels into it (empty array for a Tower with no pods);
 	// pods whose Tower wasn't built are dropped.
 	towers = AttachPanels(towers, byTower)
 
-	return scene.SceneState{ViewMode: mode, Towers: towers}
+	state := scene.SceneState{ViewMode: mode, Towers: towers}
+	if err := errors.Join(towersErr, panelsErr); err != nil {
+		return state, fmt.Errorf("build scene degraded: %w", err)
+	}
+	return state, nil
 }

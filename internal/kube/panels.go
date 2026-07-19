@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -125,12 +126,25 @@ func podsForPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic
 	return pods, nil
 }
 
+// namespaceScopedPodsConcurrency bounds how many of namespaceScopedPods' 1+N
+// per-namespace Pods.List calls run at once, rather than strictly
+// sequentially. At ADR-0004 scale, a real multi-tenant OpenShift cluster can
+// plausibly have hundreds of Projects, and N sequential List calls inside the
+// 10s rebuildTimeout risks blowing that deadline on namespace COUNT alone —
+// before any single List is even slow. Running them concurrently, bounded
+// (not unbounded — hundreds of simultaneous requests would just move the
+// problem to hammering the API server) rather than one at a time, cuts the
+// wall-clock cost by roughly this factor, making that deadline far less
+// likely to bite in the first place.
+const namespaceScopedPodsConcurrency = 10
+
 // namespaceScopedPods lists pods once per Namespace/Project the caller can
 // enumerate (see admittedNamespaceNames, called here with the zero-value
 // NamespaceFilter so it enumerates every admitted name — any Namespace/Project
 // filtering happens later, in BuildPanels/AttachPanels, exactly as it would for
-// the cluster-wide path). It is the fallback for a cluster-wide Pods list that
-// is forbidden but where per-namespace listing is not — the case for an
+// the cluster-wide path), bounded to namespaceScopedPodsConcurrency at once
+// (see that const). It is the fallback for a cluster-wide Pods list that is
+// forbidden but where per-namespace listing is not — the case for an
 // OpenShift project-scoped user.
 //
 // A namespace whose own pod listing fails for a reason unrelated to ctx (e.g.
@@ -138,28 +152,57 @@ func podsForPanels(ctx context.Context, client kubernetes.Interface, dyn dynamic
 // is skipped, logged, and does not abort the other admitted namespaces' Panels.
 // But if ctx is already done by the time a per-namespace List fails — e.g.
 // rebuildTimeout expired mid-enumeration — every namespace not yet listed would
-// fail the same way; returning what was collected so far as a success would
-// silently hand BuildScene a scene missing most Panels, which scene.Diff would
-// then broadcast to every connected client as a mass panelRemoved. So a
-// ctx-cut-short fallback is a failure of the whole fallback, not a partial
-// result, and the caller degrades the rebuild instead of publishing it.
+// fail the same way, so this returns an error instead of the pods collected so
+// far: a ctx-cut-short fallback is a failure of the whole fallback here, not a
+// partial result. That error is exactly the signal
+// SceneWatcher.rebuildAndBroadcast uses to skip publishing a degraded rebuild
+// rather than diffing and broadcasting it as truth (see that function) — this
+// function itself makes no claim about what a caller does with the error, only
+// that a cut-short fallback is reported as a failure, not silently narrowed to
+// whatever partial data happened to be collected.
 func namespaceScopedPods(ctx context.Context, client kubernetes.Interface, dyn dynamic.Interface) ([]corev1.Pod, error) {
 	names, err := admittedNamespaceNames(ctx, client, dyn, NamespaceFilter{})
 	if err != nil {
 		return nil, fmt.Errorf("enumerate namespaces/projects for per-namespace pod fallback: %w", err)
 	}
 
-	var pods []corev1.Pod
+	type nsResult struct {
+		ns   string
+		pods []corev1.Pod
+		err  error
+	}
+	results := make(chan nsResult, len(names))
+	sem := make(chan struct{}, namespaceScopedPodsConcurrency)
+	var wg sync.WaitGroup
 	for _, ns := range names {
-		list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, fmt.Errorf("per-namespace pod fallback cut short after namespace %q: %w", ns, ctxErr)
+		wg.Add(1)
+		go func(ns string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			list, err := client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				results <- nsResult{ns: ns, err: err}
+				return
 			}
-			log.Printf("list pods in namespace %q for panels: %v", ns, err)
+			results <- nsResult{ns: ns, pods: list.Items}
+		}(ns)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var pods []corev1.Pod
+	for r := range results {
+		if r.err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, fmt.Errorf("per-namespace pod fallback cut short after namespace %q: %w", r.ns, ctxErr)
+			}
+			log.Printf("list pods in namespace %q for panels: %v", r.ns, r.err)
 			continue
 		}
-		pods = append(pods, list.Items...)
+		pods = append(pods, r.pods...)
 	}
 	return pods, nil
 }

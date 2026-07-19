@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -160,8 +161,15 @@ func TestSceneWatcher_StartDegradesWhenInformerCannotSync(t *testing.T) {
 
 // TestSceneWatcher_StartSyncsFullyOnHealthyCluster is the "don't regress the
 // normal path" guard: against a healthy fake clientset (nothing forbidden),
-// every informer syncs well within cacheSyncTimeout, Start returns promptly,
-// and no "did not sync" warning is logged.
+// every informer syncs well within cacheSyncTimeout, no "did not sync" warning
+// is logged, and — the part a mere pass/fail on "did Start return at all"
+// can't catch — Start returns promptly rather than always waiting out the
+// bound. This deliberately does NOT override watcher.cacheSyncTimeout (unlike
+// the degrade test above): it uses the real cacheSyncTimeout default (20s) so
+// a regression that made Start always block for the full bound, even when
+// every informer already synced, would blow the tight elapsed-time assertion
+// below — a bare "returned within 5s" upper bound would not have caught that,
+// since 5s < 20s either way.
 func TestSceneWatcher_StartSyncsFullyOnHealthyCluster(t *testing.T) {
 	var logBuf bytes.Buffer
 	origOut := log.Writer()
@@ -179,6 +187,7 @@ func TestSceneWatcher_StartSyncsFullyOnHealthyCluster(t *testing.T) {
 	t.Cleanup(cancel)
 
 	done := make(chan struct{})
+	start := time.Now()
 	go func() {
 		watcher.Start(ctx)
 		close(done)
@@ -189,8 +198,76 @@ func TestSceneWatcher_StartSyncsFullyOnHealthyCluster(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return against a healthy fake clientset")
 	}
+	elapsed := time.Since(start)
+
+	// Generous for CI slowness, but tight enough to catch a regression to
+	// "always wait the full cacheSyncTimeout (20s)" — a fake clientset's
+	// informers sync in milliseconds, so a healthy Start should return in
+	// well under a second, not seconds.
+	const maxHealthyStartLatency = 2 * time.Second
+	if elapsed > maxHealthyStartLatency {
+		t.Errorf("Start took %s against a healthy fake clientset, want under %s — did it stop returning early once synced?", elapsed, maxHealthyStartLatency)
+	}
 
 	if logged := logBuf.String(); strings.Contains(logged, "did not sync") {
 		t.Errorf("healthy path logged a sync-failure warning: %q", logged)
+	}
+}
+
+// TestSceneWatcher_RebuildAndBroadcast_DegradedRebuildNotPublished is the
+// direct proof for the review finding that the ctx-cutoff fix made the mass
+// panelRemoved wipe worse, not better: BuildScene logs a Tower/Panel build
+// error but still returns a usable (possibly empty-where-degraded) SceneState
+// — namespaceScopedPods returning an error rather than partial pods (see
+// panels.go) only helps if something actually acts on that error, which
+// nothing did. rebuildAndBroadcast must refuse to publish a rebuild whose
+// error is non-nil: current (and so every subscriber) must stay exactly the
+// last known-good SceneState, and no delta may be broadcast for the degraded
+// one. This is tested directly against rebuildAndBroadcast (not through a
+// real informer/timing setup — rebuildTimeout is a 10s package const, not
+// worth actually waiting out here) by hand-building a SceneWatcher whose
+// rebuild func is swapped for one that returns a canned degraded result.
+func TestSceneWatcher_RebuildAndBroadcast_DegradedRebuildNotPublished(t *testing.T) {
+	goodState := scene.SceneState{
+		ViewMode: scene.ViewModeNamespace,
+		Towers: []scene.Tower{{
+			Name: "team-a",
+			Panels: []scene.Panel{
+				{Namespace: "team-a", Pod: "web", Phase: scene.PodPhaseRunning, Color: scene.ColorRunning},
+			},
+		}},
+	}
+	// What an empty byTower from a cut-short per-namespace fallback would
+	// actually produce once AttachPanels nests it: every Tower present, but
+	// with its Panels wiped to empty — this is the "mass panelRemoved" shape
+	// the review finding traced through BuildScene/AttachPanels.
+	degradedState := scene.SceneState{
+		ViewMode: scene.ViewModeNamespace,
+		Towers:   []scene.Tower{{Name: "team-a", Panels: []scene.Panel{}}},
+	}
+
+	w := &SceneWatcher{
+		rebuild: func(context.Context) (scene.SceneState, error) {
+			return degradedState, errors.New("build scene degraded: build panels: list pods for panels: cluster-wide: pods is forbidden: ...; per-namespace fallback: per-namespace pod fallback cut short after namespace \"b\": context deadline exceeded")
+		},
+		current:     goodState,
+		subscribers: map[int]chan scene.SceneDelta{},
+		panelTower:  indexPanelTowers(goodState),
+		lastBlink:   map[panelKey]time.Time{},
+	}
+	sub := make(chan scene.SceneDelta, subscriberBuffer)
+	w.subscribers[0] = sub
+
+	w.rebuildAndBroadcast(context.Background())
+
+	if !reflect.DeepEqual(w.current, goodState) {
+		t.Fatalf("current = %+v after a degraded rebuild, want it left unchanged at the last known-good state %+v", w.current, goodState)
+	}
+	select {
+	case d := <-sub:
+		t.Fatalf("a delta was broadcast for a degraded rebuild (mass wipe): %+v", d)
+	default:
+		// Correct: nothing broadcast, so no client ever sees the degraded/wiped
+		// scene as if it were real.
 	}
 }
