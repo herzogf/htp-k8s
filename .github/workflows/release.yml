@@ -63,19 +63,31 @@ name: Release
 #     Round-4 fix: an earlier version of this ran govulncheck as steps
 #     INSIDE the `goreleaser` job. That wrote `govuln.sarif` into the
 #     checkout `goreleaser` itself uses to run `goreleaser release --clean`
-#     moments later — an UNTRACKED, non-gitignored file, which GoReleaser's
-#     own `git.Pipe` validate step (`internal/pipe/git/git.go`,
-#     `CheckDirty` -> `git status --porcelain`, counts untracked files) reads
-#     as a dirty tree and aborts on, EVERY release, unconditionally. (The
-#     pre-existing `before:` hook that builds the frontend runs AFTER that
-#     validate step in GoReleaser's pipeline, which is why that one doesn't
-#     trip the same trap.) Nothing in `build.yml` runs `release.yml`, so nothing
-#     at PR time could have caught this. Moving the scan to its own job with
-#     its own checkout removes the collision entirely, and as a bonus keeps a
-#     network-fetched third-party binary (`go install`) out of the workspace
-#     that signs attested release artifacts, and gives the SARIF-uploading
-#     `security-events: write` grant its own least-privilege job instead of
-#     widening `goreleaser`'s.
+#     moments later — an UNTRACKED file, which GoReleaser's own `git.Pipe`
+#     validate step (`internal/pipe/git/git.go`, `CheckDirty` -> `git status
+#     --porcelain`, counts untracked files) reads as a dirty tree and aborts
+#     on, EVERY release, unconditionally. (The pre-existing `before:` hook
+#     that builds the frontend runs AFTER that validate step in GoReleaser's
+#     pipeline, which is why that one doesn't trip the same trap.) Nothing in
+#     `build.yml` runs `release.yml`, so nothing at PR time could have caught
+#     this. Moving the scan to its own job with its own checkout removes the
+#     collision entirely, and as a bonus keeps a network-fetched third-party
+#     binary (`go install`) out of the workspace that signs attested release
+#     artifacts, and gives the SARIF-uploading `security-events: write` grant
+#     its own least-privilege job instead of widening `goreleaser`'s.
+#
+#     Round-5 refinement: job isolation alone does not need a `.gitignore`
+#     entry for `govuln.sarif`, and deliberately doesn't have one — gitignore
+#     would NOT have prevented the round-4 bug (verified in a throwaway repo:
+#     `git status --porcelain` EXCLUDES gitignored files, so an ignored,
+#     untracked SARIF makes `CheckDirty` see a clean tree and NOT abort). An
+#     ignore entry would have silently DISARMED the tripwire that caught the
+#     round-4 bug, without fixing anything. Instead,
+#     `.github/actions/govulncheck/action.yml` writes the SARIF to
+#     `$RUNNER_TEMP`, never the checkout, in every caller — so no workspace
+#     file exists in ANY job, `.gitignore` is genuinely unnecessary, and a
+#     future caller can't reintroduce the round-4 failure mode even by adding
+#     this action to the wrong job.
 #
 # All third-party actions are pinned to a commit SHA (repo convention); the
 # trailing comment records the human-readable version.

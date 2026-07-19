@@ -55,6 +55,28 @@ inputs:
 runs:
   using: composite
   steps:
+    # `if:` conditionals compare strings, they don't validate them — a
+    # malformed `blocking` value (a typo, `"1"`, `"no"`) is simply != 'true',
+    # so the later gate step's `if: inputs.blocking == 'true'` would SKIP the
+    # gate rather than error, silently disabling the security check instead
+    # of failing loud. Reject anything that isn't exactly "true" or "false"
+    # up front so a bad input fails closed, not open. (Deliberately
+    # case-sensitive, stricter than the `if:` expression's own
+    # case-insensitive `==` — both call sites in this repo already pass the
+    # literal lowercase strings, so this costs nothing today.)
+    - name: Validate blocking input
+      shell: bash
+      env:
+        BLOCKING: ${{ inputs.blocking }}
+      run: |
+        case "$BLOCKING" in
+          true|false) ;;
+          *)
+            echo "::error::govulncheck action's 'blocking' input must be exactly \"true\" or \"false\" (got: \"$BLOCKING\")."
+            exit 1
+            ;;
+        esac
+
     - name: Install govulncheck
       shell: bash
       run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
@@ -76,13 +98,30 @@ runs:
     # package pattern, vuln-DB fetch failure). That failure is loud in BOTH
     # blocking and report-only mode — findings are optionally non-blocking,
     # a broken scan never is.
+    #
+    # Written to $RUNNER_TEMP, NOT the checkout, and NEVER `git add`ed
+    # (issue #143 round 5): an earlier version wrote it into the workspace,
+    # which is harmless in build.yml's Backend job but was, once govulncheck
+    # briefly ran as steps inside release.yml's `goreleaser` job, an
+    # UNTRACKED file that made GoReleaser's own git-dirty check
+    # (`git status --porcelain`, which lists untracked files) abort every
+    # release. That bug is now also fixed by running govulncheck in its own
+    # job (see release.yml's header comment) — but keeping the SARIF out of
+    # the checkout entirely, here, means no future caller of this action can
+    # reintroduce that failure mode by adding it to the wrong job, and no
+    # `.gitignore` entry is required (gitignoring would NOT have fixed the
+    # original bug — `git status --porcelain` excludes gitignored files, so
+    # an entry would have silently disarmed GoReleaser's own tripwire instead
+    # of tripping it; verified in a throwaway repo).
     - name: Generate SARIF report
+      id: report
       shell: bash
       env:
         PKGS: ${{ inputs.pkgs }}
       run: |
+        outfile="${RUNNER_TEMP}/govuln.sarif"
         set +e
-        govulncheck -format sarif $PKGS > govuln.sarif
+        govulncheck -format sarif $PKGS > "$outfile"
         code=$?
         set -e
         case "$code" in
@@ -92,6 +131,7 @@ runs:
             exit "$code"
             ;;
         esac
+        echo "sarif_path=${outfile}" >> "$GITHUB_OUTPUT"
 
     # Runs only after the report step above succeeds — no continue-on-error,
     # no if: always() (mirrors the Trivy uploads' ordering-based invariant):
@@ -100,7 +140,7 @@ runs:
     - name: Upload SARIF to Security tab
       uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
       with:
-        sarif_file: govuln.sarif
+        sarif_file: ${{ steps.report.outputs.sarif_path }}
         category: ${{ inputs.category }}
 
     # The actual blocking gate, only in blocking mode: a second, plain-text

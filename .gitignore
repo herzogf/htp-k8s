@@ -5,16 +5,6 @@
 # GoReleaser build output (issue #30).
 /dist/
 
-# govulncheck SARIF report (issue #143). Defense in depth, not the actual
-# fix: the real fix is running govulncheck in its own job/checkout so it can
-# never land in the workspace `goreleaser release --clean` treats as the
-# source of truth (see release.yml's header comment, "Round-4 fix") — an
-# untracked SARIF there fails GoReleaser's git-dirty check regardless of
-# whether it's gitignored (GoReleaser's `CheckDirty` runs `git status
-# --porcelain`, which lists untracked files with or without this entry).
-# This just keeps it out of `git status`/`git add -A` noise in local dev.
-govuln.sarif
-
 # ADR-0011 layer-3 video capture harness (issue #120): captured video/JPEG
 # frames/pose-analysis output, and the runtime-only node_modules symlink
 # run.sh (and the `test` task's permanent pure-math Vitest suite) creates
