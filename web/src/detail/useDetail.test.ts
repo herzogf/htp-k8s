@@ -1,10 +1,16 @@
 import { renderHook, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makePodDetail, makeTowerDetail } from '../test-support/sceneFixtures'
 import { usePodDetail, useTowerDetail } from './useDetail'
 
-// getApiBaseUrl() with no VITE_WS_URL derives http://localhost:8080 (see config).
+// getApiBaseUrl() derives the origin from window.location by default (see
+// config); stub it so the derived base is deterministic regardless of
+// jsdom's own default test URL.
 const BASE = 'http://localhost:8080'
+
+beforeEach(() => {
+  vi.stubGlobal('location', { protocol: 'http:', host: 'localhost:8080' })
+})
 
 afterEach(() => {
   vi.unstubAllGlobals()

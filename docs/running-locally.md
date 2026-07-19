@@ -136,7 +136,7 @@ The binary takes a few flags (each also has an `HTP_K8S_*` environment fallback)
 
 | Flag | Env | Purpose |
 | --- | --- | --- |
-| `-addr` | `HTP_K8S_ADDR` | Listen address; default `127.0.0.1:8080` (**loopback only** — there's no auth layer, so nothing is reachable off this machine unless you opt in; see [ADR-0012](adr/0012-secure-by-default-network-binding.md)). Pass `-addr :8080` to widen it — but that alone only reaches `/api` directly (curl, custom tooling); a remote *browser* additionally needs the frontend rebuilt with `VITE_WS_URL`, same as changing the port does. See the `/ws` gotcha below. |
+| `-addr` | `HTP_K8S_ADDR` | Listen address; default `127.0.0.1:8080` (**loopback only** — nothing is reachable off this machine unless you opt in). Pass `-addr :8080` (or any other address) to widen it — the frontend derives its `/ws`/`/api` target from the page's own origin (issue #146), so a remote browser reaches the live scene without a frontend rebuild (origin root only — a reverse proxy serving htp-k8s under a sub-path isn't supported yet). **There is still no auth layer**, so widening this is a deliberate trade: anyone who can reach the port gets full, unauthenticated read access to your cluster through the UI, not just the raw API — see [ADR-0012](adr/0012-secure-by-default-network-binding.md). |
 | `-demo` | `HTP_K8S_DEMO` | Auto-start Demo Mode at launch — handy for unattended showcase runs. |
 | `-demo-seed` | `HTP_K8S_DEMO_SEED` | Fix the canyon-tour PRNG seed so a flight is reproducible (ADR-0010). A random seed is chosen and logged otherwise. |
 | `-namespace-filter` | `HTP_K8S_NAMESPACE_FILTER` | Preset a name-pattern Namespace/Project filter (shell wildcards, e.g. `openshift-*`). |
@@ -154,17 +154,6 @@ Tower arrangement — the tour is a deterministic function of the seed plus the 
 
 ## Gotchas
 
-- **The `/ws` URL is baked in at build time — this also means `-addr`/`HTP_K8S_ADDR`
-  alone never makes the live scene reachable from another machine.** The frontend
-  defaults to `ws://localhost:8080/ws` (`DEFAULT_WS_URL` in `web/src/config.ts`),
-  which a browser resolves relative to *itself*, not to wherever htp-k8s is
-  running — so **run on port 8080** (the default) for the same-machine case, and
-  for a remote browser, widening `-addr`/`HTP_K8S_ADDR` to `:8080` only gets you a
-  loaded page with no data (the WebSocket dials the *viewer's* localhost). Either
-  way, rebuild with the real address baked in to fix it:
-  `VITE_WS_URL=ws://host:port/ws task build` (the `/api` origin is derived from
-  it, or overridden with `VITE_API_URL`). Passing `-addr` alone moves the server
-  but not the URL the already-built frontend dials.
 - **No cluster, no start.** The binary probes the cluster on startup and **exits
   non-zero if the API server is unreachable** (implemented for issue #9). A cluster
   that's reachable but where you can't list Nodes doesn't fail — it degrades to

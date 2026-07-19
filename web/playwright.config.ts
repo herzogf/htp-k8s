@@ -9,10 +9,11 @@ import { defineConfig, devices } from '@playwright/test'
 const webDir = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(webDir, '..')
 
-// Port the built binary listens on for the e2e run. The frontend's WebSocket
-// URL is baked in at build time (src/config.ts), so the build below is handed a
-// matching VITE_WS_URL — that keeps the served page and its /ws endpoint on the
-// same port whatever port is chosen. Overridable to dodge a busy 8080 locally.
+// Port the built binary listens on for the e2e run. The frontend derives its
+// /ws and /api target from the page's own origin (src/config.ts, issue #146),
+// so the served page and its /ws endpoint stay on the same port automatically
+// whatever port is chosen — no VITE_WS_URL needed. Overridable to dodge a busy
+// 8080 locally.
 const port = Number(process.env.HTP_K8S_E2E_PORT ?? 8080)
 const baseURL = `http://localhost:${port}`
 
@@ -42,10 +43,9 @@ export default defineConfig({
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {
     // Build the real single binary and launch it — the genuine full-system
-    // check (ADR-0004). VITE_WS_URL pins the frontend's /ws target to the same
-    // port the binary serves on. `task build` runs npm ci + vite build + the Go
-    // embed + compile (root Taskfile).
-    command: `VITE_WS_URL=ws://localhost:${port}/ws task build && ./bin/htp-k8s -addr 127.0.0.1:${port}`,
+    // check (ADR-0004). `task build` runs npm ci + vite build + the Go embed +
+    // compile (root Taskfile).
+    command: `task build && ./bin/htp-k8s -addr 127.0.0.1:${port}`,
     cwd: repoRoot,
     // Since issue #9 the binary fails startup unless it can reach a Kubernetes
     // cluster (client-go's default loading rules honor KUBECONFIG / ~/.kube/
