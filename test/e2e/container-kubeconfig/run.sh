@@ -90,6 +90,22 @@ set -euo pipefail
 
 log() { printf '\n=== [container-kubeconfig] %s\n' "$*"; }
 
+# client-go's KUBECONFIG resolution accepts a colon-separated list of files
+# (restConfig's doc comment in internal/kube/client.go calls this out
+# explicitly), but the `stat` below needs exactly one real file to check the
+# 0600 premise against. In CI, KUBECONFIG is always the single file
+# kind-action wrote, so this never fires there — but the documented local
+# invocation above (`KUBECONFIG=$HOME/.kube/config ... run.sh`) is exactly
+# the kind of value a developer's shell might carry a longer, colon-joined
+# KUBECONFIG in already. Fail with a clear, actionable message rather than
+# a bare, confusing `stat: cannot stat` on a path containing a literal ':'.
+case "${KUBECONFIG}" in
+*:*)
+  echo "FAIL: KUBECONFIG (${KUBECONFIG}) is a colon-separated list of files. This script needs a single kubeconfig file to check the issue #128 permission premise against — re-run with KUBECONFIG set to just the one file kind wrote (e.g. KUBECONFIG=\$HOME/.kube/config)." >&2
+  exit 1
+  ;;
+esac
+
 # This whole script's value rests on a real kind/kubectl-written kubeconfig
 # being genuinely owner-read-only (issue #128's actual failure mode) — assert
 # that against KUBECONFIG, the kubeconfig kind/kind-action actually wrote via
@@ -151,13 +167,17 @@ HOST_USER="$(id -u):$(id -g)"
 # HTP_K8S_ADDR=:8080, matching the documented recipe exactly) to a HOST port
 # via `-p 127.0.0.1:<port>:8080`, so a hardcoded port risks colliding with
 # anything else already listening on the host — another job, another agent's
-# process, a developer's own process. Pick a random candidate in the
-# ephemeral range and probe it with bash's own /dev/tcp (no extra tool
-# dependency), retrying on collision.
+# process, a developer's own process. Pick a random candidate and probe it
+# with bash's own /dev/tcp (no extra tool dependency), retrying on collision.
+# Candidates are drawn from 20000-32767, deliberately kept BELOW Linux's
+# default ephemeral port range (32768-60999, net.ipv4.ip_local_port_range):
+# the probe-then-bind below is inherently TOCTOU-racy (nothing stops another
+# process claiming the port between the probe and `docker run`'s bind), and
+# picking from the ephemeral range would widen that race further by
+# competing with every outbound connection the host makes in the meantime.
 port_is_free() {
   local port="$1"
   if (exec 3<>"/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
-    exec 3>&- 2>/dev/null || true
     return 1 # connected -> something is already listening
   fi
   return 0 # connection refused/failed -> free
@@ -166,7 +186,7 @@ port_is_free() {
 pick_free_port() {
   local port attempt
   for attempt in $(seq 1 20); do
-    port=$(((RANDOM % 20000) + 20000))
+    port=$(((RANDOM % 12768) + 20000)) # 20000-32767, see the note above
     if port_is_free "${port}"; then
       echo "${port}"
       return 0
@@ -345,6 +365,22 @@ rc=$?
 set -e
 if [ "${rc}" -eq 0 ]; then
   echo "FAIL: expected a non-zero exit when KUBECONFIG points at a missing file, got 0. Output:" >&2
+  echo "${out}" >&2
+  exit 1
+fi
+# Positive proof of life FIRST (issue #129): the two checks below only assert
+# the ABSENCE of certain strings, so they'd pass just as well if the
+# container failed early for some unrelated reason (a broken image, a
+# missing binary, docker itself refusing to start it) — neither string would
+# be present then either, and the subtest would prove nothing. Assert
+# affirmatively that the real client-go resolution actually ran and produced
+# exactly the plain "empty config" error restConfig's non-retry branch wraps
+# (verified against a real run of internal/kube.restConfig() with
+# KUBECONFIG set to this same nonexistent path) — proof this container
+# genuinely reached and exercised the code path under test, not merely that
+# two unrelated strings happen to be missing from whatever it did output.
+if ! echo "${out}" | grep -q "no configuration has been provided"; then
+  echo "FAIL: did not get the expected plain client-go empty-config error — the container may have failed for an unrelated reason before ever reaching the KUBECONFIG resolution this test exercises. Output:" >&2
   echo "${out}" >&2
   exit 1
 fi
