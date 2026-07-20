@@ -45,24 +45,30 @@
 #     varied cluster rather than two outlier Towers surrounded by empty
 #     ones, and there's a real performance signal to sample.
 #
-# DEFAULTS AND WHY THEY'RE SMALLER THAN ADR-0004'S "50+ nodes, thousands of
-# pods" ASPIRATION (issue #171 review finding): that figure was never
-# actually rehearsed end to end before this workflow's first scheduled run,
-# and doing so here found real problems at it (occlusion in a camera framing
-# formula, a too-tight demo-mode-roofline.spec.ts timeout, a demoMode.ts
-# climb-out that can't keep up with a very tall roofline — see HOT_POD_COUNT's
-# own comment above — and an unverified 60-minute job budget against a
-# ~3,900-object serial `kubectl apply`). The shipped default below —
-# NODE_COUNT=15 (16 Towers with the real kind node), ~1,231 pods with these
-# defaults — IS rehearsed end to end (a real kind+KWOK cluster, seeded from
-# cold in well under 3 minutes, followed by the full `task web:e2e:nightly`
-# suite, all passing, repeatedly) and is already a qualitatively different
-# scale tier than the PR suite's 6 nodes/30 pods — comfortably past both the
-# wrap and height-growth thresholds above. The larger, ADR-0004-aspirational
-# scale (50 nodes, ~3,671 pods with these same per-node defaults) is still
-# reachable, but only as a conscious, manually-triggered `workflow_dispatch`
-# run (nightly.yml's `node_count` input) — never the unattended scheduled
-# trigger — until it, too, is rehearsed end to end at that scale.
+# DEFAULT NODE COUNT — NOW AT ADR-0004'S "50+ nodes, thousands of pods"
+# TARGET (issue #174): NODE_COUNT below is 50 (51 Towers with the real kind
+# node), 3,671 SEEDED pods with these defaults (the rendered scene reports a
+# somewhat higher total — see nightly.yml's header comment for why:
+# DaemonSet/system pods this script neither creates nor counts). This raises
+# PR #171's original, deliberately conservative 15-node/~1,231-pod default
+# (itself a step down from an EARLIER, never-rehearsed 50-node default that
+# PR #171's own review found real problems at — occlusion in a camera
+# framing formula, a too-tight demo-mode-roofline.spec.ts timeout, a
+# demoMode.ts climb-out that can't keep up with a very tall roofline — see
+# HOT_POD_COUNT's own comment above for that last one), now that #174 has
+# rehearsed 50 nodes end to end via `workflow_dispatch` on the merged
+# workflow (GitHub Actions run 29761536223, 2026-07-20: all six nightly jobs
+# green, zero test retries, seeding from cold in ~7 minutes, the full-scale
+# job's own total wall clock 12m19s against its 60-minute budget) — so this
+# is now the rehearsed, shipped scheduled default, not an aspiration.
+# Raising NODE_COUNT alone is what made this safe: scene height keys off the
+# busiest Tower (HOT_POD_COUNT, unchanged below), so h ≈ 11.24 held
+# identically at both 15 and 50 nodes, and the climb-out problem above (which
+# is HOT_POD_COUNT-driven, not NODE_COUNT-driven) did not recur.
+# HOT_POD_COUNT stays at 260, not the 420 this script used to default to,
+# pending #173. An even larger NODE_COUNT remains reachable as a conscious
+# `workflow_dispatch` override (nightly.yml's `node_count` input) without
+# editing this file.
 #
 # All pods are created directly Running (no phase variety) — this script is
 # about SCALE and LAYOUT, not phase-color coverage (seed.sh's modest tier
@@ -87,10 +93,10 @@ PAUSE_IMAGE="registry.k8s.io/pause:3.10"
 
 # Overridable via env for local experimentation; the SCHEDULED nightly
 # workflow trigger uses these defaults (see the header comment above for why
-# NODE_COUNT is 15, not ADR-0004's 50+ aspiration). A manually-triggered
-# `workflow_dispatch` run can override any of these to rehearse at a larger
-# (or smaller) scale without editing this file.
-NODE_COUNT="${HTP_K8S_SEED_SCALE_NODE_COUNT:-15}"
+# NODE_COUNT is 50, matching ADR-0004's own "50+ nodes" target). A
+# manually-triggered `workflow_dispatch` run can override any of these to
+# rehearse at a larger (or smaller) scale without editing this file.
+NODE_COUNT="${HTP_K8S_SEED_SCALE_NODE_COUNT:-50}"
 HOT_POD_COUNT="${HTP_K8S_SEED_SCALE_HOT_POD_COUNT:-260}"
 SPARSE_POD_COUNT="${HTP_K8S_SEED_SCALE_SPARSE_POD_COUNT:-3}"
 MEDIUM_POD_MIN="${HTP_K8S_SEED_SCALE_MEDIUM_POD_MIN:-40}"

@@ -93,15 +93,19 @@ async function waitForPopulatedScene(page: Page, minPods: number): Promise<void>
       return !!hook && hook.pods().length >= min
     },
     minPods,
-    // Measured (issue #171 rehearsal, this suite's shipped default scale):
-    // navigation-to-populated in the ~1.4s range on that rehearsal hardware
-    // (see perf.spec.ts's own nightly-perf-summary.json for the canonical,
-    // per-run measurement of this exact number) — so 90s is enormous
-    // headroom even against a materially slower/contended CI runner. Kept
-    // wide rather than trimmed to a tight multiple of the local number
-    // specifically because a GitHub-hosted runner is not the hardware this
-    // was measured on; $GITHUB_STEP_SUMMARY's per-test wall clock is what
-    // would show this margin actually eroding on real CI runs over time.
+    // Measured (issue #174 rehearsal, this suite's shipped 50-node/3,671-pod
+    // default scale, GitHub Actions run 29761536223): navigation-to-populated
+    // 2,012ms on that CI runner (up from ~1,401ms at the earlier 15-node
+    // default — see perf.spec.ts's own nightly-perf-summary.json for the
+    // canonical, per-run measurement of this exact number) — so 90s is still
+    // ~45x that observation, enormous headroom even against a materially
+    // slower/contended CI runner. Deliberately KEPT this wide rather than
+    // tightened toward that ~45x multiple: a generous budget costs nothing
+    // on a green run and protects against a slow/contended runner, whereas
+    // tightening it buys nothing and risks an unattended flake; a
+    // GitHub-hosted runner is also not the hardware this was measured on.
+    // $GITHUB_STEP_SUMMARY's per-test wall clock is what would show this
+    // margin actually eroding on real CI runs over time.
     { timeout: 90_000 },
   )
 }

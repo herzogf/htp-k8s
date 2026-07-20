@@ -3,10 +3,10 @@ import path from 'node:path'
 import { expect, test } from '@playwright/test'
 
 // Nightly full-scale performance signal (issue #29, ADR-0004): the nightly
-// job's full-scale KWOK seed (test/e2e/kwok/seed-scale.sh — 15 nodes,
-// ~1,231 pods by default; see that script's header for why this is smaller
-// than ADR-0004's own "50+ nodes, thousands of pods" aspiration and how to
-// reach it on demand) exists to exercise the rendering pipeline
+// job's full-scale KWOK seed (test/e2e/kwok/seed-scale.sh — 50 nodes,
+// 3,671 SEEDED pods by default, ADR-0004's own "50+ nodes, thousands of
+// pods" target — see that script's header for the full history) exists to
+// exercise the rendering pipeline
 // (InstancedMesh layout, the per-Pod name-texture atlas, #59's
 // wrap/height-growth math) at a scale the PR-blocking job deliberately
 // never reaches — but exercising it is only half the point

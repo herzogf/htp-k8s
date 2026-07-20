@@ -100,15 +100,19 @@ async function waitForPopulatedScene(page: Page, minPods: number): Promise<void>
       return !!hook && hook.pods().length >= min
     },
     minPods,
-    // Measured (issue #171 rehearsal, this suite's shipped default scale):
-    // navigation-to-populated in the ~1.4s range on that rehearsal hardware
-    // (see perf.spec.ts's own nightly-perf-summary.json for the canonical,
-    // per-run measurement of this exact number) — so 90s is enormous
-    // headroom even against a materially slower/contended CI runner. Kept
-    // wide rather than trimmed to a tight multiple of the local number
-    // specifically because a GitHub-hosted runner is not the hardware this
-    // was measured on; $GITHUB_STEP_SUMMARY's per-test wall clock is what
-    // would show this margin actually eroding on real CI runs over time.
+    // Measured (issue #174 rehearsal, this suite's shipped 50-node/3,671-pod
+    // default scale, GitHub Actions run 29761536223): navigation-to-populated
+    // 2,012ms on that CI runner (up from ~1,401ms at the earlier 15-node
+    // default — see perf.spec.ts's own nightly-perf-summary.json for the
+    // canonical, per-run measurement of this exact number) — so 90s is still
+    // ~45x that observation, enormous headroom even against a materially
+    // slower/contended CI runner. Deliberately KEPT this wide rather than
+    // tightened toward that ~45x multiple: a generous budget costs nothing
+    // on a green run and protects against a slow/contended runner, whereas
+    // tightening it buys nothing and risks an unattended flake; a
+    // GitHub-hosted runner is also not the hardware this was measured on.
+    // $GITHUB_STEP_SUMMARY's per-test wall clock is what would show this
+    // margin actually eroding on real CI runs over time.
     { timeout: 90_000 },
   )
 }
@@ -127,14 +131,16 @@ test('demo mode over a grown scene: the automated flight climbs above the REAL (
   // Unlike the PR-time demo-canyon-tour.spec.ts this mirrors (which budgets
   // FLIGHT_DURATION_MS + 60s total), this nightly spec's own
   // waitForPopulatedScene ALONE budgets up to 90s against the full-scale
-  // seed — measured at ~1.4s on this issue's rehearsal hardware (see
-  // perf.spec.ts's own nightly-perf-summary.json for the canonical, per-run
-  // measurement of this), so 90s is enormous headroom for populate alone
-  // even accounting for a materially slower/contended CI runner; kept wide
-  // rather than trimmed to a tighter multiple of that number specifically
-  // because CI hardware is not the same hardware this was measured on (see
-  // FLIGHT_DURATION_MS's own comment for the same caveat, where it matters
-  // far more). 90s populate + 260s flight + two toggle round-trips + margin.
+  // seed — measured at 2,012ms (issue #174 rehearsal, this suite's shipped
+  // 50-node/3,671-pod default; see perf.spec.ts's own
+  // nightly-perf-summary.json for the canonical, per-run measurement of
+  // this), so 90s is ~45x that observation, still enormous headroom for
+  // populate alone even accounting for a materially slower/contended CI
+  // runner; kept wide rather than trimmed toward that ~45x multiple
+  // specifically because CI hardware is not the same hardware this was
+  // measured on (see FLIGHT_DURATION_MS's own comment for the same caveat,
+  // where it matters far more). 90s populate + 260s flight + two toggle
+  // round-trips + margin.
   test.setTimeout(FLIGHT_DURATION_MS + 150_000)
 
   await page.goto('/')
