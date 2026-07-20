@@ -25,6 +25,7 @@ import {
   PERIMETER_OFFSET,
   sampleDemoIntro,
   sampleDemoTourPose,
+  stepBoundedFollower,
   stepDemoTour,
   stepRollRecovery,
   type RollRecovery,
@@ -1212,5 +1213,88 @@ describe('stepRollRecovery', () => {
     const { roll, next } = stepRollRecovery({ from: 0.3, elapsed: 0 }, DEMO_TRANSITION_SECONDS)
     expect(roll).toBe(0)
     expect(next).toBeNull()
+  })
+})
+
+describe('stepBoundedFollower (#117 items 1 and 5)', () => {
+  // VIEW_DISTANCE_FOLLOWER's real tuning (maxRate = CANYON_TRAVEL_SPEED * 2,
+  // maxAccel = CANYON_TRAVEL_SPEED * 6, responseTime = 0.4s at the real
+  // CANYON_TRAVEL_SPEED = 4.4): satisfies the non-overshoot condition
+  // (maxAccel x responseTime > maxRate) for a *static* target, but that
+  // condition — as this follower's own doc comment records — does not hold
+  // against a genuinely *moving* one.
+  const LIMITS = { maxRate: 8.8, maxAccel: 26.4, responseTime: 0.4 }
+  // A target racing toward and through the camera — e.g. the demand-driven
+  // blend suddenly pulling hard onto a much nearer Tower while the aim is
+  // already sweeping — faster than the follower's own maxRate can track,
+  // then continuing on to a negative "distance" and holding. Exactly the
+  // moving-target shape the clamp's doc comment describes.
+  function racingTarget(t: number): number {
+    return Math.max(6 - 24 * t, -6)
+  }
+
+  /** Runs LIMITS (optionally clamped) against {@link racingTarget} for 2s at 60fps and returns the minimum value reached. */
+  function runRacingTarget(clamp?: { min?: number; max?: number }): number {
+    let value = 6
+    let rate = 0
+    let min = value
+    const dt = 1 / 60
+    for (let i = 0; i < 120; i++) {
+      const t = (i + 1) * dt
+      const result = stepBoundedFollower(value, rate, racingTarget(t), dt, { ...LIMITS, clamp })
+      value = result.value
+      rate = result.rate
+      min = Math.min(min, value)
+    }
+    return min
+  }
+
+  it('a moving target really can overshoot an unclamped follower past zero (the premise #117 item 1 guards against)', () => {
+    // Two-state evidence for VIEW_DISTANCE_FOLLOWER's clampMin doc comment:
+    // this is the same follower math, unclamped, given a target racing
+    // through zero. If a plain second-order follower could never cross the
+    // sign it chases, the clamp guard would be redundant; it can.
+    const min = runRacingTarget(undefined)
+    expect(min).toBeLessThan(-5)
+  })
+
+  it('a one-sided clampMin holds the floor exactly against the same overshooting target', () => {
+    const min = runRacingTarget({ min: 2 })
+    expect(min).toBe(2)
+  })
+
+  it('a one-sided clamp (min only) never touches the untouched side', () => {
+    // The old clampMin/clampMax shape (#117 item 5) applied independently, so
+    // this always worked — but the fold into one `clamp: {min?, max?}` object
+    // must keep it working: a min-only clamp must not accidentally cap the
+    // value from above too.
+    const result = stepBoundedFollower(2, 0, 1000, 10, { ...LIMITS, clamp: { min: 0 } })
+    expect(result.value).toBeGreaterThan(50)
+  })
+
+  it("a two-sided clamp (roll's shape) holds both bounds", () => {
+    const high = stepBoundedFollower(0, 0, 1000, 10, {
+      ...LIMITS,
+      clamp: { min: -1, max: 1 },
+    })
+    expect(high.value).toBeLessThanOrEqual(1)
+    const low = stepBoundedFollower(0, 0, -1000, 10, {
+      ...LIMITS,
+      clamp: { min: -1, max: 1 },
+    })
+    expect(low.value).toBeGreaterThanOrEqual(-1)
+  })
+
+  it('the angular flag (folded from the old positional argument, #117 item 5) still takes the shortest arc', () => {
+    // From just past +π chasing a target just past -π: the shortest arc is
+    // the short way across the wrap, not the long way straight through 0.
+    const result = stepBoundedFollower(Math.PI - 0.1, 0, -Math.PI + 0.1, 1 / 60, {
+      maxRate: 100,
+      maxAccel: 1000,
+      responseTime: 0.05,
+      angular: true,
+    })
+    // Wrapped toward +π (increasing), not swung all the way down toward 0.
+    expect(result.value).toBeGreaterThan(Math.PI - 0.1)
   })
 })
