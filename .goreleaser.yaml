@@ -175,9 +175,23 @@ release:
   # live. If this footer or README's Supply chain section is restructured
   # again, both the `--signer-workflow` flag AND the digest-pinning sentence
   # need to move together — losing either one silently weakens the
-  # published verification story. (The further guardrail about NOT copying
-  # this tag-based pattern onto a moving tag without a digest instruction,
-  # issue #64, lives as a comment on that issue, not here or in an ADR.)
+  # published verification story. The further guardrail about NOT copying
+  # this tag-based pattern onto a moving tag without a digest instruction
+  # (issue #64) is now answered for real: README.md's Supply chain section
+  # carries that instruction, and ADR-0005 records the moving-tag rule and
+  # why moving tags are a pull convenience rather than a verification
+  # target — see both rather than duplicating either here.
+  #
+  # Moving tags (issue #64): a STABLE release also gets `X.Y` and, if it's
+  # the newest stable release overall, bare `X` (once X >= 1) and `latest`.
+  # This footer can't assert either "newest" as fact at render time — the
+  # `goreleaser` job (this file) and ko's `image` job (which actually
+  # decides and publishes the tag set, via .github/scripts/compute-image-
+  # tags.mjs) run in PARALLEL, same reason the digest above can't be
+  # templated in — so both hedge honestly ("if this is...") instead of
+  # asserting something this footer can't verify. The real rule lives in
+  # ADR-0005 and that script, not here — this footer is prose, not a second
+  # implementation of it.
   #
   # NOTE the leading blank line: GoReleaser's body template joins the
   # changelog and this footer with exactly ONE newline (see
@@ -199,7 +213,10 @@ release:
 
     - `ghcr.io/herzogf/htp-k8s:{{ .Tag }}` (`linux/amd64`, `linux/arm64`)
     {{- if not .Prerelease }}
-    - `ghcr.io/herzogf/htp-k8s:latest` also points at this release
+    - If this is the newest patch in its minor, `:{{ .Major }}.{{ .Minor }}` also points here
+    - If this is the newest stable release overall, it's also `:latest`{{ if ge .Major 1 }} and `:{{ .Major }}`{{ end }}
+
+    Moving tags are a pull convenience, not a verification target — they can repoint on a later release. Verify against the exact tag above (`{{ .Tag }}`).
     {{- end }}
 
     Pull/run: [README Quickstart](https://github.com/herzogf/htp-k8s#quickstart); verify: [README Supply chain](https://github.com/herzogf/htp-k8s#supply-chain); details: [Running & developing locally](https://github.com/herzogf/htp-k8s/blob/main/docs/running-locally.md#the-container-image).

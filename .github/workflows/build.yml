@@ -244,6 +244,18 @@ jobs:
         working-directory: test/e2e/capture
         run: task test
 
+      # release.yml's `image` job computes the stable-release moving-tag set
+      # (bare MAJOR / MAJOR.MINOR / `latest`, issue #64) via a pure JS module
+      # specifically so PR CI CAN exercise it — release.yml itself is
+      # tag-triggered and structurally can never run on this PR (see
+      # .github/scripts/compute-image-tags.mjs's header, and the #156 lesson
+      # it cites). Unlike the capture-harness suite above, this needs no
+      # web/node_modules symlink: the module has zero dependencies of its
+      # own, so Node's own built-in test runner is enough.
+      - name: Release image-tag computation tests (.github/scripts)
+        working-directory: .
+        run: node --test '.github/scripts/*.test.mjs'
+
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. npm audit's default
       # exit code already fails on any reported vulnerability.

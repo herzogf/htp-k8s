@@ -47,6 +47,12 @@ tasks:
       # after web:test so web/node_modules (which it borrows via a symlink)
       # already exists.
       - task: capture:test
+      # The release image-tag computation's pure-function suite (issue #64,
+      # .github/scripts/compute-image-tags.mjs — see its header for why this
+      # logic lives in a testable module rather than release.yml's inline
+      # shell). No external dependencies (Node's own built-in test runner),
+      # unlike web:test/capture:test above, so it needs no install step.
+      - node --test '.github/scripts/*.test.mjs'
       # Scoped to our own Go packages rather than "./...": once web:test has
       # run `npm ci`, web/node_modules exists and can itself contain stray
       # vendored .go files (e.g. the "flatted" package does) that "./..."
