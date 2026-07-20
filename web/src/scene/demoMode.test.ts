@@ -25,9 +25,11 @@ import {
   PERIMETER_OFFSET,
   sampleDemoIntro,
   sampleDemoTourPose,
+  stepBoundedFollower,
   stepDemoTour,
   stepRollRecovery,
   type RollRecovery,
+  VIEW_DISTANCE_FOLLOWER,
 } from './demoMode'
 import { type Pose } from './focus'
 import {
@@ -1212,5 +1214,108 @@ describe('stepRollRecovery', () => {
     const { roll, next } = stepRollRecovery({ from: 0.3, elapsed: 0 }, DEMO_TRANSITION_SECONDS)
     expect(roll).toBe(0)
     expect(next).toBeNull()
+  })
+})
+
+describe('stepBoundedFollower (#117 items 1 and 5)', () => {
+  // #117 item 1, round 2. Round 1's test claimed to demonstrate a moving
+  // target "overshooting" an unclamped follower — review caught that the
+  // scenario (a target only ever *falling*, 6 down to -6, then held) only
+  // measures the follower *lagging behind* a target moving faster than its
+  // own maxRate: `value` never actually drops below `target` at any point
+  // (instrumented: min(value - target) = 0.000 across the whole run). That
+  // is not overshoot.
+  //
+  // Re-derived from the follower math instead of searching for a scenario:
+  // reaching this follower's maxRate via any state its *own* continuous
+  // dynamics could produce (never an externally reset rate) requires a
+  // spin-up/tracking lag of at least maxRate² / (2 × maxAccel) between
+  // value and target — which upper-bounds how close the two can be while
+  // carrying near-maximum rate. A ~1.9M-trial random search over
+  // piecewise-linear target trajectories (2-15 segments, rates to
+  // ±1200/s, always respecting a positive floor, follower seeded
+  // consistently with the target's own start — i.e. only physically
+  // reachable states) found no counterexample: undershoot stayed at noise
+  // level (≤ 0.008) in every trial. See VIEW_DISTANCE_FOLLOWER's doc
+  // comment for the full derivation. This investigation did **not**
+  // establish that the follower can undershoot a strictly positive demand
+  // reachable in production — the opposite of round 1's claim.
+  //
+  // What the tests below establish instead, and it is real: the *clamp
+  // mechanism itself* is correct — exact, one-sided, and inert on the
+  // untouched side — so it is a free, correct defence against the
+  // catastrophic failure mode (a negative view distance flips the rendered
+  // yaw by π) if some future change ever does reach it, even though this
+  // investigation found no such path today.
+
+  it("the clamp holds a strictly positive floor exactly, even from the follower's own worst-case rate — and an unclamped follower genuinely breaches it from that same state", () => {
+    // The tightest state the follower's own dynamics can produce close to a
+    // target (see the derivation above): value at the target, carrying rate
+    // = -maxRate. Explicitly *not* claimed to be reachable by continuous
+    // motion against a positive-floor-respecting target (the search above
+    // found no path to it) — constructed directly as the single worst
+    // starting condition for testing the clamp mechanism itself, which must
+    // hold regardless of how that state was reached.
+    const floor = 2
+    const worstCaseValue = floor + 0.05
+    const worstCaseRate = -VIEW_DISTANCE_FOLLOWER.maxRate
+    const target = (t: number) => worstCaseValue + 40 * t // recedes upward, away from the floor
+
+    function run(clampMin?: number): number {
+      let value = worstCaseValue
+      let rate = worstCaseRate
+      let min = value
+      const dt = 1 / 60
+      for (let i = 0; i < 30; i++) {
+        const t = (i + 1) * dt
+        const result = stepBoundedFollower(value, rate, target(t), dt, {
+          ...VIEW_DISTANCE_FOLLOWER,
+          clamp: clampMin === undefined ? undefined : { min: clampMin },
+        })
+        value = result.value
+        rate = result.rate
+        min = Math.min(min, value)
+      }
+      return min
+    }
+
+    // Unclamped: genuinely breaches the floor from this state (not merely
+    // lags behind a still-falling target, as round 1's flawed test did).
+    expect(run(undefined)).toBeLessThan(floor - 1)
+    // Clamped at the real floor: holds exactly.
+    expect(run(floor)).toBe(floor)
+  })
+
+  it('a one-sided clamp (min only) never touches the untouched side', () => {
+    // The old clampMin/clampMax shape (#117 item 5) applied independently, so
+    // this always worked — but the fold into one `clamp: {min?, max?}` object
+    // must keep it working: a min-only clamp must not accidentally cap the
+    // value from above too.
+    const result = stepBoundedFollower(2, 0, 1000, 10, {
+      ...VIEW_DISTANCE_FOLLOWER,
+      clamp: { min: 0 },
+    })
+    expect(result.value).toBeGreaterThan(50)
+  })
+
+  it("a two-sided clamp (roll's shape) holds both bounds", () => {
+    const limits = { ...VIEW_DISTANCE_FOLLOWER, clamp: { min: -1, max: 1 } }
+    const high = stepBoundedFollower(0, 0, 1000, 10, limits)
+    expect(high.value).toBeLessThanOrEqual(1)
+    const low = stepBoundedFollower(0, 0, -1000, 10, limits)
+    expect(low.value).toBeGreaterThanOrEqual(-1)
+  })
+
+  it('the angular flag (folded from the old positional argument, #117 item 5) still takes the shortest arc', () => {
+    // From just past +π chasing a target just past -π: the shortest arc is
+    // the short way across the wrap, not the long way straight through 0.
+    const result = stepBoundedFollower(Math.PI - 0.1, 0, -Math.PI + 0.1, 1 / 60, {
+      maxRate: 100,
+      maxAccel: 1000,
+      responseTime: 0.05,
+      angular: true,
+    })
+    // Wrapped toward +π (increasing), not swung all the way down toward 0.
+    expect(result.value).toBeGreaterThan(Math.PI - 0.1)
   })
 })

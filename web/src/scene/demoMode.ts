@@ -345,8 +345,13 @@ const GLANCE_PROBABILITY = 0.2
 export const GLANCE_MAX_ANGLE = Math.PI / 12
 const GLANCE_DURATION_SECONDS = 3.5
 
-/** How far ahead along the path's tangent the forward look-at point sits. */
-const LOOKAT_LOOKAHEAD_DISTANCE = TOWER_SPACING * 2
+/**
+ * How far ahead along the path's tangent the forward look-at point sits.
+ * Exported for the layer-1 "never pins the forward aim" invariant (#117 item
+ * 2, demoModeSmoothness.test.ts), which asserts against this constant
+ * directly rather than duplicating it.
+ */
+export const LOOKAT_LOOKAHEAD_DISTANCE = TOWER_SPACING * 2
 
 /**
  * Hard caps on the rendered view's angular velocity (#91 smoothness pass —
@@ -725,52 +730,96 @@ function bankTargetFromYawRate(yawRate: number): number {
 /**
  * The tuning of one bounded second-order follower (see
  * {@link stepBoundedFollower}): its hard rate cap, its hard acceleration cap,
- * the time constant it chases its target with, and (optionally) a hard clamp
- * on the followed value itself. Each instance should satisfy
- * `maxAccel × responseTime > maxRate` so the rate can always decay at least
- * as fast as the closing demand shrinks — the follower then cannot overshoot
- * its target (the property {@link DEMO_ROLL_MAX_RATE}'s doc comment
- * established for the roll).
+ * the time constant it chases its target with, whether its demand wraps
+ * (the shortest-arc yaw), and (optionally) a hard clamp on the followed value
+ * itself. Each instance should satisfy `maxAccel × responseTime > maxRate` so
+ * the rate can always decay at least as fast as the closing demand shrinks —
+ * the follower then cannot overshoot a *static* target (the property
+ * {@link DEMO_ROLL_MAX_RATE}'s doc comment established for the roll).
+ *
+ * `angular` and `clamp` were folded in here by #117 item 5 (two smells the
+ * #116 review flagged): `angular` used to be a separate positional boolean
+ * argument on {@link stepBoundedFollower} even though every other per-follower
+ * knob already lived in this literal, so a caller reading a call site had to
+ * cross-reference the *last* argument to know whether the follower wrapped.
+ * `clamp`'s two bounds used to be `clampMin`/`clampMax`, independently
+ * optional fields for what is really one concept (a followed-value range) —
+ * bundling them into one optional `{ min?, max? }` makes a *one-sided* clamp
+ * ({@link VIEW_DISTANCE_FOLLOWER}'s floor, #117 item 1) the ordinary,
+ * obviously-supported shape of the type rather than something that happens to
+ * work because two independently-checked fields were each individually
+ * optional.
  */
 interface FollowerLimits {
   readonly maxRate: number
   readonly maxAccel: number
   readonly responseTime: number
-  readonly clampMin?: number
-  readonly clampMax?: number
+  /** Compute the demand through the shortest arc (for the wrapping yaw) rather than a plain difference. */
+  readonly angular?: boolean
+  /** A hard clamp on the followed value itself, applied after every substep. Either bound may be omitted for a one-sided clamp. */
+  readonly clamp?: { readonly min?: number; readonly max?: number }
 }
 
 const ROLL_FOLLOWER: FollowerLimits = {
   maxRate: DEMO_ROLL_MAX_RATE,
   maxAccel: DEMO_ROLL_MAX_ACCEL,
   responseTime: ROLL_RESPONSE_TIME,
-  clampMin: -DEMO_BANK_MAX,
-  clampMax: DEMO_BANK_MAX,
+  clamp: { min: -DEMO_BANK_MAX, max: DEMO_BANK_MAX },
 }
 const VIEW_YAW_FOLLOWER: FollowerLimits = {
   maxRate: VIEW_YAW_MAX_RATE,
   maxAccel: VIEW_YAW_MAX_ACCEL,
   responseTime: VIEW_RESPONSE_TIME,
+  angular: true,
 }
 const VIEW_PITCH_FOLLOWER: FollowerLimits = {
   maxRate: VIEW_PITCH_MAX_RATE,
   maxAccel: VIEW_PITCH_MAX_ACCEL,
   responseTime: VIEW_RESPONSE_TIME,
 }
-const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
+export const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
   maxRate: VIEW_DISTANCE_MAX_RATE,
   maxAccel: VIEW_DISTANCE_MAX_ACCEL,
   responseTime: VIEW_RESPONSE_TIME,
-  // A hard floor on the rendered view distance (#117): the non-overshoot
-  // condition (`maxAccel × responseTime > maxRate`) only holds against a
-  // *static* target — chasing a moving demand, a second-order follower can
-  // overshoot, and a view distance that ever reached ≤ 0 would flip the
-  // reconstructed aim by π (`horizontalReach = cos(pitch) × distance` in
-  // sampleDemoTourPose changes sign). The demand itself is never below
-  // LOOKAT_MIN_HORIZONTAL_DISTANCE (composeLookAt's collapse guard), so a
-  // floor at half of it never engages in legitimate flight; it exists purely
-  // to make the sign flip impossible by construction.
-  clampMin: LOOKAT_MIN_HORIZONTAL_DISTANCE / 2,
+  // A hard floor on the rendered view distance (#117 item 1): a view
+  // distance that ever reached ≤ 0 would flip the reconstructed aim by π
+  // (`horizontalReach = cos(pitch) × distance` in sampleDemoTourPose changes
+  // sign) — a catastrophic failure mode if it ever happened. The
+  // non-overshoot condition this follower satisfies (`maxAccel ×
+  // responseTime > maxRate`) is proven only against a *static* target; a
+  // review of #116 raised the theoretical concern that a genuinely *moving*
+  // demand could let a second-order follower like this one undershoot below
+  // a positive floor the demand itself always respects.
+  //
+  // Investigated (demoMode.test.ts, #117 item 1 round 2 — the first attempt
+  // incorrectly measured plain lag as "overshoot"): derived from the
+  // follower math that reaching this follower's max rate via any
+  // *physically reachable* history (i.e. the state this follower's own
+  // continuous dynamics could actually produce — never an externally reset
+  // rate) requires a lag between the follower and its target of at least
+  // maxRate × responseTime = 3.52: `desired = clamp(error / responseTime,
+  // ±maxRate)` only saturates at maxRate once |error| already reaches that.
+  // That already exceeds the *braking distance* — how far the follower
+  // travels decelerating from maxRate to 0 at maxAccel, maxRate² / (2 ×
+  // maxAccel) = 1.467 — by 2.4x, and follows a fortiori from the documented
+  // non-overshoot condition (`maxAccel × responseTime` = 10.56 > `maxRate` =
+  // 8.8): the margin between the two is exactly what buys this 2.4x. This
+  // upper-bounds how close the two can be while carrying near-maximum rate
+  // — then searched ~1.9M random piecewise-linear target trajectories (2-15
+  // segments, rates up to ±1200/s, always respecting a positive floor,
+  // follower seeded consistently with the target's own start) for a
+  // counterexample. None found: undershoot stayed at noise level (≤ 0.008,
+  // likely discretization) in every trial. This is strong evidence, not a
+  // formal proof, that the follower cannot undershoot a floor the demand
+  // itself always respects, for any demand reachable by continuous motion —
+  // so the catastrophic case this clamp guards against has not been shown
+  // to be reachable in practice. The clamp costs nothing and the failure
+  // mode it prevents is severe, so it stays regardless: a cheap guarantee
+  // against an unproven case, not a fix for an observed or demonstrated
+  // one. The demand itself is never below LOOKAT_MIN_HORIZONTAL_DISTANCE
+  // (composeLookAt's collapse guard), so a floor at half of it never engages
+  // in legitimate flight either way.
+  clamp: { min: LOOKAT_MIN_HORIZONTAL_DISTANCE / 2 },
 }
 
 /**
@@ -781,30 +830,30 @@ const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
  * ±maxRate) at no more than maxAccel per second, and the value integrates
  * that rate — bounded rate *and* bounded acceleration, so the followed signal
  * is C1-smooth by construction where a plain rate limiter steps its velocity
- * instantly on saturation/release/target flips. `angular` computes the demand
- * through the shortest arc (for the wrapping yaw). Pure `state -> state`,
- * like everything else in this module.
+ * instantly on saturation/release/target flips. Pure `state -> state`, like
+ * everything else in this module. Exported for a direct, deterministic
+ * mechanism-level test of the clamp's one-sided behaviour (#117 item 1 —
+ * see demoMode.test.ts).
  */
-function stepBoundedFollower(
+export function stepBoundedFollower(
   value: number,
   rate: number,
   target: number,
   delta: number,
   limits: FollowerLimits,
-  angular = false,
 ): { value: number; rate: number } {
   let remaining = delta
   while (remaining > 1e-9) {
     const h = Math.min(remaining, FOLLOWER_MAX_SUBSTEP)
-    const error = angular ? angleDelta(value, target) : target - value
+    const error = limits.angular ? angleDelta(value, target) : target - value
     const desired = clamp(error / limits.responseTime, -limits.maxRate, limits.maxRate)
     rate = approach(rate, desired, limits.maxAccel * h)
     value += rate * h
-    if (limits.clampMin !== undefined) {
-      value = Math.max(value, limits.clampMin)
+    if (limits.clamp?.min !== undefined) {
+      value = Math.max(value, limits.clamp.min)
     }
-    if (limits.clampMax !== undefined) {
-      value = Math.min(value, limits.clampMax)
+    if (limits.clamp?.max !== undefined) {
+      value = Math.min(value, limits.clamp.max)
     }
     remaining -= h
   }
@@ -1634,8 +1683,19 @@ function tablePieceCount(window: SplineWindow): number {
  * Horizontal (not 3D) arc length on purpose: the camera's rendered altitude
  * is the glide-slope pursuit's (`state.altitude`), not the spline's own Y,
  * so ground distance is the one the viewer actually experiences.
+ *
+ * Exported for the layer-1 "never pins the forward aim" invariant (#117 item
+ * 2, demoModeSmoothness.test.ts): it recomputes this same table off a
+ * recorded tour's own `window` after every frame and asserts its total
+ * reaches at least that frame's `segmentDistance + LOOKAT_LOOKAHEAD_DISTANCE`
+ * — the exact coverage {@link extendWindow} guarantees by construction on
+ * every frame, asserted directly rather than only inferred from the
+ * pan-saturation bound as a proxy (the #117 review's concern: nothing
+ * previously pinned this guarantee down directly, so a future regression to
+ * a fixed/counted window width could silently reintroduce the pre-#105
+ * demand-pinning bug this table exists to prevent).
  */
-function segmentHorizontalArc(window: SplineWindow): number[] {
+export function segmentHorizontalArc(window: SplineWindow): number[] {
   const curve = flattenedCurve(window)
   const cumulative = [0]
   let previous = curve.getPoint(1 / (window.length - 1))
@@ -2727,7 +2787,6 @@ export function stepDemoTour(
     rawView.yaw,
     delta,
     VIEW_YAW_FOLLOWER,
-    true,
   )
   const viewYaw = angleDelta(0, yawFollowed.value)
   const pitchFollowed = stepBoundedFollower(

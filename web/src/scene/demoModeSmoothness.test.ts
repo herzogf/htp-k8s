@@ -13,8 +13,10 @@ import {
   type DemoPose,
   type DemoTourState,
   LOOKAT_AIM_FLOOR,
+  LOOKAT_LOOKAHEAD_DISTANCE,
   sampleDemoIntro,
   sampleDemoTourPose,
+  segmentHorizontalArc,
   stepDemoTour,
   VIEW_PITCH_MAX_ACCEL,
   VIEW_PITCH_MAX_RATE,
@@ -179,6 +181,74 @@ function recordedTour(gridName: string, seed: number, placements: TowerPlacement
     recordings.set(key, poses)
   }
   return poses
+}
+
+/**
+ * Steps a fresh seeded tour and records `state.viewPitch` — the follower's
+ * own pre-clamp value — on every frame (#117 item 3). Unlike {@link
+ * recordTour}'s `DemoPose`s, this reads the raw internal state directly,
+ * *before* {@link sampleDemoTourPose}'s post-follower aim-window re-clamp
+ * (`clamp(actualPosition.y + sin(viewPitch) × viewDistance, aimFloor,
+ * rooflineY)`) can re-key the rendered pitch. See the "turns its pitch
+ * smoothly with no exception" invariant below for why this direct read
+ * matters where the rendered-pose reconstruction doesn't.
+ */
+function recordViewPitch(seed: number, placements: TowerPlacement[]): number[] {
+  let tour: DemoTourState = createDemoTour({ seed, placements, entry: ENTRY })
+  // Every GRIDS entry has >=2 Towers, so the tour is always 'canyon' kind
+  // (see buildCanyonGraph) — assert rather than silently substituting 0 for
+  // a non-canyon frame, which would inject a fabricated multi-radian step
+  // into the recording instead of failing loudly if that assumption ever
+  // breaks.
+  function viewPitch(t: DemoTourState): number {
+    if (t.kind !== 'canyon') {
+      throw new Error("recordViewPitch expects a 'canyon' tour (placements must have >=2 Towers)")
+    }
+    return t.viewPitch
+  }
+  const pitches: number[] = [viewPitch(tour)]
+  const steps = Math.round(TOUR_SECONDS / DT)
+  for (let i = 0; i < steps; i++) {
+    tour = stepDemoTour(tour, DT, placements)
+    pitches.push(viewPitch(tour))
+  }
+  return pitches
+}
+
+/** Memoized {@link recordViewPitch}. */
+const viewPitchRecordings = new Map<string, number[]>()
+function recordedViewPitch(gridName: string, seed: number, placements: TowerPlacement[]): number[] {
+  const key = `${gridName}:${seed}`
+  let pitches = viewPitchRecordings.get(key)
+  if (!pitches) {
+    pitches = recordViewPitch(seed, placements)
+    viewPitchRecordings.set(key, pitches)
+  }
+  return pitches
+}
+
+/**
+ * The per-frame pan-rate-saturation boolean of a pose stream — true where
+ * the rendered yaw rate sits at/near VIEW_YAW_MAX_RATE. The one primitive
+ * both `saturationFraction` (below) and the "pans deliberately" invariant's
+ * event/run tracking build on, so the two can never silently drift onto
+ * different computations of the same underlying signal (#117 item 4).
+ */
+function saturationFrames(poses: DemoPose[]): boolean[] {
+  const frames: boolean[] = []
+  let previous = focusLookAngles(poses[0].position, poses[0].target)
+  for (let i = 1; i < poses.length; i++) {
+    const angles = focusLookAngles(poses[i].position, poses[i].target)
+    frames.push(Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT > VIEW_YAW_MAX_RATE * 0.98)
+    previous = angles
+  }
+  return frames
+}
+
+/** The share of {@link saturationFrames} that are saturated — #117 item 4's cross-seed aggregate (below) uses this. */
+function saturationFraction(poses: DemoPose[]): number {
+  const frames = saturationFrames(poses)
+  return frames.filter(Boolean).length / frames.length
 }
 
 function wrapAngle(d: number): number {
@@ -399,6 +469,16 @@ describe.each(GRIDS)(
         // top of the eased triplet's own — a derived mechanism ceiling, not
         // a loosened blanket (the #116 review flagged the old
         // clamp-slack-for-every-frame bound as weakly guarding).
+        //
+        // This measures the *rendered* pose (post-clamp) — deliberately: it's
+        // what the viewer actually sees, clamp re-keying included. The
+        // follower's own pre-clamp exactness (no exception, ever) is asserted
+        // directly against `state.viewPitch` below (#117 item 3); the two are
+        // mathematically identical outside clamp frames (confirmed by
+        // instrumentation — zero divergence across every non-clamp frame of
+        // all 15 seed/grid combinations) and this test's clamp-frame slack
+        // measures exactly what that direct test cannot: the reconstruction's
+        // own clamp mechanism.
         const MAX_YAW_RATE = VIEW_YAW_MAX_RATE + 1e-6
         const MAX_PITCH_RATE = VIEW_PITCH_MAX_RATE + 1e-6
         const MAX_PITCH_RATE_CLAMPED = VIEW_PITCH_MAX_RATE + 0.47
@@ -457,6 +537,13 @@ describe.each(GRIDS)(
         // invariant below (clamp frames ≤ 15% of the tour), and the exact
         // cap guards every ordinary frame (the #116 review flagged the old
         // blanket 6x slack as weakly guarding).
+        //
+        // As with the rate test above, this is the *rendered-pose* bound
+        // (#117 item 3): it stays exactly as calibrated (28 / 9), now purely
+        // as the measure of the clamp mechanism's own re-keying, decoupled
+        // from the follower's own exactness (see the direct
+        // `state.viewPitch` test below, which carries no clamp exception at
+        // all).
         const MAX_YAW_ACCEL = VIEW_YAW_MAX_ACCEL + 1e-6
         const MAX_PITCH_ACCEL = VIEW_PITCH_MAX_ACCEL + 1e-6
         const MAX_PITCH_ACCEL_CLAMPED_CEILING = 28
@@ -484,6 +571,84 @@ describe.each(GRIDS)(
           previous = angles
         }
         expect(maxClampedPitchAccel).toBeLessThanOrEqual(MAX_PITCH_ACCEL_CLAMPED_DRIFT)
+      })
+
+      it("turns its pitch smoothly with no exception: the follower's own pre-clamp state.viewPitch stays within its exact rate/accel caps on every frame (#117 item 3)", () => {
+        // The two tests above measure the *rendered* pose, so their "exact"
+        // pitch branch is only exact conditionally on the aim-window clamp
+        // being disengaged — the #117 review's finding: the number guarding
+        // every frame (15.0 pre-#117, now split 28/9 above) was sized by the
+        // clamp kink, not by the follower, so it wouldn't catch a
+        // VIEW_PITCH_MAX_ACCEL tuning regression on a clamp-engaged frame.
+        //
+        // Modelled on the yaw bound (confirmed exact because nothing ever
+        // clamps yaw): `state.viewPitch` is the follower's own output,
+        // *before* sampleDemoTourPose's `clamp(actualPosition.y +
+        // sin(viewPitch) × viewDistance, aimFloor, rooflineY)` can re-key it.
+        // stepBoundedFollower enforces VIEW_PITCH_MAX_RATE/MAX_ACCEL against
+        // this value unconditionally — there is no clamp on VIEW_PITCH_FOLLOWER
+        // itself — so this bound holds on every frame with zero exception,
+        // never merely "outside clamp frames". (Instrumented: outside clamp
+        // frames the rendered-pose reconstruction above is mathematically
+        // identical to this value, up to floating-point noise ~1e-6 rad; the
+        // two tests diverge, by design, only where the clamp is engaged.)
+        const pitches = recordedViewPitch(name, seed, placements)
+        const MAX_RATE = VIEW_PITCH_MAX_RATE + 1e-6
+        const MAX_ACCEL = VIEW_PITCH_MAX_ACCEL + 1e-6
+        let previousRate: number | null = null
+        for (let i = 1; i < pitches.length; i++) {
+          const rate = (pitches[i] - pitches[i - 1]) / DT
+          expect(Math.abs(rate)).toBeLessThanOrEqual(MAX_RATE)
+          if (previousRate !== null) {
+            expect(Math.abs(rate - previousRate) / DT).toBeLessThanOrEqual(MAX_ACCEL)
+          }
+          previousRate = rate
+        }
+      })
+
+      it("never pins the forward aim: the spline arc table always outreaches this frame's travel + look-ahead (#117 item 2)", () => {
+        // #116 counted future control points to guarantee look-ahead
+        // coverage; that fixed coupling held with zero margin and a future
+        // constant bump could silently reintroduce the pre-#105 "aim demand
+        // pins at the table end, then teleports at rollover" bug (median 3.87
+        // world units per rollover, ~40% of all frames pinned). #105
+        // iteration 2's corner-rounding rewrite replaced the counted window
+        // with a *measured* one (extendWindow grows the control polygon every
+        // frame until segmentHorizontalArc's total provably reaches
+        // `segmentDistance + LOOKAT_LOOKAHEAD_DISTANCE`) — structurally
+        // superior (no fixed coupling constant left to drift out of margin),
+        // but nothing had directly pinned that guarantee down: the
+        // pan-saturation bound below only catches a reintroduced pin as a
+        // proxy (a pinned demand reads as extra rate-cap saturation), and a
+        // proxy can move for other reasons too.
+        //
+        // This asserts the guarantee directly and exactly (a construction
+        // guard, not calibrated): recompute the same arc table off the
+        // recorded tour's own `window` after every frame and require its
+        // total to reach that frame's required coverage. Two-state evidence
+        // (temporarily starving both extendWindow call sites in
+        // stepDemoTour to 10% of the real look-ahead, reproducing the old
+        // bug): the pan-saturation fraction this file's "pans deliberately"
+        // test measures jumped from a 15-seed/grid mean of 0.102 to 0.174
+        // (worst single seed 0.233, events up to 32 against the existing
+        // bound of 24) — matching the magnitude of the original pre-#105
+        // regression this invariant exists to catch directly rather than by
+        // proxy.
+        let tour: DemoTourState = createDemoTour({ seed, placements, entry: ENTRY })
+        const MIN_COVERAGE_SLACK = -1e-6
+        const checkCoverage = (t: DemoTourState) => {
+          if (t.kind !== 'canyon') return
+          const cumulative = segmentHorizontalArc(t.window)
+          const coverage = cumulative[cumulative.length - 1]
+          const required = t.segmentDistance + LOOKAT_LOOKAHEAD_DISTANCE
+          expect(coverage - required).toBeGreaterThanOrEqual(MIN_COVERAGE_SLACK)
+        }
+        checkCoverage(tour)
+        const steps = Math.round(TOUR_SECONDS / DT)
+        for (let i = 0; i < steps; i++) {
+          tour = stepDemoTour(tour, DT, placements)
+          checkCoverage(tour)
+        }
       })
 
       it('keeps the aim-window-clamp exception narrow: clamp-engaged frames stay a small share of the tour', () => {
@@ -602,41 +767,55 @@ describe.each(GRIDS)(
         //
         // Observed with iteration 3's stronger tower pull (the aim actively
         // pans between Towers): worst single seed 17 events per 90s tour,
-        // each ≤ 2.4s, worst fraction 0.14 (iteration 4: 15 events / 0.146
-        // — essentially unchanged). Bounds:
+        // each ≤ 2.4s, worst fraction 0.1454 (iteration 4: 15 events —
+        // essentially unchanged). Bounds:
         //
         // - events ≤ 24: ~1.4x the observed worst, still far below the
-        //   40-65 of a per-waypoint rhythm — the sharper discriminator;
-        // - fraction ≤ 16%: only ~1.14x the observed worst, *below* this
-        //   file's usual 1.25-1.5x headroom convention — deliberately, and
-        //   documented rather than hidden: the bound is pinned from above
-        //   by the ~18% the pre-#105 pinning bug produced (a looser bound
-        //   would no longer exclude the known-bad regime). The suite's
-        //   seeds are fixed, so this cannot flake; a benign-looking tuning
-        //   change that trips it has genuinely eaten most of the distance
-        //   to known-bad and deserves the look;
+        //   40-65 of a per-waypoint rhythm;
+        // - fraction ≤ 16%: only ~1.10x the observed worst (0.1454) — this
+        //   file's usual 1.25-1.5x convention would land above the ~18%
+        //   known-bad demand-pinning regime, so this bound is *correctly*
+        //   bracketed tight between the two (ADR-0011's calibration rule),
+        //   not merely tight by neglect. #117 round 2 briefly replaced this
+        //   with only the cross-seed mean below, reasoning that a tight
+        //   per-seed bound risks flaking on a future added seed — but
+        //   re-review measured a real, present blind spot instead of that
+        //   hypothetical one: at 85% of the real look-ahead (a *reachable*
+        //   regression, not synthetic), 5x5 seed 99's fraction hit 0.1652,
+        //   above this bound, while events stayed at 18 (below 24) and the
+        //   aggregate mean stayed at 0.1108 (below 0.13) — the whole
+        //   post-replacement suite missed it. Fraction is the sharper
+        //   discriminator here, not events (on the worst-fraction seed,
+        //   fraction sat at 1.10x its bound vs events at 1.85x its own);
+        //   `events ≤ 24` and `maxRun ≤ 3.5s` together only imply a
+        //   fraction ceiling of 24 × 3.5 / 90 ≈ 0.93 — no real fraction
+        //   guard at all. Restored;
         // - ≤ 3.5s per event (sustained sweeps stay corner-scale).
+        //
+        // The cross-seed mean below (item 4) is a genuine *addition*, not a
+        // replacement: it guards the same fraction dimension with real
+        // headroom against a future added seed's variance (the concern
+        // #117 raised), while this bound keeps catching a single-seed
+        // regression the mean's 15x dilution would otherwise mask.
         const MAX_SATURATION_FRACTION = 0.16
         const MAX_SATURATION_EVENTS = 24
         const MAX_SATURATION_RUN_SECONDS = 3.5
-        let saturated = 0
+        const frames = saturationFrames(poses)
         let events = 0
         let run = 0
         let maxRun = 0
-        let previous = focusLookAngles(poses[0].position, poses[0].target)
-        for (let i = 1; i < poses.length; i++) {
-          const angles = focusLookAngles(poses[i].position, poses[i].target)
-          if (Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT > VIEW_YAW_MAX_RATE * 0.98) {
-            saturated++
+        for (const saturated of frames) {
+          if (saturated) {
             run++
             if (run === 1) events++
             maxRun = Math.max(maxRun, run)
           } else {
             run = 0
           }
-          previous = angles
         }
-        expect(saturated / (poses.length - 1)).toBeLessThanOrEqual(MAX_SATURATION_FRACTION)
+        expect(frames.filter(Boolean).length / frames.length).toBeLessThanOrEqual(
+          MAX_SATURATION_FRACTION,
+        )
         expect(events).toBeLessThanOrEqual(MAX_SATURATION_EVENTS)
         expect(maxRun * DT).toBeLessThanOrEqual(MAX_SATURATION_RUN_SECONDS)
       })
@@ -783,6 +962,65 @@ describe.each(GRIDS)(
     })
   },
 )
+
+describe('Demo Mode pan-rate saturation, aggregated across every seed and grid (#117 item 4)', () => {
+  // #117 item 4 went through three rounds; this is a genuine *addition* to
+  // the per-seed fraction bound above (0.16), not a replacement for it —
+  // round 2 tried replacing and that was itself a regression, corrected in
+  // round 3.
+  //
+  // Round 1 added this aggregate alongside the unchanged per-seed bound.
+  // Round 2 replaced the per-seed fraction bound with this aggregate,
+  // reasoning that a single-seed regression the mean's 15x dilution could
+  // mask was an acceptable trade against the per-seed bound's thin
+  // (~1.10x) headroom. Re-review measured that trade directly rather than
+  // trusting the reasoning: starving both extendWindow call sites (#117
+  // item 2's guarantee) to 85% of the real look-ahead — a *reachable*
+  // regression, not a synthetic worst case — pushed 5x5 seed 99's fraction
+  // to 0.1652 (would have failed the removed 0.16 bound) while events
+  // stayed at 18 (below 24) and this aggregate's mean stayed at 0.1108
+  // (below 0.13): round 2's suite caught nothing where round 1's did. On
+  // that same seed, fraction sat at 1.10x its bound versus events at 1.85x
+  // its own — fraction was the sharper discriminator, not events, and
+  // `events ≤ 24` with `maxRun ≤ 3.5s` together only imply a fraction
+  // ceiling of 24 × 3.5 / 90 ≈ 0.93 (no real guard at all). The per-seed
+  // fraction bound is restored (see "pans deliberately" above, whose
+  // comment carries the full ADR-0011 calibration argument for why 0.16 is
+  // *correctly* tight, not merely tight by neglect).
+  //
+  // This aggregate's own value is real and distinct: the mean across all 15
+  // seed x grid combinations is a materially less variance-prone read of
+  // the same underlying signal — a single seed's outlier is diluted 15x
+  // rather than deciding the result outright — so it adds headroom against
+  // a *future added seed* (the #117 review's original, still-valid
+  // concern) without weakening the per-seed bound's present catch. Measured
+  // on `main`: mean 0.1016 (individual combos 0.068-0.145). Calibrated
+  // bound 0.13 — ~1.28x headroom, this file's usual convention.
+  //
+  // Re-confirmed (not merely inherited) against the final code: reverting
+  // #117 item 2's coverage guarantee to 10% of the real look-ahead (the
+  // original, more severe two-state scenario) pushes this mean to 0.174 —
+  // comfortably past 0.13, and close to the original pre-#105 measurement
+  // (8.3-17.8%) this whole family of invariants traces back to. In that
+  // same state the per-seed fraction bound above fails on all 15
+  // seed/grid combinations, events fails on 7 of 15, and the direct #117
+  // item 2 invariant fails on all 15 — the regression class this whole
+  // family guards is caught from multiple independent angles at severe
+  // starvation, and by the restored fraction bound alone at the milder,
+  // more realistic 85% starvation the other bounds miss.
+  it('the mean saturation fraction across every seed and grid stays with real headroom below the known-bad regime', () => {
+    const MAX_MEAN_SATURATION_FRACTION = 0.13
+    let total = 0
+    let count = 0
+    for (const { name, placements } of GRIDS) {
+      for (const seed of SEEDS) {
+        total += saturationFraction(recordedTour(name, seed, placements))
+        count++
+      }
+    }
+    expect(total / count).toBeLessThanOrEqual(MAX_MEAN_SATURATION_FRACTION)
+  })
+})
 
 describe('Demo Mode activation (the takeoff + intro, composited as FreeFlyControls does)', () => {
   const placements = grid(5, 5)
