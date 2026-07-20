@@ -150,11 +150,30 @@ test('detail popup: towers() panelCount stays paired with the right Tower (the t
   // INDEX (`towers[i]` <-> `placements[i]`), asserted nowhere but a doc
   // comment — a regression there would only be caught by the unwatched
   // nightly tier (issue #29's panel-wrap.spec.ts) otherwise. seed.sh's fake
-  // nodes are a known, deterministic fixture (30 pods round-robin over 6
-  // nodes — exactly 5 each), so a specific one's panelCount is a real,
-  // PR-time-watched regression signal for that pairing.
-  const fakeNodeTower = towers.find((t) => t.name === 'kwok-node-0')
-  expect(fakeNodeTower?.panelCount).toBe(5)
+  // nodes get an EXACTLY EQUAL round-robin share (30 pods / 6 nodes = 5
+  // each) — a known, deterministic invariant. NOT asserted as an absolute
+  // "5" (found empirically, CI review round): a real cluster also schedules
+  // its own DaemonSet pods (kindnet, kube-proxy) onto every node, INCLUDING
+  // the fake KWOK ones, which tolerate their `kwok.x-k8s.io/node=fake`
+  // NoSchedule taint — verified directly against a real kind cluster, every
+  // fake node carries the seed's 5 plus 2 DaemonSet pods = 7, not 5.
+  // Comparing every fake node's panelCount against EACH OTHER survives that
+  // uniform offset (whatever it is) while still catching a real
+  // towers[i]/placements[i] misalignment, which would almost certainly break
+  // this equality by handing at least one Tower the wrong count.
+  const fakeNodeNames = [
+    'kwok-node-0',
+    'kwok-node-1',
+    'kwok-node-2',
+    'kwok-node-3',
+    'kwok-node-4',
+    'kwok-node-5',
+  ]
+  const fakeNodeCounts = fakeNodeNames.map(
+    (name) => towers.find((t) => t.name === name)?.panelCount,
+  )
+  expect(fakeNodeCounts.every((count) => count !== undefined)).toBe(true)
+  expect(new Set(fakeNodeCounts).size).toBe(1)
 
   // Every Pod is accounted for exactly once across all Towers — the zip
   // can't silently drop or double-count an entry either.
