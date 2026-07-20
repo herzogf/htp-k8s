@@ -93,8 +93,11 @@ async function waitForPopulatedScene(page: Page, minPods: number): Promise<void>
       return !!hook && hook.pods().length >= min
     },
     minPods,
-    // Measured (issue #174 rehearsal, this suite's shipped 50-node/3,671-pod
-    // default scale, GitHub Actions run 29761536223): navigation-to-populated
+    // Measured (issue #174 rehearsal, this suite's shipped 50-node default
+    // scale — 3,781 pods as this exact predicate (hook.pods().length) counts
+    // them, i.e. the rendered SCENE total, NOT the 3,671 SEEDED figure
+    // seed-scale.sh itself asserts (see that script's header for why the two
+    // differ); GitHub Actions run 29761536223): navigation-to-populated
     // 2,012ms on that CI runner (up from ~1,401ms at the earlier 15-node
     // default — see perf.spec.ts's own nightly-perf-summary.json for the
     // canonical, per-run measurement of this exact number) — so 90s is still
@@ -250,9 +253,11 @@ test.describe('nightly: four-face Panel wrap visual coverage (#29)', () => {
     // an interior one — so stepping OUTWARD from the grid centre through
     // this pair's midpoint steps AWAY from every other row, never through
     // one, at any node count. Empirically verified end-to-end against a real
-    // 15-node/16-Tower seed (issue #29 rehearsal): unobstructed, full
-    // roofline in frame, both Towers legible at their true, identical
-    // height.
+    // 15-node/16-Tower seed (issue #29 rehearsal) and RE-verified at issue
+    // #174's larger 50-node/51-Tower default (GitHub Actions run
+    // 29761536223 — busy-vs-sparse-same-height.png from that run):
+    // unobstructed, full roofline in frame, both Towers legible at their
+    // true, identical height, at both scales.
     const mx = (busiest.position[0] + sparsest!.position[0]) / 2
     const mz = (busiest.position[2] + sparsest!.position[2]) / 2
     const spread = Math.hypot(

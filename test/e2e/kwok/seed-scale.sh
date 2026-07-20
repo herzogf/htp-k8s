@@ -47,7 +47,7 @@
 #
 # DEFAULT NODE COUNT — NOW AT ADR-0004'S "50+ nodes, thousands of pods"
 # TARGET (issue #174): NODE_COUNT below is 50 (51 Towers with the real kind
-# node), 3,671 SEEDED pods with these defaults (the rendered scene reports a
+# node), 3,671 SEEDED pods with these defaults (the rendered SCENE reports a
 # somewhat higher total — see nightly.yml's header comment for why:
 # DaemonSet/system pods this script neither creates nor counts). This raises
 # PR #171's original, deliberately conservative 15-node/~1,231-pod default
@@ -57,14 +57,16 @@
 # demoMode.ts climb-out that can't keep up with a very tall roofline — see
 # HOT_POD_COUNT's own comment above for that last one), now that #174 has
 # rehearsed 50 nodes end to end via `workflow_dispatch` on the merged
-# workflow (GitHub Actions run 29761536223, 2026-07-20: all six nightly jobs
-# green, zero test retries, seeding from cold in ~7 minutes, the full-scale
-# job's own total wall clock 12m19s against its 60-minute budget) — so this
-# is now the rehearsed, shipped scheduled default, not an aspiration.
-# Raising NODE_COUNT alone is what made this safe: scene height keys off the
-# busiest Tower (HOT_POD_COUNT, unchanged below), so h ≈ 11.24 held
-# identically at both 15 and 50 nodes, and the climb-out problem above (which
-# is HOT_POD_COUNT-driven, not NODE_COUNT-driven) did not recur.
+# workflow (GitHub Actions run 29761536223, 2026-07-20 — see nightly.yml's
+# header comment for that run's job-level pass/fail and wall-clock evidence,
+# the home for those numbers). Seeding from cold at this default took ~7
+# minutes on that run (this step's own wait-for-Running loop, immediately
+# below, used ~6m13s of its own 600s budget — see that `kubectl wait`'s own
+# comment). This is now the rehearsed, shipped scheduled default, not an
+# aspiration. Raising NODE_COUNT alone is what made this safe: SCENE height
+# keys off the busiest Tower (HOT_POD_COUNT, unchanged below), so h ≈ 11.24
+# held identically at both 15 and 50 nodes, and the climb-out problem above
+# (which is HOT_POD_COUNT-driven, not NODE_COUNT-driven) did not recur.
 # HOT_POD_COUNT stays at 260, not the 420 this script used to default to,
 # pending #173. An even larger NODE_COUNT remains reachable as a conscious
 # `workflow_dispatch` override (nightly.yml's `node_count` input) without
@@ -246,6 +248,13 @@ spec:
 done
 printf '%s' "${pods_yaml}" | kubectl apply -f -
 
+# Measured (issue #174 rehearsal, this script's 50-node/3,671-pod default,
+# GitHub Actions run 29761536223): this wait alone took ~6m13s (from its own
+# CI log timestamp to the "OK" summary line below) against its 600s (10min)
+# budget — ~62% used, ~1.6x headroom. This is now the tightest real bound
+# this script carries; raising NODE_COUNT or HOT_POD_COUNT further without
+# re-measuring this wait risks it becoming the binding constraint before the
+# full-scale job's own 60-minute budget (nightly.yml) does.
 log "Waiting for all ${total_pods} pods to reach Running (KWOK pod-ready stage) — bounded to 10 minutes"
 kubectl wait --for=jsonpath='{.status.phase}'=Running \
   pod -l "${POD_SELECTOR}" -n "${NS}" --timeout=600s

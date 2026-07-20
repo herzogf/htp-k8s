@@ -63,6 +63,15 @@ test('nightly performance signal: scene load time and steady-state frame time at
     // boot). Giving the outer bound headroom past this one is what makes
     // that outer `expect` a genuine check on TOTAL nav+populate time instead
     // of dead code that could never fail once this wait already succeeded.
+    // Measured (issue #174 rehearsal, this suite's shipped 50-node/3,671-
+    // seeded-pod default, GitHub Actions run 29761536223): THIS test's own
+    // navigationToPopulatedMs — nav start through this wait resolving — was
+    // 2,012ms (nightly-perf-summary.json). 100s is therefore ~50x that
+    // observation; kept generous rather than tightened toward that multiple
+    // for the same reason as every other populate-wait bound in this suite
+    // (see panel-wrap.spec.ts's waitForPopulatedScene for the fuller
+    // reasoning): a wide budget costs nothing on a green run and protects a
+    // slow/contended CI runner, tightening buys nothing.
     { timeout: 100_000 },
   )
   const navigationToPopulatedMs = Date.now() - navStart
@@ -157,7 +166,10 @@ test('nightly performance signal: scene load time and steady-state frame time at
 
   // Sanity, not a performance gate (see header comment): the scene loaded in
   // bounded time and the busiest Tower is genuinely part of the dense seed
-  // this job exists to exercise.
+  // this job exists to exercise. Measured (same run/observation as the
+  // waitForFunction timeout above): 2,012ms against this 120s outer bound is
+  // ~60x headroom — deliberately kept wide, not tightened, for the same
+  // reason stated on that inner timeout.
   expect(navigationToPopulatedMs).toBeLessThan(120_000)
   expect(result.scene.busiestTowerPanelCount).toBeGreaterThan(100)
 })
