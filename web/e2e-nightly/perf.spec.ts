@@ -3,10 +3,10 @@ import path from 'node:path'
 import { expect, test } from '@playwright/test'
 
 // Nightly full-scale performance signal (issue #29, ADR-0004): the nightly
-// job's full-scale KWOK seed (test/e2e/kwok/seed-scale.sh — 15 nodes,
-// ~1,231 pods by default; see that script's header for why this is smaller
-// than ADR-0004's own "50+ nodes, thousands of pods" aspiration and how to
-// reach it on demand) exists to exercise the rendering pipeline
+// job's full-scale KWOK seed (test/e2e/kwok/seed-scale.sh — 50 nodes,
+// 3,671 SEEDED pods by default, ADR-0004's own "50+ nodes, thousands of
+// pods" target — see that script's header for the full history) exists to
+// exercise the rendering pipeline
 // (InstancedMesh layout, the per-Pod name-texture atlas, #59's
 // wrap/height-growth math) at a scale the PR-blocking job deliberately
 // never reaches — but exercising it is only half the point
@@ -63,6 +63,15 @@ test('nightly performance signal: scene load time and steady-state frame time at
     // boot). Giving the outer bound headroom past this one is what makes
     // that outer `expect` a genuine check on TOTAL nav+populate time instead
     // of dead code that could never fail once this wait already succeeded.
+    // Measured (issue #174 rehearsal, this suite's shipped 50-node/3,671-
+    // seeded-pod default, GitHub Actions run 29761536223): THIS test's own
+    // navigationToPopulatedMs — nav start through this wait resolving — was
+    // 2,012ms (nightly-perf-summary.json). 100s is therefore ~50x that
+    // observation; kept generous rather than tightened toward that multiple
+    // for the same reason as every other populate-wait bound in this suite
+    // (see panel-wrap.spec.ts's waitForPopulatedScene for the fuller
+    // reasoning): a wide budget costs nothing on a green run and protects a
+    // slow/contended CI runner, tightening buys nothing.
     { timeout: 100_000 },
   )
   const navigationToPopulatedMs = Date.now() - navStart
@@ -157,7 +166,10 @@ test('nightly performance signal: scene load time and steady-state frame time at
 
   // Sanity, not a performance gate (see header comment): the scene loaded in
   // bounded time and the busiest Tower is genuinely part of the dense seed
-  // this job exists to exercise.
+  // this job exists to exercise. Measured (same run/observation as the
+  // waitForFunction timeout above): 2,012ms against this 120s outer bound is
+  // ~60x headroom — deliberately kept wide, not tightened, for the same
+  // reason stated on that inner timeout.
   expect(navigationToPopulatedMs).toBeLessThan(120_000)
   expect(result.scene.busiestTowerPanelCount).toBeGreaterThan(100)
 })

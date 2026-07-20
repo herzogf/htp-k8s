@@ -76,18 +76,39 @@ const RESTING_TOWER_HEIGHT = 6
  * step is itself capped per frame at `MAX_FOCUS_STEP_SECONDS` (1/30s) — on a
  * software-rendered (no GPU) headless run below ~30 FPS, each real frame
  * only ever advances the tour by that cap, so a slower frame rate makes the
- * SAME simulated flight take MORE real seconds, not the same. Measured
- * directly (4 independent real runs, this h ≈ 11.24 default scale, this kind
- * of headless/software-WebGL environment): time-to-first-clear-roofline
- * samples were 48.8s, 56.3s, 63.5s, 82.4s — i.e. the OLD 65s budget was
- * already failing on 2 of those 4 real seeds. 260s is > 3x the worst of
- * those four observations, matching this project's "state the live
- * observation beside the bound" convention (ADR-0011). A CI-hosted runner
- * has no GPU either (same software-rendering regime the measurement above
- * used), so this is expected to transfer, not just a local-machine number —
- * but if `$GITHUB_STEP_SUMMARY`'s per-test wall clock (issue #171) shows
- * this creeping toward the budget over time, that is this bound's own early
- * warning to revisit, per the same ADR-0011 discipline.
+ * SAME simulated flight take MORE real seconds, not the same. This makes
+ * the bound NODE-COUNT-sensitive too, via frame rate, even though the
+ * ROOFLINE ITSELF is not: h ≈ 11.24 keys only off `hot_pod_count` (the
+ * busiest Tower) and stayed identical when issue #174 raised the default
+ * node count from 15 to 50 — but that same 50-node rehearsal measured
+ * perf.spec.ts's steady-state frame rate dropping from 10.7 fps (15 nodes)
+ * to 5.1 fps (50 nodes, more Towers to render), so the SAME climb now costs
+ * more real seconds even though what it's climbing to did not change.
+ * Measured directly (4 independent real runs at the 15-node default, this
+ * h ≈ 11.24 scale, this kind of headless/software-WebGL environment):
+ * time-to-first-clear-roofline samples were 48.8s, 56.3s, 63.5s, 82.4s —
+ * i.e. the OLD 65s budget was already failing on 2 of those 4 real seeds.
+ * #174's 50-node rehearsal (GitHub Actions run 29761536223) is a 5th data
+ * point, though derived rather than directly instrumented (this file has no
+ * per-phase timing, only the whole test's own wall clock): this test's
+ * total duration was 103.1s (results.json); subtracting a generous ~15s for
+ * populate (measured elsewhere this run at ~2s), navigation, the two toggle
+ * round-trips, and the final full-scene screenshot leaves a climb-portion
+ * FLOOR of ~88s — already worse than the prior worst (82.4s) sample, and
+ * the true figure is likely higher still (a tighter, more realistic ~5-10s
+ * overhead estimate would put it closer to 93-98s). 260s is therefore
+ * roughly 2.6-3x that 5th observation, NOT the ">3x the worst of 4
+ * observations" this comment previously (and, per ADR-0011, WRONGLY)
+ * claimed after the fps drop above — real margin, but eroding, and this
+ * comment's own prior staleness is exactly the ADR-0011 failure mode ADR-
+ * 0011 itself names (an observation a later change superseded, left
+ * unrevised). A CI-hosted runner has no GPU either (same software-rendering
+ * regime every measurement above used), so this is expected to transfer,
+ * not just a one-off number — but if `$GITHUB_STEP_SUMMARY`'s per-test wall
+ * clock (issue #171) shows this creeping further toward the budget, or a
+ * future scale increase drops fps further, that is this bound's own early
+ * warning to revisit with an actually-instrumented 6th sample, per the same
+ * ADR-0011 discipline.
  */
 const FLIGHT_DURATION_MS = 260_000
 const POLL_INTERVAL_MS = 400
@@ -100,15 +121,22 @@ async function waitForPopulatedScene(page: Page, minPods: number): Promise<void>
       return !!hook && hook.pods().length >= min
     },
     minPods,
-    // Measured (issue #171 rehearsal, this suite's shipped default scale):
-    // navigation-to-populated in the ~1.4s range on that rehearsal hardware
-    // (see perf.spec.ts's own nightly-perf-summary.json for the canonical,
-    // per-run measurement of this exact number) — so 90s is enormous
-    // headroom even against a materially slower/contended CI runner. Kept
-    // wide rather than trimmed to a tight multiple of the local number
-    // specifically because a GitHub-hosted runner is not the hardware this
-    // was measured on; $GITHUB_STEP_SUMMARY's per-test wall clock is what
-    // would show this margin actually eroding on real CI runs over time.
+    // Measured (issue #174 rehearsal, this suite's shipped 50-node default
+    // scale — 3,781 pods as this exact predicate (hook.pods().length) counts
+    // them, i.e. the rendered SCENE total, NOT the 3,671 SEEDED figure
+    // seed-scale.sh itself asserts (see that script's header for why the two
+    // differ); GitHub Actions run 29761536223): navigation-to-populated
+    // 2,012ms on that CI runner (up from ~1,401ms at the earlier 15-node
+    // default — see perf.spec.ts's own nightly-perf-summary.json for the
+    // canonical, per-run measurement of this exact number) — so 90s is still
+    // ~45x that observation, enormous headroom even against a materially
+    // slower/contended CI runner. Deliberately KEPT this wide rather than
+    // tightened toward that ~45x multiple: a generous budget costs nothing
+    // on a green run and protects against a slow/contended runner, whereas
+    // tightening it buys nothing and risks an unattended flake; a
+    // GitHub-hosted runner is also not the hardware this was measured on.
+    // $GITHUB_STEP_SUMMARY's per-test wall clock is what would show this
+    // margin actually eroding on real CI runs over time.
     { timeout: 90_000 },
   )
 }
@@ -127,14 +155,17 @@ test('demo mode over a grown scene: the automated flight climbs above the REAL (
   // Unlike the PR-time demo-canyon-tour.spec.ts this mirrors (which budgets
   // FLIGHT_DURATION_MS + 60s total), this nightly spec's own
   // waitForPopulatedScene ALONE budgets up to 90s against the full-scale
-  // seed — measured at ~1.4s on this issue's rehearsal hardware (see
+  // seed — measured at 2,012ms (issue #174 rehearsal, this suite's shipped
+  // 50-node default scale — see waitForPopulatedScene's own comment above
+  // for why that's 3,781 SCENE pods, not the 3,671 SEEDED figure; see
   // perf.spec.ts's own nightly-perf-summary.json for the canonical, per-run
-  // measurement of this), so 90s is enormous headroom for populate alone
-  // even accounting for a materially slower/contended CI runner; kept wide
-  // rather than trimmed to a tighter multiple of that number specifically
-  // because CI hardware is not the same hardware this was measured on (see
-  // FLIGHT_DURATION_MS's own comment for the same caveat, where it matters
-  // far more). 90s populate + 260s flight + two toggle round-trips + margin.
+  // measurement of this), so 90s is ~45x that observation, still enormous
+  // headroom for populate alone even accounting for a materially
+  // slower/contended CI runner; kept wide rather than trimmed toward that
+  // ~45x multiple specifically because CI hardware is not the same
+  // hardware this was measured on (see FLIGHT_DURATION_MS's own comment
+  // for the same caveat, where it matters far more). 90s populate + 260s
+  // flight + two toggle round-trips + margin.
   test.setTimeout(FLIGHT_DURATION_MS + 150_000)
 
   await page.goto('/')
@@ -165,12 +196,14 @@ test('demo mode over a grown scene: the automated flight climbs above the REAL (
     // The regression #162 fixed, caught the instant it recurs: the flight
     // reaching an altitude that genuinely clears the real roofline (a small
     // margin above it, not merely touching it). Break the instant this is
-    // satisfied — FLIGHT_DURATION_MS (260s, >3x the worst of 4 real
-    // measured samples) is meant to be HEADROOM for a slow/contended run,
-    // not a fixed spend every run pays regardless of outcome. Sampling for
-    // the full window unconditionally would burn ~4.3 real minutes of the
-    // job's 60-minute budget on every green run (worse on a retry) instead
-    // of holding that margin in reserve.
+    // satisfied — FLIGHT_DURATION_MS (260s, roughly 2.6-3x the worst real/
+    // derived observation — see that constant's own comment for the full
+    // 5-sample history and why the multiple isn't a clean >3x anymore) is
+    // meant to be HEADROOM for a slow/contended run, not a fixed spend every
+    // run pays regardless of outcome. Sampling for the full window
+    // unconditionally would burn ~4.3 real minutes of the job's 60-minute
+    // budget on every green run (worse on a retry) instead of holding that
+    // margin in reserve.
     if (pos[1] >= rooflineY * 1.02) {
       await page.screenshot({ path: testInfo.outputPath('demo-mode-over-grown-roofline.png') })
       sawOverRoofline = true
@@ -189,12 +222,13 @@ test('demo mode over a grown scene: the automated flight climbs above the REAL (
   // An overview episode always begins within OVERVIEW_GAP_WAYPOINTS_MAX
   // waypoints of tour start, so it is reliably observed within
   // FLIGHT_DURATION_MS — see that constant's own doc comment for why this
-  // window is sized off 4 REAL measured samples rather than assumed from
-  // the waypoint pacing alone (which, unlike a fixed simulated-time budget,
-  // does not by itself bound REAL wall-clock seconds under a throttled
-  // frame rate). If this ever regresses to flying below the real roofline
-  // again (the pre-#162 bug, at scene-height-dependent scale), this fails
-  // here rather than only being caught by a maintainer's manual review.
+  // window is sized off a 5-sample real/derived history (not assumed from
+  // the waypoint pacing alone, which, unlike a fixed simulated-time budget,
+  // does not by itself bound REAL wall-clock seconds under a throttled,
+  // node-count-sensitive frame rate). If this ever regresses to flying
+  // below the real roofline again (the pre-#162 bug, at scene-height-
+  // dependent scale), this fails here rather than only being caught by a
+  // maintainer's manual review.
   expect(sawOverRoofline).toBe(true)
   expect(maxY).toBeGreaterThanOrEqual(rooflineY * 1.02)
 })
