@@ -8,10 +8,14 @@ updates:
     # .goreleaser.yaml's changelog `exclude` filters strip from release
     # notes (`^chore(\(.*\))?:`) — a CVE-fixing bump would ship silently
     # absent from what a reader sees. "build" is not in that exclude list
-    # (verified against the filters in .goreleaser.yaml), so bumps stay
-    # visible. See issue #142.
+    # (verified against the filters in .goreleaser.yaml). `include: scope`
+    # keeps the (deps)/(deps-dev) suffix Dependabot already appends, so
+    # bumps land as "build(deps): …" / "build(deps-dev): …" — visible,
+    # and still distinguishing shipped-code from dev-only deps. See
+    # issue #142.
     commit-message:
       prefix: "build"
+      include: "scope"
     groups:
       gomod-minor-patch:
         patterns:
@@ -27,6 +31,7 @@ updates:
     # Same reasoning as the gomod entry above — see issue #142.
     commit-message:
       prefix: "build"
+      include: "scope"
     groups:
       npm-minor-patch:
         patterns:
@@ -44,6 +49,16 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Same reasoning as the gomod entry above. This ecosystem landed in
+    # #145 the same day as #142's decision, so #142's decision text
+    # (which names only gomod/npm) predates it and missed it — a
+    # historical omission, not a deliberate exclusion. Without this,
+    # github-actions bumps still default to "chore(deps): …" and stay
+    # excluded from release notes, despite being real supply-chain
+    # changes in a repo that SHA-pins every action.
+    commit-message:
+      prefix: "build"
+      include: "scope"
     groups:
       github-actions-minor-patch:
         patterns:
