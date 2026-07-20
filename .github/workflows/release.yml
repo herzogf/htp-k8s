@@ -515,22 +515,36 @@ jobs:
       # failure: node would just see empty stdin, read that as "no tags
       # exist", and conclude "this release is the highest" — moving `latest`
       # unconditionally, which is exactly the #164-class defect this PR
-      # fixes elsewhere. So: (1) `git tag --list` is read into a variable on
-      # its own line, never piped straight into node, so its own exit status
-      # is never masked by anything downstream; (2) `set -euo pipefail`
-      # below is still added for defense in depth against a future edit
-      # reintroducing a pipe; (3) RELEASE_TAG is asserted present in that
-      # output before it's trusted — RELEASE_TAG is GUARANTEED to already be
-      # in `git tag --list` (it was pushed, and so exists, before this job
-      # ever started; a genuinely shallow checkout would still fetch just
-      # that one tag, not zero — the failure mode a `grep -c` check alone
-      # would miss), so its absence unambiguously means the read failed,
-      # never that "no tags exist yet" (impossible: this covers the
-      # first-ever release too, since RELEASE_TAG alone is always enough to
-      # satisfy the check); (4) the script's own output is checked non-empty
-      # before being trusted, in case the CLI's direct-execution guard
-      # (`import.meta.url === ...`) were ever to stop matching and the
-      # script silently printed nothing and exited 0.
+      # fixes elsewhere. Four guards, each covering a DIFFERENT way that
+      # scenario can happen — none of them substitutes for another:
+      #
+      # (0) `git rev-parse --is-shallow-repository` is checked FIRST and
+      #     fails loudly if the checkout above ever regresses (a future edit
+      #     drops `fetch-depth: 0`, an `actions/checkout` default changes, a
+      #     badly-resolved merge conflict). This is NOT redundant with (3)
+      #     below: a shallow tag-push checkout still fetches the ONE tag
+      #     that triggered the run, so RELEASE_TAG would still be present
+      #     and (3) alone would PASS — `computeTags` would then see no other
+      #     stable tags, conclude "this is trivially the highest", and move
+      #     `latest`/bare-X unconditionally, invisibly to PR CI. (0) is the
+      #     only guard here that actually defends the "full tag history" the
+      #     whole rule depends on, rather than just "the read didn't fail".
+      # (1) `git tag --list` is read into a variable on its own line, never
+      #     piped straight into node, so its own exit status is never masked
+      #     by anything downstream.
+      # (2) `set -euo pipefail` below is added for defense in depth against
+      #     a future edit reintroducing a pipe.
+      # (3) RELEASE_TAG is asserted present in the tag-list output before
+      #     it's trusted — guaranteed to already be there once pushed (true
+      #     even under a shallow checkout, per (0) above), so its absence
+      #     unambiguously means the READ itself failed (a `git` error, an
+      #     empty/garbled result) — never "no tags exist yet" (impossible:
+      #     this also covers the first-ever release, since RELEASE_TAG alone
+      #     is always enough to satisfy it).
+      # (4) The script's own output is checked non-empty before being
+      #     trusted, in case the CLI's direct-execution guard
+      #     (`import.meta.url === ...`) were ever to stop matching and the
+      #     script silently printed nothing and exited 0.
       #
       # Echoed (not just piped through silently): this is what lets the
       # existing rc-dry-run practice prove the whole workflow<->script seam
@@ -544,6 +558,11 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+
+          if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error::shallow checkout -- cannot determine the highest release tag (fetch-depth: 0 is required on this job's Checkout step)" >&2
+            exit 1
+          fi
 
           existing_tags="$(git tag --list 'v*')"
 
