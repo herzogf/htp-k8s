@@ -61,9 +61,12 @@
 # header comment for that run's job-level pass/fail and wall-clock evidence,
 # the home for those numbers). Seeding from cold at this default took ~7
 # minutes on that run (this step's own wait-for-Running loop, immediately
-# below, used ~6m13s of its own 600s budget — see that `kubectl wait`'s own
-# comment). This is now the rehearsed, shipped scheduled default, not an
-# aspiration. Raising NODE_COUNT alone is what made this safe: SCENE height
+# below, used ~6m13s against what was THEN a 600s budget — a review finding
+# on this raise: that left only ~1.6x headroom, by far this script's
+# tightest bound, so that wait's own timeout is ALSO raised in this same PR,
+# to 1800s — see that `kubectl wait`'s own comment for the full reasoning).
+# This is now the rehearsed, shipped scheduled default, not an aspiration.
+# Raising NODE_COUNT alone is what made this safe: SCENE height
 # keys off the busiest Tower (HOT_POD_COUNT, unchanged below), so h ≈ 11.24
 # held identically at both 15 and 50 nodes, and the climb-out problem above
 # (which is HOT_POD_COUNT-driven, not NODE_COUNT-driven) did not recur.
@@ -249,15 +252,27 @@ done
 printf '%s' "${pods_yaml}" | kubectl apply -f -
 
 # Measured (issue #174 rehearsal, this script's 50-node/3,671-pod default,
-# GitHub Actions run 29761536223): this wait alone took ~6m13s (from its own
-# CI log timestamp to the "OK" summary line below) against its 600s (10min)
-# budget — ~62% used, ~1.6x headroom. This is now the tightest real bound
-# this script carries; raising NODE_COUNT or HOT_POD_COUNT further without
-# re-measuring this wait risks it becoming the binding constraint before the
-# full-scale job's own 60-minute budget (nightly.yml) does.
-log "Waiting for all ${total_pods} pods to reach Running (KWOK pod-ready stage) — bounded to 10 minutes"
+# GitHub Actions run 29761536223): this wait alone took ~6m13s (373s, from
+# its own CI log timestamp to the "OK" summary line below). Raised from the
+# original 600s (10min) budget to 1800s (30min) in the SAME PR that raised
+# NODE_COUNT to 50 (review finding): 600s left only ~1.6x headroom (~62%
+# used) — by far the tightest bound this PR touches next to the populate
+# waits' ~45-60x and FLIGHT_DURATION_MS's ~2.6-3x, and the one most exposed
+# to ordinary CI runner-to-runner variance, since it is invisible on any
+# GREEN run (the wait returns the moment every pod is Running; the timeout
+# is a ceiling, not a floor) and this is an UNATTENDED schedule trigger — a
+# spurious timeout here fails the whole job with nobody watching. 1800s is
+# ~4.8x the 373s observation, comfortably contained inside the full-scale
+# job's own 60-minute budget (nightly.yml) even in the worst case where this
+# wait alone consumed the entire new cap (this run's OTHER steps combined —
+# setup, kind cluster, the rest of this seeding step, the Playwright suite,
+# uploads — totalled ~5m23s+40s ≈ 6m, leaving well over 20 minutes of margin
+# even then). Was invisible at the previous 15-node default (well under
+# 600s there); raising NODE_COUNT is what made this the binding constraint,
+# so it belongs in the same PR that raised NODE_COUNT, not a follow-up.
+log "Waiting for all ${total_pods} pods to reach Running (KWOK pod-ready stage) — bounded to 30 minutes"
 kubectl wait --for=jsonpath='{.status.phase}'=Running \
-  pod -l "${POD_SELECTOR}" -n "${NS}" --timeout=600s
+  pod -l "${POD_SELECTOR}" -n "${NS}" --timeout=1800s
 
 # ---------------------------------------------------------------------------
 # 5. Summary + hard correctness gate. Node readiness was already asserted by
