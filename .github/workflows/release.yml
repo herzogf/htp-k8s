@@ -526,7 +526,7 @@ jobs:
       #     that triggered the run, so RELEASE_TAG would still be present
       #     and (3) alone would PASS — `computeTags` would then see no other
       #     stable tags, conclude "this is trivially the highest", and move
-      #     `latest`/bare-X unconditionally, invisibly to PR CI. (0) is the
+      #     `latest`/vX unconditionally, invisibly to PR CI. (0) is the
       #     only guard here that actually defends the "full tag history" the
       #     whole rule depends on, rather than just "the read didn't fail".
       # (1) `git tag --list` is read into a variable on its own line, never

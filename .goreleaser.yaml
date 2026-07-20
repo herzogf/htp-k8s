@@ -180,12 +180,13 @@ release:
   # (issue #64) is now answered for real: README.md's Supply chain section
   # carries that instruction.
   #
-  # Moving tags below (issue #64; rule + rationale: ADR-0005 "Moving image
-  # tags" — not restated here) are hedged ("if this is...") rather than
-  # asserted as fact: the `goreleaser` job (this file) and ko's `image` job
-  # (which actually decides and publishes the tag set) run in PARALLEL, same
-  # reason the digest above can't be templated in — this footer genuinely
-  # can't know the outcome at render time.
+  # Moving tags below (issue #64; rule + rationale, INCLUDING why they're
+  # `v`-prefixed like every other tag in this project: ADR-0005 "Moving
+  # image tags" — not restated here) are hedged ("if this is...") rather
+  # than asserted as fact: the `goreleaser` job (this file) and ko's `image`
+  # job (which actually decides and publishes the tag set) run in PARALLEL,
+  # same reason the digest above can't be templated in — this footer
+  # genuinely can't know the outcome at render time.
   #
   # NOTE the leading blank line: GoReleaser's body template joins the
   # changelog and this footer with exactly ONE newline (see
@@ -207,8 +208,8 @@ release:
 
     - `ghcr.io/herzogf/htp-k8s:{{ .Tag }}` (`linux/amd64`, `linux/arm64`)
     {{- if not .Prerelease }}
-    - If this is the newest patch in its minor, `:{{ .Major }}.{{ .Minor }}` also points here
-    - If this is the newest stable release overall, it's also `:latest`{{ if ge .Major 1 }} and `:{{ .Major }}`{{ end }}
+    - If this is the newest patch in its minor, `:v{{ .Major }}.{{ .Minor }}` also points here
+    - If this is the newest stable release overall, it's also `:latest`{{ if ge .Major 1 }} and `:v{{ .Major }}`{{ end }}
 
     Moving tags are a pull convenience, not a verification target — they can repoint on a later release. Verify against the exact tag above (`{{ .Tag }}`).
     {{- end }}

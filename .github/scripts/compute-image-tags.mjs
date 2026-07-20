@@ -19,13 +19,20 @@
 //
 //   Stable release vX.Y.Z (no "-" in the tag):
 //     - always publish the exact vX.Y.Z tag
-//     - publish X.Y IF this release is the newest patch within that minor
+//     - publish vX.Y IF this release is the newest patch within that minor
 //       (true for a normal release; NOT true, and so NOT published, when
 //       re-tagging an older patch after a newer one in the same minor
-//       already exists — publishing it then would move X.Y backwards)
-//     - publish bare X, once X >= 1, IF this release is the highest stable
+//       already exists — publishing it then would move vX.Y backwards)
+//     - publish vX, once X >= 1, IF this release is the highest stable
 //       version that exists overall
 //     - publish `latest` under that same "highest overall" condition
+//
+//   EVERY moving tag keeps the `v` prefix (vX.Y, vX) — the exact tag,
+//   the git tags, the GitHub releases, the changelog, and every README
+//   quickstart are all `v`-prefixed already, so a bare X/X.Y would be the
+//   one inconsistent form in the whole project. `latest` alone stays bare:
+//   it's not a version. (Decided after the issue text's own "e.g. `1.2`"
+//   phrasing went unflagged during grilling — see ADR-0005.)
 //
 //   Prerelease vX.Y.Z-something (tag contains "-"): the exact tag ONLY.
 //
@@ -74,8 +81,10 @@ function compareStable(a, b) {
  *   (e.g. `git tag --list 'v*'` output, one per line). May or may not
  *   include releaseTag itself — either is handled correctly. Entries that
  *   don't parse as vMAJOR.MINOR.PATCH[-PRERELEASE] are ignored.
- * @returns {string[]} tags in publish order, e.g. ["v1.2.3", "1.2", "1",
- *   "latest"]. Never empty — always at least the exact tag.
+ * @returns {string[]} tags in publish order, e.g. ["v1.2.3", "v1.2", "v1",
+ *   "latest"] — every moving tag keeps the project's `v` prefix; only
+ *   `latest` stays bare (it isn't a version). Never empty — always at least
+ *   the exact tag.
  */
 export function computeTags(releaseTag, existingTags = []) {
   const release = parseTag(releaseTag)
@@ -108,9 +117,15 @@ export function computeTags(releaseTag, existingTags = []) {
     .filter((t) => t.major === release.major && t.minor === release.minor)
     .every((t) => compareStable(release, t) >= 0)
 
+  // Moving tags carry the project's own `v` prefix (issue #64) — every
+  // OTHER tag in the project (the exact tag itself, git tags, GitHub
+  // releases, the changelog, every README quickstart) already does, so a
+  // bare `X`/`X.Y` would be the one inconsistent form a consumer sees.
+  // `latest` is the sole exception: it isn't a version, so there's no `v`
+  // to add.
   const tags = [release.tag]
-  if (isHighestInMinor) tags.push(`${release.major}.${release.minor}`)
-  if (release.major >= 1 && isHighestOverall) tags.push(`${release.major}`)
+  if (isHighestInMinor) tags.push(`v${release.major}.${release.minor}`)
+  if (release.major >= 1 && isHighestOverall) tags.push(`v${release.major}`)
   if (isHighestOverall) tags.push('latest')
   return tags
 }
