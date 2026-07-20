@@ -244,6 +244,16 @@ jobs:
         working-directory: test/e2e/capture
         run: task test
 
+      # PR-time coverage for release.yml's tag-computation module (issue #64,
+      # rule + rationale: ADR-0005 "Moving image tags") — release.yml itself
+      # is tag-triggered and can never run on this PR (see the module's own
+      # header). Explicit file, not a glob: `node --test` exits 0 with zero
+      # tests run if a glob matches nothing, which would silently stop
+      # covering it the moment the file were ever renamed or moved.
+      - name: Release image-tag computation tests (.github/scripts)
+        working-directory: .
+        run: node --test .github/scripts/compute-image-tags.test.mjs
+
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. npm audit's default
       # exit code already fails on any reported vulnerability.
