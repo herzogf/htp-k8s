@@ -19,7 +19,7 @@ import { expect, type Page, test } from '@playwright/test'
 // of truth). The e2e is a separate compilation domain from the app bundle, so
 // the shape is restated here rather than imported; keep the two in step.
 interface DetailTestHook {
-  towers: () => { name: string }[]
+  towers: () => { name: string; panelCount: number }[]
   pods: () => { namespace: string; pod: string }[]
   selectTower: (name: string) => boolean
   selectPod: (namespace: string, pod: string) => boolean
@@ -135,6 +135,56 @@ test('detail popup: a Tower opens a read-only Node/Namespace summary popup', asy
   // Escape closes it — the keyboard dismiss affordance.
   await page.keyboard.press('Escape')
   await expect(popup).toHaveCount(0)
+})
+
+test('detail popup: towers() panelCount stays paired with the right Tower (the towers[i]/placements[i] zip)', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await waitForPopulatedScene(page)
+
+  const towers = await page.evaluate(() => window.__htpDetailTest!.towers())
+  const pods = await page.evaluate(() => window.__htpDetailTest!.pods())
+
+  // useDetailTestHook.ts pairs each Tower's Pod count with its placement by
+  // INDEX (`towers[i]` <-> `placements[i]`), asserted nowhere but a doc
+  // comment — a regression there would only be caught by the unwatched
+  // nightly tier (issue #29's panel-wrap.spec.ts) otherwise. seed.sh's fake
+  // nodes get an EXACTLY EQUAL round-robin share (30 pods / 6 nodes = 5
+  // each) — a known, deterministic invariant. NOT asserted as an absolute
+  // "5" (found empirically, CI review round): a real cluster also schedules
+  // its own DaemonSet pods (kindnet, kube-proxy) onto every node, INCLUDING
+  // the fake KWOK ones, which tolerate their `kwok.x-k8s.io/node=fake`
+  // NoSchedule taint — verified directly against a real kind cluster, every
+  // fake node carries the seed's 5 plus 2 DaemonSet pods = 7, not 5.
+  // Comparing every fake node's panelCount against EACH OTHER survives that
+  // uniform offset (whatever it is) while still catching a real
+  // towers[i]/placements[i] misalignment, which would almost certainly break
+  // this equality by handing at least one Tower the wrong count.
+  const fakeNodeNames = [
+    'kwok-node-0',
+    'kwok-node-1',
+    'kwok-node-2',
+    'kwok-node-3',
+    'kwok-node-4',
+    'kwok-node-5',
+  ]
+  const fakeNodeCounts = fakeNodeNames.map(
+    (name) => towers.find((t) => t.name === name)?.panelCount,
+  )
+  expect(fakeNodeCounts.every((count) => count !== undefined)).toBe(true)
+  expect(new Set(fakeNodeCounts).size).toBe(1)
+
+  // NOT a zip-alignment check (review finding, round 3): panelCount is
+  // literally `towers[i].panels.length`, and pods() is a flatMap of those
+  // same per-Tower arrays — so this sum trivially equals pods.length by
+  // construction, with no placement involved, and can't catch a
+  // towers[i]/placements[i] misalignment (the equal-share assertion above
+  // is what has teeth for that). Kept anyway as a basic internal-
+  // consistency sanity check (no Pod silently dropped or double-counted by
+  // the hook's own aggregation) — just not a stronger guarantee than that.
+  const totalPanelCount = towers.reduce((sum, t) => sum + t.panelCount, 0)
+  expect(totalPanelCount).toBe(pods.length)
 })
 
 /**
