@@ -3,6 +3,8 @@ coverage
 node_modules
 e2e-results
 playwright-report
+e2e-nightly-results
+playwright-nightly-report
 
 # Generated from the Go wire contract (internal/scene) by tygo — see the root
 # Taskfile's `codegen` target. Not hand-edited, so not subject to our style.
