@@ -777,23 +777,42 @@ const VIEW_PITCH_FOLLOWER: FollowerLimits = {
   maxAccel: VIEW_PITCH_MAX_ACCEL,
   responseTime: VIEW_RESPONSE_TIME,
 }
-const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
+export const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
   maxRate: VIEW_DISTANCE_MAX_RATE,
   maxAccel: VIEW_DISTANCE_MAX_ACCEL,
   responseTime: VIEW_RESPONSE_TIME,
-  // A hard floor on the rendered view distance (#117 item 1): the
-  // non-overshoot condition (`maxAccel × responseTime > maxRate`) only holds
-  // against a *static* target — chasing a moving demand, a second-order
-  // follower can overshoot, and a view distance that ever reached ≤ 0 would
-  // flip the reconstructed aim by π (`horizontalReach = cos(pitch) ×
-  // distance` in sampleDemoTourPose changes sign). Demonstrated directly in
-  // demoMode.test.ts: the same follower math, unclamped, driven by a target
-  // racing toward and through the camera (a moving-target overshoot, exactly
-  // this guard's premise) swings to ≈ -5.6; clamped at this same floor it
-  // holds at exactly the floor. The demand itself is never below
-  // LOOKAT_MIN_HORIZONTAL_DISTANCE (composeLookAt's collapse guard), so a
-  // floor at half of it never engages in legitimate flight; it exists purely
-  // to make the sign flip impossible by construction.
+  // A hard floor on the rendered view distance (#117 item 1): a view
+  // distance that ever reached ≤ 0 would flip the reconstructed aim by π
+  // (`horizontalReach = cos(pitch) × distance` in sampleDemoTourPose changes
+  // sign) — a catastrophic failure mode if it ever happened. The
+  // non-overshoot condition this follower satisfies (`maxAccel ×
+  // responseTime > maxRate`) is proven only against a *static* target; a
+  // review of #116 raised the theoretical concern that a genuinely *moving*
+  // demand could let a second-order follower like this one undershoot below
+  // a positive floor the demand itself always respects.
+  //
+  // Investigated (demoMode.test.ts, #117 item 1 round 2 — the first attempt
+  // incorrectly measured plain lag as "overshoot"): derived from the
+  // follower math that reaching this follower's max rate via any
+  // *physically reachable* history (i.e. the state this follower's own
+  // continuous dynamics could actually produce — never an externally reset
+  // rate) requires a spin-up/tracking lag of at least maxRate² / (2 ×
+  // maxAccel) between the follower and its target, which upper-bounds how
+  // close the two can be while carrying near-maximum rate — then searched
+  // ~1.9M random piecewise-linear target trajectories (2-15 segments,
+  // rates up to ±1200/s, always respecting a positive floor, follower
+  // seeded consistently with the target's own start) for a counterexample.
+  // None found: undershoot stayed at noise level (≤ 0.008, likely
+  // discretization) in every trial. This is strong evidence, not a formal
+  // proof, that the follower cannot undershoot a floor the demand itself
+  // always respects, for any demand reachable by continuous motion — so the
+  // catastrophic case this clamp guards against has not been shown to be
+  // reachable in practice. The clamp costs nothing and the failure mode
+  // it prevents is severe, so it stays regardless: a cheap guarantee against
+  // an unproven case, not a fix for an observed or demonstrated one. The
+  // demand itself is never below LOOKAT_MIN_HORIZONTAL_DISTANCE
+  // (composeLookAt's collapse guard), so a floor at half of it never engages
+  // in legitimate flight either way.
   clamp: { min: LOOKAT_MIN_HORIZONTAL_DISTANCE / 2 },
 }
 

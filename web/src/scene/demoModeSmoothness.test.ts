@@ -195,11 +195,22 @@ function recordedTour(gridName: string, seed: number, placements: TowerPlacement
  */
 function recordViewPitch(seed: number, placements: TowerPlacement[]): number[] {
   let tour: DemoTourState = createDemoTour({ seed, placements, entry: ENTRY })
-  const pitches: number[] = [tour.kind === 'canyon' ? tour.viewPitch : 0]
+  // Every GRIDS entry has >=2 Towers, so the tour is always 'canyon' kind
+  // (see buildCanyonGraph) — assert rather than silently substituting 0 for
+  // a non-canyon frame, which would inject a fabricated multi-radian step
+  // into the recording instead of failing loudly if that assumption ever
+  // breaks.
+  function viewPitch(t: DemoTourState): number {
+    if (t.kind !== 'canyon') {
+      throw new Error("recordViewPitch expects a 'canyon' tour (placements must have >=2 Towers)")
+    }
+    return t.viewPitch
+  }
+  const pitches: number[] = [viewPitch(tour)]
   const steps = Math.round(TOUR_SECONDS / DT)
   for (let i = 0; i < steps; i++) {
     tour = stepDemoTour(tour, DT, placements)
-    pitches.push(tour.kind === 'canyon' ? tour.viewPitch : 0)
+    pitches.push(viewPitch(tour))
   }
   return pitches
 }
@@ -217,22 +228,27 @@ function recordedViewPitch(gridName: string, seed: number, placements: TowerPlac
 }
 
 /**
- * The per-frame pan-rate-saturation fraction of a pose stream — the same
- * metric the "pans deliberately" invariant computes inline, factored out so
- * #117 item 4's cross-seed aggregate (below) shares the exact computation
- * rather than risking drift between two hand-written copies.
+ * The per-frame pan-rate-saturation boolean of a pose stream — true where
+ * the rendered yaw rate sits at/near VIEW_YAW_MAX_RATE. The one primitive
+ * both `saturationFraction` (below) and the "pans deliberately" invariant's
+ * event/run tracking build on, so the two can never silently drift onto
+ * different computations of the same underlying signal (#117 item 4).
  */
-function saturationFraction(poses: DemoPose[]): number {
-  let saturated = 0
+function saturationFrames(poses: DemoPose[]): boolean[] {
+  const frames: boolean[] = []
   let previous = focusLookAngles(poses[0].position, poses[0].target)
   for (let i = 1; i < poses.length; i++) {
     const angles = focusLookAngles(poses[i].position, poses[i].target)
-    if (Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT > VIEW_YAW_MAX_RATE * 0.98) {
-      saturated++
-    }
+    frames.push(Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT > VIEW_YAW_MAX_RATE * 0.98)
     previous = angles
   }
-  return saturated / (poses.length - 1)
+  return frames
+}
+
+/** The share of {@link saturationFrames} that are saturated — #117 item 4's cross-seed aggregate (below) uses this. */
+function saturationFraction(poses: DemoPose[]): number {
+  const frames = saturationFrames(poses)
+  return frames.filter(Boolean).length / frames.length
 }
 
 function wrapAngle(d: number): number {
@@ -751,41 +767,36 @@ describe.each(GRIDS)(
         //
         // Observed with iteration 3's stronger tower pull (the aim actively
         // pans between Towers): worst single seed 17 events per 90s tour,
-        // each ≤ 2.4s, worst fraction 0.14 (iteration 4: 15 events / 0.146
-        // — essentially unchanged). Bounds:
+        // each ≤ 2.4s (iteration 4: 15 events — essentially unchanged).
+        // Bounds:
         //
         // - events ≤ 24: ~1.4x the observed worst, still far below the
         //   40-65 of a per-waypoint rhythm — the sharper discriminator;
-        // - fraction ≤ 16%: only ~1.14x the observed worst, *below* this
-        //   file's usual 1.25-1.5x headroom convention — deliberately, and
-        //   documented rather than hidden: the bound is pinned from above
-        //   by the ~18% the pre-#105 pinning bug produced (a looser bound
-        //   would no longer exclude the known-bad regime). The suite's
-        //   seeds are fixed, so this cannot flake; a benign-looking tuning
-        //   change that trips it has genuinely eaten most of the distance
-        //   to known-bad and deserves the look;
         // - ≤ 3.5s per event (sustained sweeps stay corner-scale).
-        const MAX_SATURATION_FRACTION = 0.16
+        //
+        // The per-seed *fraction* sub-bound this test asserted through #117
+        // moved to the cross-seed mean below (item 4): the worst single seed
+        // (0.1454) left only ~1.10x headroom under 0.16 — thinner than this
+        // file's usual 1.25-1.5x convention, and reviewed as leaving no real
+        // room to widen without also widening past the known-bad regime a
+        // single seed's variance could ever reach. Events/run stay exact
+        // per-seed guards here; the mean below is the fraction dimension's
+        // home now.
         const MAX_SATURATION_EVENTS = 24
         const MAX_SATURATION_RUN_SECONDS = 3.5
-        let saturated = 0
+        const frames = saturationFrames(poses)
         let events = 0
         let run = 0
         let maxRun = 0
-        let previous = focusLookAngles(poses[0].position, poses[0].target)
-        for (let i = 1; i < poses.length; i++) {
-          const angles = focusLookAngles(poses[i].position, poses[i].target)
-          if (Math.abs(wrapAngle(angles.yaw - previous.yaw)) / DT > VIEW_YAW_MAX_RATE * 0.98) {
-            saturated++
+        for (const saturated of frames) {
+          if (saturated) {
             run++
             if (run === 1) events++
             maxRun = Math.max(maxRun, run)
           } else {
             run = 0
           }
-          previous = angles
         }
-        expect(saturated / (poses.length - 1)).toBeLessThanOrEqual(MAX_SATURATION_FRACTION)
         expect(events).toBeLessThanOrEqual(MAX_SATURATION_EVENTS)
         expect(maxRun * DT).toBeLessThanOrEqual(MAX_SATURATION_RUN_SECONDS)
       })
@@ -934,41 +945,53 @@ describe.each(GRIDS)(
 )
 
 describe('Demo Mode pan-rate saturation, aggregated across every seed and grid (#117 item 4)', () => {
-  // The per-seed "pans deliberately" ceiling above (16% fraction / 24 events)
-  // is deliberately tight — pinned from above by the ~18% known-bad
-  // demand-pinning regime, with only ~1.14x headroom over the worst single
-  // seed (0.146). That's a stochastic metric with thin margin on one seed's
-  // 90s walk; the #117 review's concern was a future added seed tipping it
-  // over with no real regression. It cannot literally flake today (SEEDS is
-  // fixed), but per-seed variance is still real: 5x5 alone spans 0.068-0.145
-  // across its five seeds.
+  // #117 item 4, round 2: round 1 kept the per-seed fraction sub-bound
+  // (0.16) unchanged and added this aggregate as a third, additional check
+  // — leaving the actual thin-headroom bound the ticket was about
+  // unmitigated. Independent review measured the aggregate against milder
+  // synthetic regressions (50%/70%/85% of the real look-ahead, #117 item 2's
+  // guarantee) and found it *dominated* by the per-seed bound: at 70% the
+  // aggregate mean (0.1326) barely trips 0.13 while the per-seed fraction
+  // bound had already failed on 4 of 15 combinations. A companion the
+  // per-seed bound always outpaces doesn't mitigate that bound's own thin
+  // margin — it's a fourth number to maintain that never fires first.
   //
-  // The mean across all 15 seed x grid combinations is a much less
+  // This round instead *replaces* the per-seed fraction sub-bound with this
+  // aggregate (the "pans deliberately" test above now asserts only events
+  // and max run length, both untouched and both comfortably headroomed).
+  // The removed bound was 0.16 against a measured worst single seed of
+  // 0.1454 — only ~1.10x headroom (re-measured; a stale ~1.14x had crept
+  // into that comment, the exact defect ADR-0011 records catching in #126's
+  // review round 1), thinner than this file's usual 1.25-1.5x convention,
+  // and reviewed as leaving no real room to widen further without also
+  // widening past the known-bad regime a single seed could reach. The mean
+  // across all 15 seed x grid combinations is a materially less
   // variance-prone read of the same underlying signal — a single seed's
   // outlier is diluted 15x rather than deciding the result outright.
   // Measured on `main`: mean 0.1016 (individual combos 0.068-0.145).
   // Calibrated bound 0.13 — ~1.28x headroom, this file's usual convention.
+  //
+  // Events stays as the per-seed, sharper discriminator (its own doc
+  // comment above): 24 against an observed worst of 15-17, ~1.4x headroom,
+  // far below the 40-65 of the pre-#105 per-waypoint rhythm. Losing the
+  // per-seed fraction ceiling does not lose per-seed sensitivity — events
+  // was already the stronger signal for the regression classes reachable
+  // by tuning (a corner-geometry regression moves events measurably more
+  // than fraction, per instrumentation during this investigation); the
+  // fraction dimension specifically — the one with the flake-risk margin
+  // this item exists to fix — now lives here, with real headroom, once.
   //
   // Not tautological: reverting #117 item 2's look-ahead coverage guarantee
   // (temporarily starving both extendWindow call sites in stepDemoTour to
   // 10% of the real look-ahead, reproducing the pre-#105 demand-pinning bug)
   // pushes this same mean to 0.174 — comfortably past the 0.13 bound, and
   // close to the original pre-#105 measurement (8.3-17.8%) this whole family
-  // of invariants traces back to. The per-seed ceiling above *also* fails in
-  // that reverted state (10 of the 15 seed/grid combinations exceed 0.16
-  // and/or 24 events), so this is a genuinely independent signal on the real
-  // regression class, not merely redundant with the per-seed test — but
-  // checked at milder synthetic regressions (50%/70%/85% of the real
-  // look-ahead) it did *not* turn out to be the more sensitive one: every
-  // level tried that tripped the aggregate mean already had at least one
-  // per-seed failure too, because the existing per-seed ceiling only needs
-  // one seed to cross and some seeds already sit close to it in the healthy
-  // baseline (5x5 seed 99 at 0.145, 1.4 points under the 0.16 ceiling).
-  // Its value is real but different from "more sensitive": real headroom
-  // (1.28x vs the per-seed test's deliberate ~1.14x) so a future added seed
-  // cannot flake it, and a companion measurement that isn't at the mercy of
-  // any one seed's individual luck.
-  it('the mean saturation fraction across every seed and grid stays with real headroom below the per-seed ceiling', () => {
+  // of invariants traces back to. In that same reverted state the per-seed
+  // events ceiling above *also* fails on 7 of the 15 seed/grid combinations
+  // (all 15 fail the direct #117 item 2 invariant), so the regression class
+  // this whole family guards is caught from multiple independent angles, not
+  // solely by this aggregate.
+  it('the mean saturation fraction across every seed and grid stays with real headroom below the known-bad regime', () => {
     const MAX_MEAN_SATURATION_FRACTION = 0.13
     let total = 0
     let count = 0
