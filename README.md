@@ -18,7 +18,7 @@ htp-k8s is a single binary (the web UI is embedded) that serves a browser UI aga
 
 ```bash
 # Linux amd64 example — see Releases for your platform and the latest version
-tar -xzf htp-k8s_0.3.0_linux_amd64.tar.gz
+tar -xzf htp-k8s_0.4.0_linux_amd64.tar.gz
 ./htp-k8s                     # serves on 127.0.0.1:8080 (loopback only) against your current kubeconfig
 # then open http://localhost:8080
 ```
@@ -32,7 +32,7 @@ docker run --rm -p 127.0.0.1:8080:8080 \
   --user "$(id -u):$(id -g)" \
   -e HTP_K8S_ADDR=:8080 \
   -v "$HOME/.kube/config:/kube/config:ro" \
-  ghcr.io/herzogf/htp-k8s:v0.3.0
+  ghcr.io/herzogf/htp-k8s:v0.4.0
 # then open http://localhost:8080
 ```
 
@@ -44,7 +44,7 @@ docker run --rm --network kind -p 127.0.0.1:8080:8080 \
   --user "$(id -u):$(id -g)" \
   -e HTP_K8S_ADDR=:8080 \
   -v /tmp/htp-k8s-kubeconfig:/kube/config:ro \
-  ghcr.io/herzogf/htp-k8s:v0.3.0
+  ghcr.io/herzogf/htp-k8s:v0.4.0
 # then open http://localhost:8080
 ```
 
@@ -57,7 +57,7 @@ docker run --rm --network host \
   --user "$(id -u):$(id -g)" \
   -e HTP_K8S_ADDR=127.0.0.1:8080 \
   -v "$HOME/.kube/config:/kube/config:ro" \
-  ghcr.io/herzogf/htp-k8s:v0.3.0
+  ghcr.io/herzogf/htp-k8s:v0.4.0
 # then open http://localhost:8080
 ```
 
@@ -103,12 +103,12 @@ Every release is built in CI with **keyless, Sigstore-backed attestations** — 
 
 ```bash
 # the release binary you downloaded
-gh attestation verify htp-k8s_0.3.0_linux_amd64.tar.gz \
+gh attestation verify htp-k8s_0.4.0_linux_amd64.tar.gz \
   --repo herzogf/htp-k8s \
   --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
 
 # the container image (the tag resolves to the multi-arch index)
-gh attestation verify oci://ghcr.io/herzogf/htp-k8s:v0.3.0 \
+gh attestation verify oci://ghcr.io/herzogf/htp-k8s:v0.4.0 \
   --repo herzogf/htp-k8s \
   --signer-workflow herzogf/htp-k8s/.github/workflows/release.yml
 ```
