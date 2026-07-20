@@ -455,6 +455,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history + tags (issue #64): computeTags (below) needs every
+          # existing stable release tag to decide whether THIS release is the
+          # highest — e.g. whether a backport patch may move `latest`.
+          # Without this, checkout still fetches the ONE tag that triggered
+          # the run (a shallow tag-push checkout isn't tag-BLIND, just
+          # tag-SPARSE) — so `git tag --list` would return exactly that one
+          # entry, RELEASE_TAG itself, and every release would trivially
+          # look like "the highest", permanently preserving the exact
+          # backport-moves-latest bug this PR fixes. Same setting, same
+          # reasoning ("fetch-depth: 0" auto-follows tags on every fetched
+          # commit) as the goreleaser job's checkout above, which uses it
+          # for the changelog.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -484,6 +498,89 @@ jobs:
       - name: Build and embed frontend
         run: task release:frontend
 
+      # Decides the moving-tag set for a release (rule + rationale: ADR-0005,
+      # "Moving image tags"; not restated here). Delegated to a pure,
+      # unit-tested JS module rather than inline shell specifically because
+      # this workflow is tag-triggered and can NEVER be exercised by PR CI
+      # (issue #156's lesson) — the module is what gets real PR-time
+      # coverage instead (build.yml's Frontend (Node) job).
+      #
+      # Reads tags from THIS checkout (fetch-depth: 0 above) rather than
+      # querying the registry: cheaper, and avoids an extra authenticated
+      # call this early in the job.
+      #
+      # This step has NO `defaults: run:` block above it in this workflow,
+      # so a bare `run:` here is plain `bash -e` — WITHOUT `pipefail`. A
+      # piped `git tag --list | node ...` would silently swallow a `git`
+      # failure: node would just see empty stdin, read that as "no tags
+      # exist", and conclude "this release is the highest" — moving `latest`
+      # unconditionally, which is exactly the #164-class defect this PR
+      # fixes elsewhere. Four guards, each covering a DIFFERENT way that
+      # scenario can happen — none of them substitutes for another:
+      #
+      # (0) `git rev-parse --is-shallow-repository` is checked FIRST and
+      #     fails loudly if the checkout above ever regresses (a future edit
+      #     drops `fetch-depth: 0`, an `actions/checkout` default changes, a
+      #     badly-resolved merge conflict). This is NOT redundant with (3)
+      #     below: a shallow tag-push checkout still fetches the ONE tag
+      #     that triggered the run, so RELEASE_TAG would still be present
+      #     and (3) alone would PASS — `computeTags` would then see no other
+      #     stable tags, conclude "this is trivially the highest", and move
+      #     `latest`/vX unconditionally, invisibly to PR CI. (0) is the
+      #     only guard here that actually defends the "full tag history" the
+      #     whole rule depends on, rather than just "the read didn't fail".
+      # (1) `git tag --list` is read into a variable on its own line, never
+      #     piped straight into node, so its own exit status is never masked
+      #     by anything downstream.
+      # (2) `set -euo pipefail` below is added for defense in depth against
+      #     a future edit reintroducing a pipe.
+      # (3) RELEASE_TAG is asserted present in the tag-list output before
+      #     it's trusted — guaranteed to already be there once pushed (true
+      #     even under a shallow checkout, per (0) above), so its absence
+      #     unambiguously means the READ itself failed (a `git` error, an
+      #     empty/garbled result) — never "no tags exist yet" (impossible:
+      #     this also covers the first-ever release, since RELEASE_TAG alone
+      #     is always enough to satisfy it).
+      # (4) The script's own output is checked non-empty before being
+      #     trusted, in case the CLI's direct-execution guard
+      #     (`import.meta.url === ...`) were ever to stop matching and the
+      #     script silently printed nothing and exited 0.
+      #
+      # Echoed (not just piped through silently): this is what lets the
+      # existing rc-dry-run practice prove the whole workflow<->script seam
+      # end-to-end (script found, invoked, stdin/argv wired, tag list
+      # actually read, output parsed) even though a prerelease dry-run only
+      # ever computes the exact tag alone — the moving-tag branch itself is
+      # otherwise first-run-live.
+      - name: Compute image tags
+        id: tags
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error::shallow checkout -- cannot determine the highest release tag (fetch-depth: 0 is required on this job's Checkout step)" >&2
+            exit 1
+          fi
+
+          existing_tags="$(git tag --list 'v*')"
+
+          if ! grep -qxF "$RELEASE_TAG" <<<"$existing_tags"; then
+            echo "::error::git tag --list did not include ${RELEASE_TAG} itself -- the tag read failed (RELEASE_TAG is always present once pushed), refusing to compute image tags from a possibly-incomplete list" >&2
+            exit 1
+          fi
+
+          tags="$(node .github/scripts/compute-image-tags.mjs "$RELEASE_TAG" <<<"$existing_tags")"
+
+          if [ -z "$tags" ]; then
+            echo "::error::compute-image-tags.mjs produced an empty tag list for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
+          echo "Computed image tags for ${RELEASE_TAG}: ${tags}"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
       # ko builds the multi-arch image (no Dockerfile, no local daemon) and
       # pushes it to GHCR under the repo. `ko login` uses the workflow's
       # GITHUB_TOKEN — no extra secret needed. Values flow through `env:` and
@@ -493,9 +590,8 @@ jobs:
       # VERSION/COMMIT/DATE feed the version ldflags in .ko.yaml so the image
       # binary reports the real release via `htp-k8s version`.
       #
-      # Tagging: always tag the exact version. Add `latest` ONLY for a stable
-      # release — a prerelease tag (contains `-` per SemVer, e.g. v1.2.3-rc.1)
-      # must not move `latest`.
+      # TAGS comes straight from the "Compute image tags" step above (issue
+      # #64) — see that step's comment for the full rule.
       #
       # Capture the published, digest-pinned reference via `--image-refs=<file>`
       # instead of parsing ko's stdout (issue #92: ko printed a bare `repo:tag`
@@ -517,22 +613,17 @@ jobs:
           REGISTRY_USER: ${{ github.actor }}
           RELEASE_TAG: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
+          TAGS: ${{ steps.tags.outputs.tags }}
         run: |
           echo "$REGISTRY_TOKEN" | ko login ghcr.io \
             --username "$REGISTRY_USER" --password-stdin
-
-          tags="$RELEASE_TAG"
-          case "$RELEASE_TAG" in
-            *-*) echo "prerelease $RELEASE_TAG: not tagging latest" ;;
-            *)   tags="$RELEASE_TAG,latest" ;;
-          esac
 
           export VERSION="$RELEASE_TAG"
           export DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           ko build --bare \
             --platform=linux/amd64,linux/arm64 \
-            --tags "$tags" \
+            --tags "$TAGS" \
             --image-refs=ko-image-refs.txt \
             ./cmd/htp-k8s
 

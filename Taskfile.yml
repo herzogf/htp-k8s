@@ -47,6 +47,10 @@ tasks:
       # after web:test so web/node_modules (which it borrows via a symlink)
       # already exists.
       - task: capture:test
+      # Release image-tag computation's pure-function suite (issue #64,
+      # rule + rationale: ADR-0005 "Moving image tags"). Explicit file, not a
+      # glob — see build.yml's matching step for why.
+      - node --test .github/scripts/compute-image-tags.test.mjs
       # Scoped to our own Go packages rather than "./...": once web:test has
       # run `npm ci`, web/node_modules exists and can itself contain stray
       # vendored .go files (e.g. the "flatted" package does) that "./..."
