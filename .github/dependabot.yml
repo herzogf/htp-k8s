@@ -4,6 +4,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Default Dependabot inference produces "chore(deps): …", which
+    # .goreleaser.yaml's changelog `exclude` filters strip from release
+    # notes (`^chore(\(.*\))?:`) — a CVE-fixing bump would ship silently
+    # absent from what a reader sees. "build" is not in that exclude list
+    # (verified against the filters in .goreleaser.yaml), so bumps stay
+    # visible. See issue #142.
+    commit-message:
+      prefix: "build"
     groups:
       gomod-minor-patch:
         patterns:
@@ -16,6 +24,9 @@ updates:
     directory: "/web"
     schedule:
       interval: "weekly"
+    # Same reasoning as the gomod entry above — see issue #142.
+    commit-message:
+      prefix: "build"
     groups:
       npm-minor-patch:
         patterns:
