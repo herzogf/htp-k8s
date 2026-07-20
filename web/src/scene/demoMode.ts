@@ -796,21 +796,27 @@ export const VIEW_DISTANCE_FOLLOWER: FollowerLimits = {
   // follower math that reaching this follower's max rate via any
   // *physically reachable* history (i.e. the state this follower's own
   // continuous dynamics could actually produce — never an externally reset
-  // rate) requires a spin-up/tracking lag of at least maxRate² / (2 ×
-  // maxAccel) between the follower and its target, which upper-bounds how
-  // close the two can be while carrying near-maximum rate — then searched
-  // ~1.9M random piecewise-linear target trajectories (2-15 segments,
-  // rates up to ±1200/s, always respecting a positive floor, follower
-  // seeded consistently with the target's own start) for a counterexample.
-  // None found: undershoot stayed at noise level (≤ 0.008, likely
-  // discretization) in every trial. This is strong evidence, not a formal
-  // proof, that the follower cannot undershoot a floor the demand itself
-  // always respects, for any demand reachable by continuous motion — so the
-  // catastrophic case this clamp guards against has not been shown to be
-  // reachable in practice. The clamp costs nothing and the failure mode
-  // it prevents is severe, so it stays regardless: a cheap guarantee against
-  // an unproven case, not a fix for an observed or demonstrated one. The
-  // demand itself is never below LOOKAT_MIN_HORIZONTAL_DISTANCE
+  // rate) requires a lag between the follower and its target of at least
+  // maxRate × responseTime = 3.52: `desired = clamp(error / responseTime,
+  // ±maxRate)` only saturates at maxRate once |error| already reaches that.
+  // That already exceeds the *braking distance* — how far the follower
+  // travels decelerating from maxRate to 0 at maxAccel, maxRate² / (2 ×
+  // maxAccel) = 1.467 — by 2.4x, and follows a fortiori from the documented
+  // non-overshoot condition (`maxAccel × responseTime` = 10.56 > `maxRate` =
+  // 8.8): the margin between the two is exactly what buys this 2.4x. This
+  // upper-bounds how close the two can be while carrying near-maximum rate
+  // — then searched ~1.9M random piecewise-linear target trajectories (2-15
+  // segments, rates up to ±1200/s, always respecting a positive floor,
+  // follower seeded consistently with the target's own start) for a
+  // counterexample. None found: undershoot stayed at noise level (≤ 0.008,
+  // likely discretization) in every trial. This is strong evidence, not a
+  // formal proof, that the follower cannot undershoot a floor the demand
+  // itself always respects, for any demand reachable by continuous motion —
+  // so the catastrophic case this clamp guards against has not been shown
+  // to be reachable in practice. The clamp costs nothing and the failure
+  // mode it prevents is severe, so it stays regardless: a cheap guarantee
+  // against an unproven case, not a fix for an observed or demonstrated
+  // one. The demand itself is never below LOOKAT_MIN_HORIZONTAL_DISTANCE
   // (composeLookAt's collapse guard), so a floor at half of it never engages
   // in legitimate flight either way.
   clamp: { min: LOOKAT_MIN_HORIZONTAL_DISTANCE / 2 },

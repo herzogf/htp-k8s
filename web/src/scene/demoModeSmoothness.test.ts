@@ -767,21 +767,37 @@ describe.each(GRIDS)(
         //
         // Observed with iteration 3's stronger tower pull (the aim actively
         // pans between Towers): worst single seed 17 events per 90s tour,
-        // each ≤ 2.4s (iteration 4: 15 events — essentially unchanged).
-        // Bounds:
+        // each ≤ 2.4s, worst fraction 0.1454 (iteration 4: 15 events —
+        // essentially unchanged). Bounds:
         //
         // - events ≤ 24: ~1.4x the observed worst, still far below the
-        //   40-65 of a per-waypoint rhythm — the sharper discriminator;
+        //   40-65 of a per-waypoint rhythm;
+        // - fraction ≤ 16%: only ~1.10x the observed worst (0.1454) — this
+        //   file's usual 1.25-1.5x convention would land above the ~18%
+        //   known-bad demand-pinning regime, so this bound is *correctly*
+        //   bracketed tight between the two (ADR-0011's calibration rule),
+        //   not merely tight by neglect. #117 round 2 briefly replaced this
+        //   with only the cross-seed mean below, reasoning that a tight
+        //   per-seed bound risks flaking on a future added seed — but
+        //   re-review measured a real, present blind spot instead of that
+        //   hypothetical one: at 85% of the real look-ahead (a *reachable*
+        //   regression, not synthetic), 5x5 seed 99's fraction hit 0.1652,
+        //   above this bound, while events stayed at 18 (below 24) and the
+        //   aggregate mean stayed at 0.1108 (below 0.13) — the whole
+        //   post-replacement suite missed it. Fraction is the sharper
+        //   discriminator here, not events (on the worst-fraction seed,
+        //   fraction sat at 1.10x its bound vs events at 1.85x its own);
+        //   `events ≤ 24` and `maxRun ≤ 3.5s` together only imply a
+        //   fraction ceiling of 24 × 3.5 / 90 ≈ 0.93 — no real fraction
+        //   guard at all. Restored;
         // - ≤ 3.5s per event (sustained sweeps stay corner-scale).
         //
-        // The per-seed *fraction* sub-bound this test asserted through #117
-        // moved to the cross-seed mean below (item 4): the worst single seed
-        // (0.1454) left only ~1.10x headroom under 0.16 — thinner than this
-        // file's usual 1.25-1.5x convention, and reviewed as leaving no real
-        // room to widen without also widening past the known-bad regime a
-        // single seed's variance could ever reach. Events/run stay exact
-        // per-seed guards here; the mean below is the fraction dimension's
-        // home now.
+        // The cross-seed mean below (item 4) is a genuine *addition*, not a
+        // replacement: it guards the same fraction dimension with real
+        // headroom against a future added seed's variance (the concern
+        // #117 raised), while this bound keeps catching a single-seed
+        // regression the mean's 15x dilution would otherwise mask.
+        const MAX_SATURATION_FRACTION = 0.16
         const MAX_SATURATION_EVENTS = 24
         const MAX_SATURATION_RUN_SECONDS = 3.5
         const frames = saturationFrames(poses)
@@ -797,6 +813,9 @@ describe.each(GRIDS)(
             run = 0
           }
         }
+        expect(frames.filter(Boolean).length / frames.length).toBeLessThanOrEqual(
+          MAX_SATURATION_FRACTION,
+        )
         expect(events).toBeLessThanOrEqual(MAX_SATURATION_EVENTS)
         expect(maxRun * DT).toBeLessThanOrEqual(MAX_SATURATION_RUN_SECONDS)
       })
@@ -945,52 +964,50 @@ describe.each(GRIDS)(
 )
 
 describe('Demo Mode pan-rate saturation, aggregated across every seed and grid (#117 item 4)', () => {
-  // #117 item 4, round 2: round 1 kept the per-seed fraction sub-bound
-  // (0.16) unchanged and added this aggregate as a third, additional check
-  // — leaving the actual thin-headroom bound the ticket was about
-  // unmitigated. Independent review measured the aggregate against milder
-  // synthetic regressions (50%/70%/85% of the real look-ahead, #117 item 2's
-  // guarantee) and found it *dominated* by the per-seed bound: at 70% the
-  // aggregate mean (0.1326) barely trips 0.13 while the per-seed fraction
-  // bound had already failed on 4 of 15 combinations. A companion the
-  // per-seed bound always outpaces doesn't mitigate that bound's own thin
-  // margin — it's a fourth number to maintain that never fires first.
+  // #117 item 4 went through three rounds; this is a genuine *addition* to
+  // the per-seed fraction bound above (0.16), not a replacement for it —
+  // round 2 tried replacing and that was itself a regression, corrected in
+  // round 3.
   //
-  // This round instead *replaces* the per-seed fraction sub-bound with this
-  // aggregate (the "pans deliberately" test above now asserts only events
-  // and max run length, both untouched and both comfortably headroomed).
-  // The removed bound was 0.16 against a measured worst single seed of
-  // 0.1454 — only ~1.10x headroom (re-measured; a stale ~1.14x had crept
-  // into that comment, the exact defect ADR-0011 records catching in #126's
-  // review round 1), thinner than this file's usual 1.25-1.5x convention,
-  // and reviewed as leaving no real room to widen further without also
-  // widening past the known-bad regime a single seed could reach. The mean
-  // across all 15 seed x grid combinations is a materially less
-  // variance-prone read of the same underlying signal — a single seed's
-  // outlier is diluted 15x rather than deciding the result outright.
-  // Measured on `main`: mean 0.1016 (individual combos 0.068-0.145).
-  // Calibrated bound 0.13 — ~1.28x headroom, this file's usual convention.
+  // Round 1 added this aggregate alongside the unchanged per-seed bound.
+  // Round 2 replaced the per-seed fraction bound with this aggregate,
+  // reasoning that a single-seed regression the mean's 15x dilution could
+  // mask was an acceptable trade against the per-seed bound's thin
+  // (~1.10x) headroom. Re-review measured that trade directly rather than
+  // trusting the reasoning: starving both extendWindow call sites (#117
+  // item 2's guarantee) to 85% of the real look-ahead — a *reachable*
+  // regression, not a synthetic worst case — pushed 5x5 seed 99's fraction
+  // to 0.1652 (would have failed the removed 0.16 bound) while events
+  // stayed at 18 (below 24) and this aggregate's mean stayed at 0.1108
+  // (below 0.13): round 2's suite caught nothing where round 1's did. On
+  // that same seed, fraction sat at 1.10x its bound versus events at 1.85x
+  // its own — fraction was the sharper discriminator, not events, and
+  // `events ≤ 24` with `maxRun ≤ 3.5s` together only imply a fraction
+  // ceiling of 24 × 3.5 / 90 ≈ 0.93 (no real guard at all). The per-seed
+  // fraction bound is restored (see "pans deliberately" above, whose
+  // comment carries the full ADR-0011 calibration argument for why 0.16 is
+  // *correctly* tight, not merely tight by neglect).
   //
-  // Events stays as the per-seed, sharper discriminator (its own doc
-  // comment above): 24 against an observed worst of 15-17, ~1.4x headroom,
-  // far below the 40-65 of the pre-#105 per-waypoint rhythm. Losing the
-  // per-seed fraction ceiling does not lose per-seed sensitivity — events
-  // was already the stronger signal for the regression classes reachable
-  // by tuning (a corner-geometry regression moves events measurably more
-  // than fraction, per instrumentation during this investigation); the
-  // fraction dimension specifically — the one with the flake-risk margin
-  // this item exists to fix — now lives here, with real headroom, once.
+  // This aggregate's own value is real and distinct: the mean across all 15
+  // seed x grid combinations is a materially less variance-prone read of
+  // the same underlying signal — a single seed's outlier is diluted 15x
+  // rather than deciding the result outright — so it adds headroom against
+  // a *future added seed* (the #117 review's original, still-valid
+  // concern) without weakening the per-seed bound's present catch. Measured
+  // on `main`: mean 0.1016 (individual combos 0.068-0.145). Calibrated
+  // bound 0.13 — ~1.28x headroom, this file's usual convention.
   //
-  // Not tautological: reverting #117 item 2's look-ahead coverage guarantee
-  // (temporarily starving both extendWindow call sites in stepDemoTour to
-  // 10% of the real look-ahead, reproducing the pre-#105 demand-pinning bug)
-  // pushes this same mean to 0.174 — comfortably past the 0.13 bound, and
-  // close to the original pre-#105 measurement (8.3-17.8%) this whole family
-  // of invariants traces back to. In that same reverted state the per-seed
-  // events ceiling above *also* fails on 7 of the 15 seed/grid combinations
-  // (all 15 fail the direct #117 item 2 invariant), so the regression class
-  // this whole family guards is caught from multiple independent angles, not
-  // solely by this aggregate.
+  // Re-confirmed (not merely inherited) against the final code: reverting
+  // #117 item 2's coverage guarantee to 10% of the real look-ahead (the
+  // original, more severe two-state scenario) pushes this mean to 0.174 —
+  // comfortably past 0.13, and close to the original pre-#105 measurement
+  // (8.3-17.8%) this whole family of invariants traces back to. In that
+  // same state the per-seed fraction bound above fails on all 15
+  // seed/grid combinations, events fails on 7 of 15, and the direct #117
+  // item 2 invariant fails on all 15 — the regression class this whole
+  // family guards is caught from multiple independent angles at severe
+  // starvation, and by the restored fraction bound alone at the milder,
+  // more realistic 85% starvation the other bounds miss.
   it('the mean saturation fraction across every seed and grid stays with real headroom below the known-bad regime', () => {
     const MAX_MEAN_SATURATION_FRACTION = 0.13
     let total = 0
