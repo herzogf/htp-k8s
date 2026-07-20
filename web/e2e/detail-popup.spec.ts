@@ -175,8 +175,14 @@ test('detail popup: towers() panelCount stays paired with the right Tower (the t
   expect(fakeNodeCounts.every((count) => count !== undefined)).toBe(true)
   expect(new Set(fakeNodeCounts).size).toBe(1)
 
-  // Every Pod is accounted for exactly once across all Towers — the zip
-  // can't silently drop or double-count an entry either.
+  // NOT a zip-alignment check (review finding, round 3): panelCount is
+  // literally `towers[i].panels.length`, and pods() is a flatMap of those
+  // same per-Tower arrays — so this sum trivially equals pods.length by
+  // construction, with no placement involved, and can't catch a
+  // towers[i]/placements[i] misalignment (the equal-share assertion above
+  // is what has teeth for that). Kept anyway as a basic internal-
+  // consistency sanity check (no Pod silently dropped or double-counted by
+  // the hook's own aggregation) — just not a stronger guarantee than that.
   const totalPanelCount = towers.reduce((sum, t) => sum + t.panelCount, 0)
   expect(totalPanelCount).toBe(pods.length)
 })

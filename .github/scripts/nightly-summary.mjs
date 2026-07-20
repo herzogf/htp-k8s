@@ -17,7 +17,15 @@
 // Run with `if: always()` from nightly.yml so a FAILED run still gets a
 // summary — that is when it matters most. Every JSON read is defensive
 // (missing/unparsable file -> a "did not report" line, never a thrown
-// error that would abort the step before anything is written).
+// error that would abort the step before anything is written) — AND every
+// section that reads nested fields off a parsed-but-possibly-unexpectedly-
+// shaped JSON (e.g. a test process killed mid-write leaving a file that's
+// valid JSON but missing a field the happy path assumes, like
+// `perf.loadMs`) is itself wrapped so that section degrades to its own
+// "not available" line instead of throwing and aborting the whole script
+// before the sections below it get a chance to render (round-3 review
+// finding: a `readJson` guard alone does not cover this).
+
 import fs from 'node:fs'
 
 const WEB_DIR = 'web'
@@ -78,7 +86,8 @@ lines.push('')
 // ---------------------------------------------------------------------------
 lines.push('### Wrap / height-growth thresholds engaged (panel-wrap.spec.ts)')
 const wrap = readJson(`${RESULTS_DIR}/nightly-wrap-summary.json`)
-if (wrap) {
+try {
+  if (!wrap) throw new Error('missing or unparsable')
   lines.push(
     `- Busiest Tower \`${wrap.busiestTowerName}\`: **${wrap.busiestPanelCount}** panels ` +
       `(wrap threshold > ${wrap.wrapThresholdPanels}, height-growth threshold > ${wrap.growthThresholdPanels})`,
@@ -89,9 +98,13 @@ if (wrap) {
       `busiest/sparse Tower's own RENDERED height: **${wrap.busiestRenderedHeight}** / **${wrap.sparsestRenderedHeight}** ` +
       `(the "unfilled, not shorter" property: these must be equal)`,
   )
-} else {
+} catch {
+  // Covers both "no file at all" (readJson already returned null above) and
+  // "a file was there but didn't have the shape this section assumes" (a
+  // test killed mid-write) — either way, this section degrades to one line
+  // rather than throwing and losing every section below it.
   lines.push(
-    '- _Not available — the busy-vs-sparse test did not complete (see the uploaded artifacts)._',
+    '- _Not available — the busy-vs-sparse test did not complete or report cleanly (see the uploaded artifacts)._',
   )
 }
 lines.push('')
@@ -109,18 +122,25 @@ const perf = readJson(`${RESULTS_DIR}/nightly-perf-summary.json`)
 // e2e-nightly compilation domain (same restatement convention the specs
 // themselves use for src/ constants).
 const POPULATE_BUDGET_MS = 100_000
-if (perf) {
-  const loadMs = perf.loadMs.navigationToPopulatedScene
+try {
+  if (!perf) throw new Error('missing or unparsable')
+  const loadMs = perf.loadMs?.navigationToPopulatedScene
+  if (loadMs === undefined) throw new Error('unexpected shape: perf.loadMs.navigationToPopulatedScene')
   lines.push(
     `- Load: navigation → populated scene in **${fmtMs(loadMs)}** ` +
       `(budget ${fmtMs(POPULATE_BUDGET_MS)}, ${pct(loadMs, POPULATE_BUDGET_MS)} used)`,
   )
   lines.push(
-    `- Steady-state frame time: avg **${perf.frameTimeMs.avg} ms** (~${perf.fpsAvg} FPS), ` +
-      `p95 **${perf.frameTimeMs.p95} ms**, max **${perf.frameTimeMs.max} ms** (${perf.frameTimeMs.sampleCount} samples)`,
+    `- Steady-state frame time: avg **${perf.frameTimeMs?.avg} ms** (~${perf.fpsAvg} FPS), ` +
+      `p95 **${perf.frameTimeMs?.p95} ms**, max **${perf.frameTimeMs?.max} ms** (${perf.frameTimeMs?.sampleCount} samples)`,
   )
-} else {
-  lines.push('- _Not available — perf.spec.ts did not complete (see the uploaded artifacts)._')
+} catch {
+  // Same defense-in-depth as the wrap section above: a present-but-
+  // unexpectedly-shaped JSON (killed mid-write) degrades this section
+  // alone rather than throwing and aborting the rest of the summary.
+  lines.push(
+    '- _Not available — perf.spec.ts did not complete or report cleanly (see the uploaded artifacts)._',
+  )
 }
 lines.push('')
 
@@ -132,7 +152,8 @@ lines.push('')
 // ---------------------------------------------------------------------------
 lines.push('### Per-test wall clock')
 const results = readJson(`${RESULTS_DIR}/results.json`)
-if (results) {
+try {
+  if (!results) throw new Error('missing or unparsable')
   /** Flattens Playwright's nested suite/spec tree into one list of specs. */
   function flattenSpecs(suites) {
     return suites.flatMap((suite) => [
@@ -160,9 +181,12 @@ if (results) {
       ? '⚠️ **At least one test needed a retry this run** — an early signal its timeout margin may be eroding.'
       : '_No test needed a retry this run._',
   )
-} else {
+} catch {
+  // Same defense-in-depth as the sections above: a present-but-
+  // unexpectedly-shaped results.json (e.g. `suites` not an array) degrades
+  // this section alone rather than throwing and losing the sections below.
   lines.push(
-    '- _Not available — the Playwright run did not produce its JSON report (see the uploaded artifacts)._',
+    '- _Not available — the Playwright run did not produce its JSON report cleanly (see the uploaded artifacts)._',
   )
 }
 lines.push('')

@@ -9,7 +9,9 @@ name: Nightly
 #      default: 15 fake nodes, ~1,231 pods, one deliberately dense Tower and
 #      one deliberately sparse one — see that script's own header for why
 #      this is smaller than ADR-0004's "50+ nodes, thousands of pods"
-#      aspiration and how to reach that larger scale on demand), drives the
+#      aspiration and how to reach that larger scale on demand; restoring
+#      that aspiration as the unattended scheduled default is tracked in
+#      #174), drives the
 #      real rendered scene, and captures a load-time/frame-time signal in a
 #      JSON artifact comparable run over run. Never run at PR time: ADR-0004
 #      calls out that rendering that many instanced Panels via headless
@@ -72,8 +74,12 @@ on:
           Leave blank for that script's own default (15, rehearsed end to
           end — see that script's header for why). Raise this (e.g. 50) for
           a conscious, manually-triggered run at ADR-0004's larger
-          aspirational scale; that scale is NOT yet rehearsed end to end, so
-          it deliberately never runs unattended on the schedule trigger.
+          aspirational scale (tracked in #174); that scale is NOT yet
+          rehearsed end to end, so it deliberately never runs unattended on
+          the schedule trigger. Raising node_count alone is safe: scene
+          height keys off the busiest Tower, so a 50-node dispatch at the
+          default hot_pod_count still keeps h ≈ 11.24 (confirmed) — see
+          hot_pod_count below for the knob that is NOT safe to raise.
         required: false
         type: string
       hot_pod_count:
@@ -81,7 +87,12 @@ on:
           Pod count on the deliberately "hot" node (triggers the four-face
           wrap + scene height growth). Leave blank for the script's own
           default (260, rehearsed end to end — see seed-scale.sh's header for
-          why NOT the larger value this used to default to).
+          why NOT the larger value this used to default to). Do NOT raise
+          this past 260 (e.g. back to the retired 420 default) without first
+          reading #173: a hot pod count that tall reproduces the demoMode.ts
+          climb-rate flake this PR measured and deliberately shipped without
+          fixing — unlike node_count, this is the knob that actually
+          triggers it.
         required: false
         type: string
       sparse_pod_count:

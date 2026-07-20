@@ -164,10 +164,17 @@ test('demo mode over a grown scene: the automated flight climbs above the REAL (
 
     // The regression #162 fixed, caught the instant it recurs: the flight
     // reaching an altitude that genuinely clears the real roofline (a small
-    // margin above it, not merely touching it).
-    if (!sawOverRoofline && pos[1] >= rooflineY * 1.02) {
+    // margin above it, not merely touching it). Break the instant this is
+    // satisfied — FLIGHT_DURATION_MS (260s, >3x the worst of 4 real
+    // measured samples) is meant to be HEADROOM for a slow/contended run,
+    // not a fixed spend every run pays regardless of outcome. Sampling for
+    // the full window unconditionally would burn ~4.3 real minutes of the
+    // job's 60-minute budget on every green run (worse on a retry) instead
+    // of holding that margin in reserve.
+    if (pos[1] >= rooflineY * 1.02) {
       await page.screenshot({ path: testInfo.outputPath('demo-mode-over-grown-roofline.png') })
       sawOverRoofline = true
+      break
     }
 
     await page.waitForTimeout(POLL_INTERVAL_MS)
