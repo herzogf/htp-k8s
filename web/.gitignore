@@ -18,6 +18,11 @@ e2e-results
 test-results
 playwright-report
 
+# Nightly full-scale suite (issue #29) — its own output dirs, see
+# playwright.config.ts's HTP_K8S_E2E_SUITE branch.
+e2e-nightly-results
+playwright-nightly-report
+
 # go-task local cache (from running `task` against Taskfile.yml)
 .task
 
