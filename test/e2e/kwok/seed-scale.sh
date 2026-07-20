@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Seed the FULL-SCALE amount of KWOK-simulated data into a kind cluster —
-# ADR-0004's "full target scale" tier (50+ nodes, thousands of pods),
-# reserved for the nightly job (issue #29) and never run against the
-# PR-blocking e2e job's cluster (that job uses the modest tier, seed.sh).
+# Seed a FULL-SCALE amount of KWOK-simulated data into a kind cluster — a
+# qualitatively denser tier than the PR-blocking e2e job's cluster (that job
+# uses the modest tier, seed.sh: 6 nodes / 30 pods), reserved for the nightly
+# job (issue #29) and never run at PR time.
 #
 # Shares seed.sh's model (a KWOK controller layered onto the one real kind
 # node; fake Nodes/Pods as ordinary API objects) and its vendored manifests
@@ -14,21 +14,55 @@
 # scene-wide height growth (docs/adr's ADR-0004, issue #29's acceptance
 # criteria):
 #
-#   - node 0 ("hot"): HOT_POD_COUNT pods (default 420) — comfortably past
+#   - node 0 ("hot"): HOT_POD_COUNT pods (default 260) — comfortably past
 #     panelLayout.ts's ~34-pod single-face wrap threshold and ~132-pod
 #     height-growth threshold (see that file's sceneRowsPerFace/
 #     sceneTowerHeight), so this Tower visibly wraps across all four faces
-#     and grows the WHOLE SCENE taller.
+#     and grows the WHOLE SCENE taller (to h ≈ 11.24 at this default — the
+#     exact height PR #162's own manual verification used). NOT 420 (this
+#     script's original default): issue #171's rehearsal found demoMode.ts's
+#     climb-out mechanics (`MAX_CLIMB_GRADIENT`, a fixed world-units/second
+#     climb rate that does NOT scale with the scene's grown roofline) cannot
+#     always complete the ascent to the overview altitude band within one
+#     overview episode's fixed waypoint budget once the roofline passes
+#     roughly 3x the resting TOWER_HEIGHT (420 pods grows the scene to
+#     h ≈ 18.24 ⇒ scale ≈ 3.04, and demo-mode-roofline.spec.ts's nightly
+#     roofline-clearance guard was flaky at exactly that height across
+#     repeated real runs). 260 pods keeps scale ≈ 1.87, well inside the
+#     climb-out's budget, and is still comfortably past both thresholds
+#     below. This is a genuine gap in demoMode.ts's PRE-EXISTING (unchanged
+#     by this PR) altitude choreography, not a bug in this seed script —
+#     recorded in docs/agents/findings.md; fixing the choreography itself is
+#     out of this PR's scope (ADR-0011 motion-quality work has its own
+#     build-metric/tune/pin/human-review loop).
 #   - node 1 ("sparse"): SPARSE_POD_COUNT pods (default 3) — deliberately
 #     tiny, so once the hot Tower forces scene-wide height growth, this
 #     Tower sits at the SAME grown height with mostly unfilled faces rather
 #     than being shorter (the property #29 flags as "most likely to look
 #     wrong even when the math is right").
 #   - the remaining nodes: a varied medium spread (MEDIUM_POD_MIN..MAX,
-#     deterministic per node index, no RNG) so the total reaches
-#     "thousands of pods" across 50+ nodes for the performance signal, and
-#     the scene reads as a real varied cluster rather than two outlier
-#     Towers surrounded by empty ones.
+#     deterministic per node index, no RNG) so the scene reads as a real
+#     varied cluster rather than two outlier Towers surrounded by empty
+#     ones, and there's a real performance signal to sample.
+#
+# DEFAULTS AND WHY THEY'RE SMALLER THAN ADR-0004'S "50+ nodes, thousands of
+# pods" ASPIRATION (issue #171 review finding): that figure was never
+# actually rehearsed end to end before this workflow's first scheduled run,
+# and doing so here found real problems at it (occlusion in a camera framing
+# formula, a too-tight demo-mode-roofline.spec.ts timeout, a demoMode.ts
+# climb-out that can't keep up with a very tall roofline — see HOT_POD_COUNT's
+# own comment above — and an unverified 60-minute job budget against a
+# ~3,900-object serial `kubectl apply`). The shipped default below —
+# NODE_COUNT=15 (16 Towers with the real kind node), ~1,231 pods with these
+# defaults — IS rehearsed end to end (a real kind+KWOK cluster, seeded from
+# cold in well under 3 minutes, followed by the full `task web:e2e:nightly`
+# suite, all passing, repeatedly) and is already a qualitatively different
+# scale tier than the PR suite's 6 nodes/30 pods — comfortably past both the
+# wrap and height-growth thresholds above. The larger, ADR-0004-aspirational
+# scale (50 nodes, ~3,671 pods with these same per-node defaults) is still
+# reachable, but only as a conscious, manually-triggered `workflow_dispatch`
+# run (nightly.yml's `node_count` input) — never the unattended scheduled
+# trigger — until it, too, is rehearsed end to end at that scale.
 #
 # All pods are created directly Running (no phase variety) — this script is
 # about SCALE and LAYOUT, not phase-color coverage (seed.sh's modest tier
@@ -51,16 +85,43 @@ NS="default"
 POD_SELECTOR="app.kubernetes.io/managed-by=htp-k8s-e2e-seed-scale"
 PAUSE_IMAGE="registry.k8s.io/pause:3.10"
 
-# Overridable via env for local experimentation; the nightly workflow uses
-# the defaults, which are what the doc comment above and issue #29 describe.
-NODE_COUNT="${HTP_K8S_SEED_SCALE_NODE_COUNT:-50}"
-HOT_POD_COUNT="${HTP_K8S_SEED_SCALE_HOT_POD_COUNT:-420}"
+# Overridable via env for local experimentation; the SCHEDULED nightly
+# workflow trigger uses these defaults (see the header comment above for why
+# NODE_COUNT is 15, not ADR-0004's 50+ aspiration). A manually-triggered
+# `workflow_dispatch` run can override any of these to rehearse at a larger
+# (or smaller) scale without editing this file.
+NODE_COUNT="${HTP_K8S_SEED_SCALE_NODE_COUNT:-15}"
+HOT_POD_COUNT="${HTP_K8S_SEED_SCALE_HOT_POD_COUNT:-260}"
 SPARSE_POD_COUNT="${HTP_K8S_SEED_SCALE_SPARSE_POD_COUNT:-3}"
 MEDIUM_POD_MIN="${HTP_K8S_SEED_SCALE_MEDIUM_POD_MIN:-40}"
 MEDIUM_POD_RANGE="${HTP_K8S_SEED_SCALE_MEDIUM_POD_RANGE:-60}"
 
+# Validate every knob is actually a non-negative integer BEFORE it reaches
+# arithmetic (`((...))`, `%`) or `[ -lt ]` — an unset-but-non-numeric
+# workflow_dispatch input (e.g. someone typos a word into the GitHub Actions
+# "Run workflow" form) would otherwise fail deep inside this script with a
+# bare, confusing "integer expression expected", and MEDIUM_POD_RANGE=0
+# would divide-by-zero in the per-node `%` below. Fail fast, at the top, with
+# a clear diagnostic naming the offending knob.
+require_nonneg_int() {
+  local name="$1" value="$2"
+  if ! [[ "${value}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: ${name} must be a non-negative integer, got '${value}'" >&2
+    exit 1
+  fi
+}
+require_nonneg_int HTP_K8S_SEED_SCALE_NODE_COUNT "${NODE_COUNT}"
+require_nonneg_int HTP_K8S_SEED_SCALE_HOT_POD_COUNT "${HOT_POD_COUNT}"
+require_nonneg_int HTP_K8S_SEED_SCALE_SPARSE_POD_COUNT "${SPARSE_POD_COUNT}"
+require_nonneg_int HTP_K8S_SEED_SCALE_MEDIUM_POD_MIN "${MEDIUM_POD_MIN}"
+require_nonneg_int HTP_K8S_SEED_SCALE_MEDIUM_POD_RANGE "${MEDIUM_POD_RANGE}"
+
 if [ "${NODE_COUNT}" -lt 3 ]; then
   echo "ERROR: NODE_COUNT must be at least 3 (hot + sparse + at least one medium node)" >&2
+  exit 1
+fi
+if [ "${MEDIUM_POD_RANGE}" -lt 1 ]; then
+  echo "ERROR: HTP_K8S_SEED_SCALE_MEDIUM_POD_RANGE must be at least 1 (used as a modulus below)" >&2
   exit 1
 fi
 
@@ -194,10 +255,31 @@ kubectl wait --for=jsonpath='{.status.phase}'=Running \
 #    trivially "succeeds" doing nothing).
 # ---------------------------------------------------------------------------
 log "Verifying seeded end state (hard gate)"
-actual_total=$(kubectl get pods -n "${NS}" -l "${POD_SELECTOR}" --no-headers | wc -l)
-actual_hot=$(kubectl get pods -n "${NS}" -l "${POD_SELECTOR},htp-k8s.io/seed-scale-node=0" --no-headers | wc -l)
-actual_sparse=$(kubectl get pods -n "${NS}" -l "${POD_SELECTOR},htp-k8s.io/seed-scale-node=1" --no-headers | wc -l)
-actual_nodes=$(kubectl get nodes -l type=kwok --no-headers | wc -l)
+# A `kubectl get | wc -l` pipeline under `set -euo pipefail` aborts the whole
+# script the instant `kubectl` itself fails (API server hiccup, etc.) —
+# `wc -l` still exits 0, but pipefail propagates kubectl's own nonzero
+# status, so `set -e` kills the script right here, BEFORE the informative
+# "ERROR: seeded KWOK data did not reach..." diagnostics below ever print
+# (issue #164's silent-abort class). Route every count through this helper
+# so a real kubectl failure gets its own clear, dedicated diagnostic instead
+# of a bare, unexplained abort.
+count_matching() {
+  local output
+  if ! output=$(kubectl get "$@" --no-headers 2>&1); then
+    echo "ERROR: 'kubectl get $*' failed:" >&2
+    echo "${output}" >&2
+    exit 1
+  fi
+  if [ -z "${output}" ]; then
+    echo 0
+  else
+    printf '%s\n' "${output}" | wc -l
+  fi
+}
+actual_total=$(count_matching pods -n "${NS}" -l "${POD_SELECTOR}")
+actual_hot=$(count_matching pods -n "${NS}" -l "${POD_SELECTOR},htp-k8s.io/seed-scale-node=0")
+actual_sparse=$(count_matching pods -n "${NS}" -l "${POD_SELECTOR},htp-k8s.io/seed-scale-node=1")
+actual_nodes=$(count_matching nodes -l type=kwok)
 
 problems=""
 [ "${actual_nodes}" -eq "${NODE_COUNT}" ] || problems+="  fake nodes: want ${NODE_COUNT}, have ${actual_nodes}"$'\n'
@@ -212,4 +294,20 @@ if [ -n "${problems}" ]; then
 fi
 
 echo "OK: ${actual_nodes} fake nodes Ready, ${actual_total} pods Running (hot node=${actual_hot}, sparse node=${actual_sparse})."
-echo "Node count (towers) = $(kubectl get nodes --no-headers | wc -l) (1 real kind node + ${NODE_COUNT} fake KWOK nodes)"
+towers_total="$(count_matching nodes)"
+echo "Node count (towers) = ${towers_total} (1 real kind node + ${NODE_COUNT} fake KWOK nodes)"
+
+# Machine-readable copy of the same counts, for the nightly workflow's
+# GITHUB_STEP_SUMMARY (issue #171): prints the ACTUAL seeded scale, not the
+# knobs it was asked for, so a future drift between this header's documented
+# defaults and what a run really seeded is visible on every run rather than
+# only in a diff. A no-op outside GitHub Actions (GITHUB_OUTPUT unset).
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  {
+    echo "actual_nodes=${actual_nodes}"
+    echo "actual_towers=${towers_total}"
+    echo "actual_total_pods=${actual_total}"
+    echo "actual_hot_pods=${actual_hot}"
+    echo "actual_sparse_pods=${actual_sparse}"
+  } >>"${GITHUB_OUTPUT}"
+fi

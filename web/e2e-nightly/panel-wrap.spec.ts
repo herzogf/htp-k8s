@@ -1,3 +1,5 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { expect, type Page, test } from '@playwright/test'
 
 // Nightly full-scale visual coverage for #59's four-face Panel wrap and
@@ -13,8 +15,8 @@ import { expect, type Page, test } from '@playwright/test'
 //
 // Runs ONLY against the nightly job's full-scale KWOK seed
 // (test/e2e/kwok/seed-scale.sh — one deliberately "hot" Tower with hundreds
-// of Pods, a deliberately "sparse" Tower, and dozens more of varied size),
-// never the PR suite's modest seed: playwright.config.ts's HTP_K8S_E2E_SUITE
+// of Pods, a deliberately "sparse" Tower, and over a dozen more of varied
+// size), never the PR suite's modest seed: playwright.config.ts's HTP_K8S_E2E_SUITE
 // branch keeps the two suites in separate testDirs specifically so this
 // can't accidentally run there and fail against too-sparse data (ADR-0004).
 //
@@ -39,6 +41,7 @@ interface DetailTestHook {
   towers: () => { name: string; panelCount: number; position: [number, number, number] }[]
   pods: () => { namespace: string; pod: string }[]
   sceneHeight: () => number
+  towerRenderedHeights: () => { name: string; height: number }[]
 }
 
 // Mirror of Pose (src/scene/focus.ts) and the relevant slice of
@@ -66,9 +69,21 @@ declare global {
 // single-face-only (pre-#59) layout could never exceed. A Tower above this
 // has necessarily wrapped past at least a second face.
 const BASE_FACE_CAPACITY_ALL_FOUR_FACES = 132
+// Mirror of panelLayout.ts's per-FACE (not all-four) resting capacity: the
+// same base row count (11) times PANELS_PER_ROW (3) alone — the pod count a
+// Tower can hold on its front face before the (i+1)-th Pod wraps onto a
+// second face. A named constant (review finding) rather than a bare literal.
+const SINGLE_FACE_CAPACITY_AT_REST = 33
 // TOWER_HEIGHT at rest (towerLayout.ts) — the floor sceneHeight() never goes
 // below.
 const RESTING_TOWER_HEIGHT = 6
+// seed-scale.sh's known deliberately-sparse node (its own header comment:
+// "node 1 ('sparse')") — pinned by name rather than `reduce(min)` over all
+// Towers, which degenerates to "busiest > 0" if ANY Tower in the scene
+// happens to have 0 Pods (KWOK settling asynchronously, a future seed
+// change, etc.) instead of actually exercising the seed's deliberate
+// busy/sparse contrast.
+const SPARSE_TOWER_NAME = 'kwok-scale-node-1'
 
 async function waitForPopulatedScene(page: Page, minPods: number): Promise<void> {
   await expect(page.locator('canvas')).toBeVisible()
@@ -78,6 +93,15 @@ async function waitForPopulatedScene(page: Page, minPods: number): Promise<void>
       return !!hook && hook.pods().length >= min
     },
     minPods,
+    // Measured (issue #171 rehearsal, this suite's shipped default scale):
+    // navigation-to-populated in the ~1.4s range on that rehearsal hardware
+    // (see perf.spec.ts's own nightly-perf-summary.json for the canonical,
+    // per-run measurement of this exact number) — so 90s is enormous
+    // headroom even against a materially slower/contended CI runner. Kept
+    // wide rather than trimmed to a tight multiple of the local number
+    // specifically because a GitHub-hosted runner is not the hardware this
+    // was measured on; $GITHUB_STEP_SUMMARY's per-test wall clock is what
+    // would show this margin actually eroding on real CI runs over time.
     { timeout: 90_000 },
   )
 }
@@ -106,9 +130,9 @@ test.describe('nightly: four-face Panel wrap visual coverage (#29)', () => {
   test.beforeEach(async ({ page }) => {
     test.slow()
     await page.goto('/')
-    // The full-scale seed carries thousands of Pods; wait for a healthy
-    // chunk (not literally every one — KWOK settles the tail asynchronously)
-    // before proceeding.
+    // The full-scale seed carries well over a thousand Pods by default; wait
+    // for a healthy chunk (not literally every one — KWOK settles the tail
+    // asynchronously) before proceeding.
     await waitForPopulatedScene(page, 500)
   })
 
@@ -121,7 +145,7 @@ test.describe('nightly: four-face Panel wrap visual coverage (#29)', () => {
     // Empirical proof the seed actually engaged the wrap (issue #29: "prove
     // the dense scene actually engages the wrap ... rather than assuming
     // the seed is dense enough") — never assumed from seed-scale.sh's plan.
-    expect(busiest.panelCount).toBeGreaterThan(34)
+    expect(busiest.panelCount).toBeGreaterThan(SINGLE_FACE_CAPACITY_AT_REST)
 
     const height = await page.evaluate(() => window.__htpDetailTest!.sceneHeight())
     const [cx, , cz] = busiest.position
@@ -144,34 +168,102 @@ test.describe('nightly: four-face Panel wrap visual coverage (#29)', () => {
     await page.screenshot({ path: testInfo.outputPath('tower-four-face-wrap.png') })
   })
 
-  test('a busy and a sparse Tower stand at the SAME height — the sparse one unfilled, not shorter', async ({
+  test('a busy and a sparse Tower stand at the SAME rendered height — the sparse one unfilled, not shorter', async ({
     page,
   }, testInfo) => {
     const towers = await page.evaluate(() => window.__htpDetailTest!.towers())
     const height = await page.evaluate(() => window.__htpDetailTest!.sceneHeight())
+    const renderedHeights = await page.evaluate(() =>
+      window.__htpDetailTest!.towerRenderedHeights(),
+    )
     const busiest = towers.reduce((max, t) => (t.panelCount > max.panelCount ? t : max))
-    const sparsest = towers.reduce((min, t) => (t.panelCount < min.panelCount ? t : min))
+    // Pinned to the seed's known sparse node (see SPARSE_TOWER_NAME's doc
+    // comment) rather than reduce(min) over all Towers.
+    const sparsest = towers.find((t) => t.name === SPARSE_TOWER_NAME)
+    expect(
+      sparsest,
+      `seed-scale.sh's known sparse node (${SPARSE_TOWER_NAME}) must be present in the scene`,
+    ).toBeDefined()
 
     // The seed's deliberate contrast (seed-scale.sh's "hot"/"sparse" nodes)
     // actually landed, and the busy Tower's growth actually raised the
-    // WHOLE scene above the resting height — the property this still exists
-    // to prove ("unfilled rather than shorter").
-    expect(busiest.panelCount).toBeGreaterThan(sparsest.panelCount * 5)
+    // WHOLE scene above the resting height.
+    expect(busiest.panelCount).toBeGreaterThan(sparsest!.panelCount * 5)
     expect(height).toBeGreaterThan(RESTING_TOWER_HEIGHT)
 
-    // A wide, elevated vantage centred on the midpoint of the two Towers, far
-    // enough back and high enough to read both — and, critically, to see
-    // that they reach the exact same roofline despite the Pod-count gulf.
-    const mx = (busiest.position[0] + sparsest.position[0]) / 2
-    const mz = (busiest.position[2] + sparsest.position[2]) / 2
-    const spread = Math.hypot(
-      busiest.position[0] - sparsest.position[0],
-      busiest.position[2] - sparsest.position[2],
+    // THE property this still exists to prove ("unfilled rather than
+    // shorter", #29's own framing of "the property most likely to look wrong
+    // even when the math is right"): each Tower's OWN, actually-rendered
+    // prism height (not `sceneHeight()` read a second time — see
+    // `towerRenderedHeights()`'s doc comment for why that scalar alone is
+    // tautological and cannot catch a real per-Tower rendering divergence)
+    // is identical between the busiest and sparsest Tower, and both are
+    // genuinely above the resting floor.
+    const busiestRendered = renderedHeights.find((r) => r.name === busiest.name)?.height
+    const sparsestRendered = renderedHeights.find((r) => r.name === sparsest!.name)?.height
+    expect(
+      busiestRendered,
+      'busiest Tower must have a rendered height in the registry',
+    ).toBeGreaterThan(RESTING_TOWER_HEIGHT)
+    expect(sparsestRendered, 'sparse Tower must render at the SAME height as the busy one').toBe(
+      busiestRendered,
     )
-    const back = Math.max(spread * 1.2, height * 2.2)
+
+    // Fixed-path summary (issue #171), mirroring perf.spec.ts's own —
+    // nightly.yml's $GITHUB_STEP_SUMMARY step reads this so a reader can see
+    // the wrap/growth thresholds were genuinely exercised (not just that the
+    // screenshot exists) without downloading the artifact zip.
+    fs.writeFileSync(
+      path.join(testInfo.project.outputDir, 'nightly-wrap-summary.json'),
+      JSON.stringify(
+        {
+          busiestTowerName: busiest.name,
+          busiestPanelCount: busiest.panelCount,
+          sparseTowerName: sparsest!.name,
+          sparsePanelCount: sparsest!.panelCount,
+          sceneHeight: height,
+          busiestRenderedHeight: busiestRendered,
+          sparsestRenderedHeight: sparsestRendered,
+          wrapThresholdPanels: SINGLE_FACE_CAPACITY_AT_REST,
+          growthThresholdPanels: BASE_FACE_CAPACITY_ALL_FOUR_FACES,
+          restingTowerHeight: RESTING_TOWER_HEIGHT,
+        },
+        null,
+        2,
+      ),
+    )
+
+    // A vantage centred on the midpoint of the two Towers, pulled back along
+    // the ray OUTWARD from the grid's own centre (world origin —
+    // towerPlacements always centres the whole occupied grid there, see
+    // towerLayout.ts) through that midpoint — rather than a fixed
+    // camera-space "+Z" offset, which (review finding) put the subjects
+    // mid-forest, occluded by whichever row of Towers happened to sit
+    // between a fixed offset and the two subjects. seed-scale.sh's
+    // alphabetically-sorted node-0/node-1 names always land in the grid's
+    // lowest-index row (`towers.go`'s deterministic grid-by-name layout
+    // walks sorted names left-to-right, top-to-bottom) — an edge row, never
+    // an interior one — so stepping OUTWARD from the grid centre through
+    // this pair's midpoint steps AWAY from every other row, never through
+    // one, at any node count. Empirically verified end-to-end against a real
+    // 15-node/16-Tower seed (issue #29 rehearsal): unobstructed, full
+    // roofline in frame, both Towers legible at their true, identical
+    // height.
+    const mx = (busiest.position[0] + sparsest!.position[0]) / 2
+    const mz = (busiest.position[2] + sparsest!.position[2]) / 2
+    const spread = Math.hypot(
+      busiest.position[0] - sparsest!.position[0],
+      busiest.position[2] - sparsest!.position[2],
+    )
+    const midRadius = Math.hypot(mx, mz)
+    // Degenerate case (the pair's midpoint lands exactly on the grid centre,
+    // e.g. a tiny seed): fall back to a fixed +Z outward direction rather
+    // than dividing by zero.
+    const [ux, uz] = midRadius > 1e-6 ? [mx / midRadius, mz / midRadius] : [0, -1]
+    const push = Math.max(spread * 1.8, height * 1.6)
     await flyTo(page, {
-      position: [mx, height * 2.3, mz + back],
-      target: [mx, height * 0.25, mz],
+      position: [mx + ux * push, height * 0.85, mz + uz * push],
+      target: [mx, height * 0.45, mz],
     })
 
     await page.screenshot({ path: testInfo.outputPath('busy-vs-sparse-same-height.png') })

@@ -25,11 +25,23 @@ import { expect, type Page, test } from '@playwright/test'
 // (playwright.config.ts's HTP_K8S_E2E_SUITE branch keeps the two suites in
 // separate testDirs so this can't run there by accident).
 //
-// Modelled directly on web/e2e/demo-canyon-tour.spec.ts (same activation,
-// sampling, and "guaranteed within FLIGHT_DURATION_MS" reasoning — see that
-// file's header comment for the full rationale on why overview episodes are
-// bounded, not just probable), scaled to the scene's real roofline instead
-// of the resting-height constants that spec restates.
+// Modelled on web/e2e/demo-canyon-tour.spec.ts (same activation/sampling
+// shape), but NOT that spec's 65s FLIGHT_DURATION_MS — see that constant's
+// own doc comment below for why: the modest suite's 65s budget is provably
+// too tight here, found empirically (issue #171 review), not assumed.
+//
+// A SEPARATE, PRE-EXISTING finding this test surfaced, out of THIS PR's
+// scope: demoMode.ts's climb-out is rate-limited by `MAX_CLIMB_GRADIENT` —
+// a FIXED world-units-per-horizontal-distance gradient (independent of
+// scene height) — while #162 made the ALTITUDE TARGETS ({@link
+// altitudeBandsForRoofline}) scale WITH the scene's real roofline. At a
+// grown scene the vertical distance to climb grows with height but the rate
+// available to climb it, and the episode-length budget to do so in
+// (`OVERVIEW_EPISODE_WAYPOINTS`), do not — so how long a genuine climb takes
+// in real seconds is scene-height-dependent even though the underlying
+// per-waypoint PACING is not. Recorded in docs/agents/findings.md; fixing
+// the choreography itself needs the ADR-0011 build-metric/tune/pin/human-
+// review loop this PR is not chartered to run.
 
 // Mirror of DetailTestHook in src/detail/useDetailTestHook.ts.
 interface DetailTestHook {
@@ -57,16 +69,27 @@ declare global {
 const RESTING_TOWER_HEIGHT = 6
 
 /**
- * How long to fly and sample. Matches demo-canyon-tour.spec.ts's own
- * FLIGHT_DURATION_MS exactly (65s): the tour's episode pacing
- * (`OVERVIEW_GAP_WAYPOINTS_MIN/MAX`, `OVERVIEW_EPISODE_WAYPOINTS`) is driven
- * by waypoint count and ground speed, neither of which depends on scene
- * height, so the same bounded window that guarantees an overview episode on
- * the modest PR scene guarantees one here too — confirmed empirically in
- * this issue's rehearsal (a ~19-unit-roofline scene's flight cleared the
- * roofline by t≈27s, well inside this window).
+ * How long to fly and sample. NOT demo-canyon-tour.spec.ts's 65s (see the
+ * header comment's climb-rate finding for why a taller roofline needs
+ * longer, not just the same, window): the time-to-first-clear-roofline is
+ * real-wall-clock, not simulated-tour-time, because `FreeFlyControls`' demo
+ * step is itself capped per frame at `MAX_FOCUS_STEP_SECONDS` (1/30s) — on a
+ * software-rendered (no GPU) headless run below ~30 FPS, each real frame
+ * only ever advances the tour by that cap, so a slower frame rate makes the
+ * SAME simulated flight take MORE real seconds, not the same. Measured
+ * directly (4 independent real runs, this h ≈ 11.24 default scale, this kind
+ * of headless/software-WebGL environment): time-to-first-clear-roofline
+ * samples were 48.8s, 56.3s, 63.5s, 82.4s — i.e. the OLD 65s budget was
+ * already failing on 2 of those 4 real seeds. 260s is > 3x the worst of
+ * those four observations, matching this project's "state the live
+ * observation beside the bound" convention (ADR-0011). A CI-hosted runner
+ * has no GPU either (same software-rendering regime the measurement above
+ * used), so this is expected to transfer, not just a local-machine number —
+ * but if `$GITHUB_STEP_SUMMARY`'s per-test wall clock (issue #171) shows
+ * this creeping toward the budget over time, that is this bound's own early
+ * warning to revisit, per the same ADR-0011 discipline.
  */
-const FLIGHT_DURATION_MS = 65_000
+const FLIGHT_DURATION_MS = 260_000
 const POLL_INTERVAL_MS = 400
 
 async function waitForPopulatedScene(page: Page, minPods: number): Promise<void> {
@@ -77,6 +100,15 @@ async function waitForPopulatedScene(page: Page, minPods: number): Promise<void>
       return !!hook && hook.pods().length >= min
     },
     minPods,
+    // Measured (issue #171 rehearsal, this suite's shipped default scale):
+    // navigation-to-populated in the ~1.4s range on that rehearsal hardware
+    // (see perf.spec.ts's own nightly-perf-summary.json for the canonical,
+    // per-run measurement of this exact number) — so 90s is enormous
+    // headroom even against a materially slower/contended CI runner. Kept
+    // wide rather than trimmed to a tight multiple of the local number
+    // specifically because a GitHub-hosted runner is not the hardware this
+    // was measured on; $GITHUB_STEP_SUMMARY's per-test wall clock is what
+    // would show this margin actually eroding on real CI runs over time.
     { timeout: 90_000 },
   )
 }
@@ -92,7 +124,18 @@ async function cameraPosition(page: Page): Promise<[number, number, number]> {
 test('demo mode over a grown scene: the automated flight climbs above the REAL (grown) roofline', async ({
   page,
 }, testInfo) => {
-  test.setTimeout(FLIGHT_DURATION_MS + 60_000)
+  // Unlike the PR-time demo-canyon-tour.spec.ts this mirrors (which budgets
+  // FLIGHT_DURATION_MS + 60s total), this nightly spec's own
+  // waitForPopulatedScene ALONE budgets up to 90s against the full-scale
+  // seed — measured at ~1.4s on this issue's rehearsal hardware (see
+  // perf.spec.ts's own nightly-perf-summary.json for the canonical, per-run
+  // measurement of this), so 90s is enormous headroom for populate alone
+  // even accounting for a materially slower/contended CI runner; kept wide
+  // rather than trimmed to a tighter multiple of that number specifically
+  // because CI hardware is not the same hardware this was measured on (see
+  // FLIGHT_DURATION_MS's own comment for the same caveat, where it matters
+  // far more). 90s populate + 260s flight + two toggle round-trips + margin.
+  test.setTimeout(FLIGHT_DURATION_MS + 150_000)
 
   await page.goto('/')
   await waitForPopulatedScene(page, 500)
@@ -136,13 +179,15 @@ test('demo mode over a grown scene: the automated flight climbs above the REAL (
   await toggle.click()
   await expect(toggle).toHaveAttribute('aria-pressed', 'false')
 
-  // Guaranteed within FLIGHT_DURATION_MS (see the header comment): an
-  // overview episode always begins within OVERVIEW_GAP_WAYPOINTS_MAX
-  // waypoints of tour start, and is sustained long enough for the
-  // rate-limited climb to genuinely reach the overview band. If this ever
-  // regresses to flying below the real roofline again (the pre-#162 bug,
-  // at scene-height-dependent scale), this fails here rather than only
-  // being caught by a maintainer's manual review.
+  // An overview episode always begins within OVERVIEW_GAP_WAYPOINTS_MAX
+  // waypoints of tour start, so it is reliably observed within
+  // FLIGHT_DURATION_MS — see that constant's own doc comment for why this
+  // window is sized off 4 REAL measured samples rather than assumed from
+  // the waypoint pacing alone (which, unlike a fixed simulated-time budget,
+  // does not by itself bound REAL wall-clock seconds under a throttled
+  // frame rate). If this ever regresses to flying below the real roofline
+  // again (the pre-#162 bug, at scene-height-dependent scale), this fails
+  // here rather than only being caught by a maintainer's manual review.
   expect(sawOverRoofline).toBe(true)
   expect(maxY).toBeGreaterThanOrEqual(rooflineY * 1.02)
 })

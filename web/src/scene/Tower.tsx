@@ -1,9 +1,12 @@
 import { Edges } from '@react-three/drei'
 import { type ThreeEvent } from '@react-three/fiber'
+import { useEffect, useRef } from 'react'
+import { type BoxGeometry, type Mesh } from 'three'
 import { towerSelection } from '../detail/selection'
 import { useSelection } from '../detail/selectionContext'
 import { towerFocusPose } from './focus'
 import { useFocus } from './focusContext'
+import { clearTowerRenderedHeight, setTowerRenderedHeight } from './towerRenderedHeightRegistry'
 import { TOWER_FOOTPRINT, TOWER_HEIGHT, type TowerPlacement } from './towerLayout'
 
 /**
@@ -41,6 +44,12 @@ export const TOWER_COLOR = '#39d3ff'
  * its in-world Detail Popup anchored beside the prism. The click is stopped from
  * propagating so a ray that also grazes a farther Tower acts only on the one
  * actually clicked.
+ *
+ * Every mount/update also publishes this Tower's own, actually-rendered prism
+ * height (read back off its `<boxGeometry>`, not the `height` prop in
+ * isolation) into {@link setTowerRenderedHeight} — see that module's doc
+ * comment for why the nightly #29 busy-vs-sparse "identical height" e2e guard
+ * needs this rather than a second call to `sceneTowerHeight`.
  */
 export function Tower({
   placement,
@@ -51,6 +60,7 @@ export function Tower({
 }) {
   const focus = useFocus()
   const { select } = useSelection()
+  const meshRef = useRef<Mesh>(null)
 
   const onClick = (event: ThreeEvent<MouseEvent>) => {
     event.stopPropagation()
@@ -58,8 +68,20 @@ export function Tower({
     select(towerSelection(placement))
   }
 
+  useEffect(() => {
+    const geometry = meshRef.current?.geometry as BoxGeometry | undefined
+    const renderedHeight = geometry?.parameters.height
+    if (renderedHeight !== undefined) {
+      setTowerRenderedHeight(placement.name, renderedHeight)
+    }
+    return () => clearTowerRenderedHeight(placement.name)
+    // `height` is read only to re-run this effect after R3F rebuilds the
+    // <boxGeometry> for a new `args` — the value itself comes back off the
+    // geometry, not this prop, so a stale/misrouted prop can't fake a pass.
+  }, [placement.name, height])
+
   return (
-    <mesh position={placement.position} onClick={onClick}>
+    <mesh ref={meshRef} position={placement.position} onClick={onClick}>
       <boxGeometry args={[TOWER_FOOTPRINT, height, TOWER_FOOTPRINT]} />
       <meshStandardMaterial
         color={TOWER_COLOR}

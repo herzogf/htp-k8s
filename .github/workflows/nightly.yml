@@ -4,9 +4,12 @@ name: Nightly
 # #76 both reserve for a nightly/off-PR-critical-path job rather than the
 # PR-blocking `build.yml`:
 #
-#   A. Full-scale KWOK performance run — pushes a KWOK-simulated cluster to
-#      ADR-0004's "full target scale" (50+ nodes, thousands of pods, one
-#      deliberately dense Tower and one deliberately sparse one), drives the
+#   A. Full-scale KWOK performance run — pushes a KWOK-simulated cluster to a
+#      scale well past the PR-blocking job's (test/e2e/kwok/seed-scale.sh's
+#      default: 15 fake nodes, ~1,231 pods, one deliberately dense Tower and
+#      one deliberately sparse one — see that script's own header for why
+#      this is smaller than ADR-0004's "50+ nodes, thousands of pods"
+#      aspiration and how to reach that larger scale on demand), drives the
 #      real rendered scene, and captures a load-time/frame-time signal in a
 #      JSON artifact comparable run over run. Never run at PR time: ADR-0004
 #      calls out that rendering that many instanced Panels via headless
@@ -66,15 +69,19 @@ on:
       node_count:
         description: >
           Fake KWOK node count for the full-scale seed (test/e2e/kwok/seed-scale.sh).
-          Leave blank for that script's own default (50). Lower this for a
-          cheap manual rehearsal run.
+          Leave blank for that script's own default (15, rehearsed end to
+          end — see that script's header for why). Raise this (e.g. 50) for
+          a conscious, manually-triggered run at ADR-0004's larger
+          aspirational scale; that scale is NOT yet rehearsed end to end, so
+          it deliberately never runs unattended on the schedule trigger.
         required: false
         type: string
       hot_pod_count:
         description: >
           Pod count on the deliberately "hot" node (triggers the four-face
           wrap + scene height growth). Leave blank for the script's own
-          default (420).
+          default (260, rehearsed end to end — see seed-scale.sh's header for
+          why NOT the larger value this used to default to).
         required: false
         type: string
       sparse_pod_count:
@@ -358,12 +365,23 @@ jobs:
   full-scale:
     name: 'Nightly: Full-scale KWOK — visual coverage & performance'
     runs-on: ubuntu-latest
-    # kind + a 50+ node / thousands-of-pod KWOK seed + the nightly Playwright
-    # suite (which itself budgets up to 120s/test, web/playwright.config.ts)
-    # is meaningfully heavier than the modest e2e job above; generous
-    # headroom since this never blocks a PR.
+    # kind + a KWOK seed (15 nodes / ~1,231 pods by default — rehearsed end
+    # to end at well under 10 minutes total for this job's own steps; see
+    # seed-scale.sh's header for why the default is smaller than ADR-0004's
+    # 50+/thousands aspiration, and for the opt-in workflow_dispatch path to
+    # that larger, not-yet-rehearsed scale) + the nightly Playwright suite
+    # (which itself budgets up to 120s/test, web/playwright.config.ts) is
+    # meaningfully heavier than the modest e2e job above; generous headroom
+    # since this never blocks a PR, and to leave room for a manually
+    # dispatched larger-scale rehearsal run.
     timeout-minutes: 60
     steps:
+      # First step, deliberately: the $GITHUB_STEP_SUMMARY step at the end
+      # (issue #171) reports this job's own total wall clock against its
+      # 60-minute budget, computed from this timestamp.
+      - name: Record job start time
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -412,19 +430,22 @@ jobs:
           kubectl cluster-info
           kubectl get nodes
 
-      # ADR-0004's "full target scale" tier (50+ nodes, thousands of pods):
-      # never run against the shared PR-blocking e2e cluster (that job uses
-      # test/e2e/kwok/seed.sh's modest tier) — see seed-scale.sh's own header
-      # comment for the deliberately uneven hot/sparse/medium distribution
-      # this relies on. Same hard-correctness-gate discipline as the modest
-      # seed: a robust, populated scene is required, so a seeding failure
-      # fails this job rather than silently degrading.
+      # A qualitatively denser tier than the PR-blocking e2e cluster's (that
+      # job uses test/e2e/kwok/seed.sh's modest 6-node/30-pod seed) — see
+      # seed-scale.sh's own header comment for the deliberately uneven
+      # hot/sparse/medium distribution this relies on, and for why its
+      # default (15 nodes, ~1,231 pods) is smaller than ADR-0004's "50+
+      # nodes, thousands of pods" aspiration. Same hard-correctness-gate
+      # discipline as the modest seed: a robust, populated scene is
+      # required, so a seeding failure fails this job rather than silently
+      # degrading.
       #
       # workflow_dispatch inputs (blank on the scheduled trigger) let a
       # manually-triggered run rehearse at a cheaper scale without editing
       # this file — an empty env var falls through to seed-scale.sh's own
       # default for that knob.
       - name: Seed full-scale KWOK nodes/pods
+        id: seed
         env:
           HTP_K8S_SEED_SCALE_NODE_COUNT: ${{ github.event.inputs.node_count }}
           HTP_K8S_SEED_SCALE_HOT_POD_COUNT: ${{ github.event.inputs.hot_pod_count }}
@@ -442,6 +463,28 @@ jobs:
           HTP_K8S_E2E_PORT: '8199'
         run: task web:e2e:nightly
 
+      # Turns the numbers the specs above already produced (never
+      # recomputed here) into a short markdown summary on the run page
+      # itself (issue #171) — pass/fail alone communicated nothing beyond
+      # "green": the seeded scale, whether the wrap/growth thresholds were
+      # genuinely engaged, the load-time/frame-time signal, and per-test wall
+      # clock against budget were all previously buried in artifact zips.
+      # `if: always()` and every read inside the script is defensive (a
+      # missing/failed-before-writing JSON file becomes a "not available"
+      # line, never a thrown error) — a FAILED run is exactly when this
+      # matters most, so it must never itself fail to produce a summary.
+      - name: Nightly run summary ($GITHUB_STEP_SUMMARY)
+        if: ${{ always() }}
+        env:
+          SEED_ACTUAL_NODES: ${{ steps.seed.outputs.actual_nodes }}
+          SEED_ACTUAL_TOWERS: ${{ steps.seed.outputs.actual_towers }}
+          SEED_ACTUAL_TOTAL_PODS: ${{ steps.seed.outputs.actual_total_pods }}
+          SEED_ACTUAL_HOT_PODS: ${{ steps.seed.outputs.actual_hot_pods }}
+          SEED_ACTUAL_SPARSE_PODS: ${{ steps.seed.outputs.actual_sparse_pods }}
+        run: |
+          TOTAL_JOB_SECONDS=$(( $(date +%s) - JOB_START_EPOCH ))
+          TOTAL_JOB_SECONDS="${TOTAL_JOB_SECONDS}" node .github/scripts/nightly-summary.mjs
+
       # Screenshots, video, traces, AND the perf.spec.ts JSON artifact
       # (attached to that test via testInfo.attach, so it's bundled into
       # this same upload) — always uploaded, pass or fail, so a failure here
@@ -453,6 +496,7 @@ jobs:
           name: nightly-full-scale-results
           path: web/e2e-nightly-results/
           if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload nightly full-scale Playwright HTML report
         if: ${{ always() }}
@@ -461,3 +505,4 @@ jobs:
           name: nightly-full-scale-report
           path: web/playwright-nightly-report/
           if-no-files-found: ignore
+          retention-days: 14

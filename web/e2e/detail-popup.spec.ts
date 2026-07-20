@@ -19,7 +19,7 @@ import { expect, type Page, test } from '@playwright/test'
 // of truth). The e2e is a separate compilation domain from the app bundle, so
 // the shape is restated here rather than imported; keep the two in step.
 interface DetailTestHook {
-  towers: () => { name: string }[]
+  towers: () => { name: string; panelCount: number }[]
   pods: () => { namespace: string; pod: string }[]
   selectTower: (name: string) => boolean
   selectPod: (namespace: string, pod: string) => boolean
@@ -135,6 +135,31 @@ test('detail popup: a Tower opens a read-only Node/Namespace summary popup', asy
   // Escape closes it — the keyboard dismiss affordance.
   await page.keyboard.press('Escape')
   await expect(popup).toHaveCount(0)
+})
+
+test('detail popup: towers() panelCount stays paired with the right Tower (the towers[i]/placements[i] zip)', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await waitForPopulatedScene(page)
+
+  const towers = await page.evaluate(() => window.__htpDetailTest!.towers())
+  const pods = await page.evaluate(() => window.__htpDetailTest!.pods())
+
+  // useDetailTestHook.ts pairs each Tower's Pod count with its placement by
+  // INDEX (`towers[i]` <-> `placements[i]`), asserted nowhere but a doc
+  // comment — a regression there would only be caught by the unwatched
+  // nightly tier (issue #29's panel-wrap.spec.ts) otherwise. seed.sh's fake
+  // nodes are a known, deterministic fixture (30 pods round-robin over 6
+  // nodes — exactly 5 each), so a specific one's panelCount is a real,
+  // PR-time-watched regression signal for that pairing.
+  const fakeNodeTower = towers.find((t) => t.name === 'kwok-node-0')
+  expect(fakeNodeTower?.panelCount).toBe(5)
+
+  // Every Pod is accounted for exactly once across all Towers — the zip
+  // can't silently drop or double-count an entry either.
+  const totalPanelCount = towers.reduce((sum, t) => sum + t.panelCount, 0)
+  expect(totalPanelCount).toBe(pods.length)
 })
 
 /**

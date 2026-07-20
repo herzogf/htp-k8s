@@ -101,7 +101,14 @@ declare global {
     /**
      * Test-only handle onto the live camera. The 3D scene renders into a WebGL
      * canvas that isn't DOM-queryable, so the Playwright interaction test reads
-     * camera state through this hook to assert that simulated input moved it.
+     * camera state through this hook to assert that simulated input moved it —
+     * and, since #29's `requestFocus`, DRIVES a fly-to as well as reading state.
+     * It ships in the production bundle ON PURPOSE (same standing decision as
+     * `__htpDetailTest`, see that hook's own doc comment in
+     * `useDetailTestHook.ts`): this project's e2e runs the real built binary
+     * (ADR-0004), and `requestFocus` only reuses the exact same Focus tween a
+     * real Tower/Panel click already drives — no mutate/exec surface beyond
+     * what a click already exposes.
      */
     __htpCameraTest?: CameraTestHook
   }

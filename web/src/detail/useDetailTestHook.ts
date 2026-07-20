@@ -3,6 +3,7 @@ import { type SceneState } from '../generated/scenestate'
 import { type FocusController, panelFocusPose, towerFocusPose } from '../scene/focus'
 import { panelInstances, sceneTowerHeight } from '../scene/panelLayout'
 import { towerPlacements } from '../scene/towerLayout'
+import { towerRenderedHeights } from '../scene/towerRenderedHeightRegistry'
 import { panelSelection, type Selection, towerSelection } from './selection'
 
 /**
@@ -60,6 +61,22 @@ export interface DetailTestHook {
    * boundary.
    */
   sceneHeight: () => number
+  /**
+   * Each currently-mounted Tower's own, actually-RENDERED prism height (not
+   * `sceneHeight()` recomputed a second time) — added for issue #29's nightly
+   * busy-vs-sparse "identical height, sparse Tower unfilled rather than
+   * shorter" guard. `sceneHeight()` is `sceneTowerHeight(towers)`, the SAME
+   * scalar `Scene.tsx` computes once and hands every `<Tower>`; a test that
+   * only reads that shared scalar back is tautological — it cannot tell "both
+   * Towers rendered at the identical, correct height" apart from "one Tower
+   * silently rendered at the wrong height" (a stale prop, a keying bug, a
+   * future refactor), since both read the exact same computation. This is
+   * sourced from each `<Tower>`'s OWN `<boxGeometry>` (see
+   * `towerRenderedHeightRegistry.ts` / `Tower.tsx`), an independent path from
+   * `sceneHeight()`, so it is the one field that can actually disagree with
+   * itself across two Towers if the property under test broke.
+   */
+  towerRenderedHeights: () => { name: string; height: number }[]
 }
 
 declare global {
@@ -112,6 +129,7 @@ export function useDetailTestHook(
       pods: () =>
         instances.map((instance) => ({ namespace: instance.namespace, pod: instance.pod })),
       sceneHeight: () => height,
+      towerRenderedHeights: () => towerRenderedHeights(),
       selectTower: (name) => {
         const placement = placements.find((candidate) => candidate.name === name)
         if (!placement) {

@@ -1,11 +1,15 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { expect, test } from '@playwright/test'
 
-// Nightly full-scale performance signal (issue #29, ADR-0004): the KWOK
-// "full target scale" tier (50+ nodes, thousands of pods) exists to exercise
-// the rendering pipeline (InstancedMesh layout, the per-Pod name-texture
-// atlas, #59's wrap/height-growth math) at a scale the PR-blocking job
-// deliberately never reaches — but exercising it is only half the point
+// Nightly full-scale performance signal (issue #29, ADR-0004): the nightly
+// job's full-scale KWOK seed (test/e2e/kwok/seed-scale.sh — 15 nodes,
+// ~1,231 pods by default; see that script's header for why this is smaller
+// than ADR-0004's own "50+ nodes, thousands of pods" aspiration and how to
+// reach it on demand) exists to exercise the rendering pipeline
+// (InstancedMesh layout, the per-Pod name-texture atlas, #59's
+// wrap/height-growth math) at a scale the PR-blocking job deliberately
+// never reaches — but exercising it is only half the point
 // without a captured, comparable-across-runs signal to notice a regression
 // by. This test captures two numbers in a machine-readable JSON artifact
 // every nightly run: how long the scene takes to go from navigation to fully
@@ -52,7 +56,14 @@ test('nightly performance signal: scene load time and steady-state frame time at
       return !!hook && hook.pods().length >= min
     },
     MIN_PODS_FOR_POPULATED,
-    { timeout: 120_000 },
+    // Deliberately LESS than the outer navigationToPopulatedMs sanity bound
+    // below (review finding): this only bounds the wait-for-population step
+    // itself, measured from ITS OWN start, not from navStart above — the
+    // `page.goto` before it can itself add real time (page load, server
+    // boot). Giving the outer bound headroom past this one is what makes
+    // that outer `expect` a genuine check on TOTAL nav+populate time instead
+    // of dead code that could never fail once this wait already succeeded.
+    { timeout: 100_000 },
   )
   const navigationToPopulatedMs = Date.now() - navStart
 
@@ -128,6 +139,17 @@ test('nightly performance signal: scene load time and steady-state frame time at
   const jsonPath = testInfo.outputPath('nightly-perf.json')
   fs.writeFileSync(jsonPath, JSON.stringify(result, null, 2))
   await testInfo.attach('nightly-perf.json', { path: jsonPath, contentType: 'application/json' })
+
+  // ALSO write to a fixed, predictable path outside this test's own hashed
+  // output subdirectory (issue #171): nightly.yml's $GITHUB_STEP_SUMMARY step
+  // needs to find this file by a path it can name in the workflow, which
+  // `testInfo.outputPath` (unique per test title) doesn't offer. Same
+  // content as the artifact-bundled copy above — one source of truth,
+  // written twice for two different readers.
+  fs.writeFileSync(
+    path.join(testInfo.project.outputDir, 'nightly-perf-summary.json'),
+    JSON.stringify(result, null, 2),
+  )
 
   // The visual companion to the numbers above: the full-scale scene the
   // measurement was actually taken against.

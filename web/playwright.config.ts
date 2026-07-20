@@ -73,6 +73,14 @@ export default defineConfig({
         open: 'never',
       },
     ],
+    // Nightly only (issue #171): a structured, fixed-path JSON alongside the
+    // human-oriented list/html reporters above — per-test duration and retry
+    // count, which nightly.yml's $GITHUB_STEP_SUMMARY step reads to report
+    // real wall-clock numbers (and whether a test needed its retry — the
+    // earliest signal that a timeout's margin is eroding) without re-deriving
+    // them from log text. The PR suite has no equivalent need (build.yml
+    // doesn't summarize per-test timing), so this stays nightly-only.
+    ...(nightly ? ([['json', { outputFile: path.join(outputDir, 'results.json') }]] as const) : []),
   ],
   use: {
     baseURL,
