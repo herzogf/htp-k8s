@@ -7,7 +7,10 @@
 // its own, so unlike the capture harness's Vitest suite (test/e2e/capture),
 // it needs no web/node_modules symlink to run.
 //
-// Run directly: `node --test .github/scripts`
+// Run directly: `node --test .github/scripts/compute-image-tags.test.mjs`
+// (the explicit file, not a glob or the bare directory — see the CI/Taskfile
+// call sites' own comments for why: a glob that stops matching exits 0 with
+// zero tests run instead of failing).
 // Wired into CI via: build.yml's Frontend (Node) job (its own named step)
 // AND the root Taskfile's aggregate `test:` task (so `task test` locally,
 // and the Backend (Go) job's `task test` step in CI, exercise it too).
@@ -80,9 +83,14 @@ describe('computeTags', () => {
     ])
   })
 
-  it('out-of-order patch release within a minor: X.Y does not move backwards either', () => {
+  it('out-of-order patch release within a minor: X.Y publication is conditional, not unconditional', () => {
     // v1.2.3 released AFTER v1.2.4 already exists (e.g. re-tagging an old
-    // commit) must not repoint 1.2 back to the older patch.
+    // commit). Pins the exact intent behind the `isHighestInMinor` check in
+    // computeTags (and ADR-0005's wording, which was fixed to match this,
+    // not the other way around): X.Y is published ONLY when this release is
+    // the newest patch in its own minor, precisely so a case like this one
+    // can't repoint 1.2 backwards. "X.Y always moves forward" is the naive
+    // reading and is WRONG — this case is exactly why.
     assert.deepEqual(computeTags('v1.2.3', ['v1.2.4']), ['v1.2.3'])
   })
 

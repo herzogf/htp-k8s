@@ -1,48 +1,38 @@
 #!/usr/bin/env node
 // Computes the set of container-image tags a release publishes (issue #64).
 // Used by release.yml's `image` job, which passes the result straight to
-// `ko build --tags`.
+// `ko build --tags`. Full rule + rationale (why bare `0` is excluded, why
+// `X >= 1` needs no code change, why moving tags aren't a verification
+// target): ADR-0005 ("Moving image tags") — that's the one home for this,
+// not restated here.
 //
 // Deliberately a pure, importable function (`computeTags`) with the CLI as a
 // thin wrapper, rather than the inline shell this replaced — release.yml
 // only ever runs on a real `v*` tag push, so PR CI can NEVER exercise it
-// directly (the lesson from issue #156: a release-only path shipped broken
-// because PR CI structurally could not run it). A pure module gets real
-// PR-time coverage instead, via compute-image-tags.test.mjs (wired into
-// build.yml's Frontend (Node) job and the root `task test`).
+// directly (issue #156). A pure module gets real PR-time coverage instead,
+// via compute-image-tags.test.mjs (wired into build.yml's Frontend (Node)
+// job and the root `task test`).
 //
-// THE RULE (decided with the maintainer, issue #64; recorded in full,
-// alongside its rationale, in ADR-0005):
+// THE RULE, precisely — pinned here (not just in the ADR's prose) because
+// this exact wording is what the code must match, and prose can drift from
+// code silently in a way a test alone won't surface to a reader:
 //
 //   Stable release vX.Y.Z (no "-" in the tag):
 //     - always publish the exact vX.Y.Z tag
-//     - always publish X.Y, moved to the newest patch within that minor
-//     - publish bare X only once X >= 1 (SemVer gives no compatibility
-//       guarantee across 0.x MINORs, so a moving bare `0` would imply a
-//       stability guarantee that doesn't exist; X.Y remains honest pre-1.0
-//       because PATCH releases stay backward-compatible even there)
-//     - publish `latest` AND bare X only when this release is the highest
-//       stable version that exists (a backport patch to an older line must
-//       NOT move latest backwards — the bug this fixes, see below)
+//     - publish X.Y IF this release is the newest patch within that minor
+//       (true for a normal release; NOT true, and so NOT published, when
+//       re-tagging an older patch after a newer one in the same minor
+//       already exists — publishing it then would move X.Y backwards)
+//     - publish bare X, once X >= 1, IF this release is the highest stable
+//       version that exists overall
+//     - publish `latest` under that same "highest overall" condition
 //
-//   Prerelease vX.Y.Z-something (tag contains "-"): the exact tag ONLY. No
-//   moving tags, no latest.
-//
-// THE BUG THIS FIXES: the shell logic this module replaced
-// (`case "$RELEASE_TAG" in *-*) ... ;; *) tags="$RELEASE_TAG,latest" ;;
-// esac`) moved `latest` for ANY stable tag, unconditionally — so a backport
-// patch released after a newer minor/major already shipped would repoint
-// `latest` at OLDER software. Nobody had hit it because every release so far
-// has been strictly linear; computeTags's "highest stable version" check
-// (below) is what makes that no longer possible.
+//   Prerelease vX.Y.Z-something (tag contains "-"): the exact tag ONLY.
 //
 // Malformed input: a RELEASE_TAG that doesn't parse as vMAJOR.MINOR.PATCH
-// (optionally -PRERELEASE) throws. A release should not proceed on a tag it
-// cannot parse — see the "malformed input" test for the exact case. Entries
-// in `existingTags` that don't parse are silently ignored instead: they are
-// historical context, not the tag actually being released, so one stray
-// unparsable tag elsewhere in the repo's history must not fail every future
-// release.
+// (optionally -PRERELEASE) throws — a release should not proceed on a tag it
+// cannot parse. Entries in `existingTags` that don't parse are silently
+// ignored: historical noise, not the tag actually being released.
 
 // A deliberately narrow parser for this project's own tagging convention
 // (vMAJOR.MINOR.PATCH, optionally "-PRERELEASE" with SemVer's own

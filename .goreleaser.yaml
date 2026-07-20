@@ -178,20 +178,14 @@ release:
   # published verification story. The further guardrail about NOT copying
   # this tag-based pattern onto a moving tag without a digest instruction
   # (issue #64) is now answered for real: README.md's Supply chain section
-  # carries that instruction, and ADR-0005 records the moving-tag rule and
-  # why moving tags are a pull convenience rather than a verification
-  # target — see both rather than duplicating either here.
+  # carries that instruction.
   #
-  # Moving tags (issue #64): a STABLE release also gets `X.Y` and, if it's
-  # the newest stable release overall, bare `X` (once X >= 1) and `latest`.
-  # This footer can't assert either "newest" as fact at render time — the
-  # `goreleaser` job (this file) and ko's `image` job (which actually
-  # decides and publishes the tag set, via .github/scripts/compute-image-
-  # tags.mjs) run in PARALLEL, same reason the digest above can't be
-  # templated in — so both hedge honestly ("if this is...") instead of
-  # asserting something this footer can't verify. The real rule lives in
-  # ADR-0005 and that script, not here — this footer is prose, not a second
-  # implementation of it.
+  # Moving tags below (issue #64; rule + rationale: ADR-0005 "Moving image
+  # tags" — not restated here) are hedged ("if this is...") rather than
+  # asserted as fact: the `goreleaser` job (this file) and ko's `image` job
+  # (which actually decides and publishes the tag set) run in PARALLEL, same
+  # reason the digest above can't be templated in — this footer genuinely
+  # can't know the outcome at render time.
   #
   # NOTE the leading blank line: GoReleaser's body template joins the
   # changelog and this footer with exactly ONE newline (see

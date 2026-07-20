@@ -115,7 +115,7 @@ gh attestation verify oci://ghcr.io/herzogf/htp-k8s:v0.3.0 \
 
 A passing check means the artifact was built by this repo's release workflow and hasn't been tampered with since. Both commands print the resolved digest — pin `@sha256:…` instead of the tag if you need that guarantee to hold even if the tag were ever repointed. More on the posture: [ADR-0005](docs/adr/0005-supply-chain-security-posture.md).
 
-Stable releases also publish moving tags (`latest`, `X`, `X.Y`) as a **pull convenience** — `gh attestation verify` resolves them to whatever they currently point at, so verifying one only proves *some* release is authentic, not a specific one. To verify a specific pull, resolve the digest first (`docker pull ghcr.io/herzogf/htp-k8s:latest` prints it) and verify `oci://ghcr.io/herzogf/htp-k8s@sha256:…` instead, or just use the exact tag as above.
+Stable releases also publish moving tags (`latest`, `X`, `X.Y`) as a **pull convenience, not a verification target** — the digest-pinning note above applies doubly here: `docker pull ghcr.io/herzogf/htp-k8s:latest` prints the resolved digest, which is what to verify instead.
 
 ## Docs & further reading
 

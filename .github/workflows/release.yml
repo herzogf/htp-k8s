@@ -458,10 +458,16 @@ jobs:
         with:
           # Full history + tags (issue #64): computeTags (below) needs every
           # existing stable release tag to decide whether THIS release is the
-          # highest — e.g. whether a backport patch may move `latest`. Same
-          # setting, same reasoning ("fetch-depth: 0" auto-follows tags on
-          # every fetched commit) as the goreleaser job's checkout above,
-          # which uses it for the changelog.
+          # highest — e.g. whether a backport patch may move `latest`.
+          # Without this, checkout still fetches the ONE tag that triggered
+          # the run (a shallow tag-push checkout isn't tag-BLIND, just
+          # tag-SPARSE) — so `git tag --list` would return exactly that one
+          # entry, RELEASE_TAG itself, and every release would trivially
+          # look like "the highest", permanently preserving the exact
+          # backport-moves-latest bug this PR fixes. Same setting, same
+          # reasoning ("fetch-depth: 0" auto-follows tags on every fetched
+          # commit) as the goreleaser job's checkout above, which uses it
+          # for the changelog.
           fetch-depth: 0
 
       - name: Set up Go
@@ -492,33 +498,67 @@ jobs:
       - name: Build and embed frontend
         run: task release:frontend
 
-      # Decides the moving-tag set for a STABLE release (bare MAJOR /
-      # MAJOR.MINOR / `latest`, per the highest-version rule) vs. the
-      # exact-tag-only rule for a prerelease — issue #64, full rationale in
-      # ADR-0005 and in this script's own header comment. Delegated to a
-      # pure, unit-tested JS module rather than inline shell specifically
-      # because this workflow is tag-triggered and can NEVER be exercised by
-      # PR CI (issue #156's lesson) — the module is what gets real PR-time
+      # Decides the moving-tag set for a release (rule + rationale: ADR-0005,
+      # "Moving image tags"; not restated here). Delegated to a pure,
+      # unit-tested JS module rather than inline shell specifically because
+      # this workflow is tag-triggered and can NEVER be exercised by PR CI
+      # (issue #156's lesson) — the module is what gets real PR-time
       # coverage instead (build.yml's Frontend (Node) job).
       #
-      # `git tag --list` already includes the tag that triggered this very
-      # run (it was pushed, and so already exists, before the workflow
-      # started) — the script doesn't need RELEASE_TAG injected into that
-      # list a second time. Reads tags from THIS checkout (fetch-depth: 0
-      # above) rather than querying the registry: cheaper, and avoids an
-      # extra authenticated call this early in the job.
+      # Reads tags from THIS checkout (fetch-depth: 0 above) rather than
+      # querying the registry: cheaper, and avoids an extra authenticated
+      # call this early in the job.
+      #
+      # This step has NO `defaults: run:` block above it in this workflow,
+      # so a bare `run:` here is plain `bash -e` — WITHOUT `pipefail`. A
+      # piped `git tag --list | node ...` would silently swallow a `git`
+      # failure: node would just see empty stdin, read that as "no tags
+      # exist", and conclude "this release is the highest" — moving `latest`
+      # unconditionally, which is exactly the #164-class defect this PR
+      # fixes elsewhere. So: (1) `git tag --list` is read into a variable on
+      # its own line, never piped straight into node, so its own exit status
+      # is never masked by anything downstream; (2) `set -euo pipefail`
+      # below is still added for defense in depth against a future edit
+      # reintroducing a pipe; (3) RELEASE_TAG is asserted present in that
+      # output before it's trusted — RELEASE_TAG is GUARANTEED to already be
+      # in `git tag --list` (it was pushed, and so exists, before this job
+      # ever started; a genuinely shallow checkout would still fetch just
+      # that one tag, not zero — the failure mode a `grep -c` check alone
+      # would miss), so its absence unambiguously means the read failed,
+      # never that "no tags exist yet" (impossible: this covers the
+      # first-ever release too, since RELEASE_TAG alone is always enough to
+      # satisfy the check); (4) the script's own output is checked non-empty
+      # before being trusted, in case the CLI's direct-execution guard
+      # (`import.meta.url === ...`) were ever to stop matching and the
+      # script silently printed nothing and exited 0.
       #
       # Echoed (not just piped through silently): this is what lets the
       # existing rc-dry-run practice prove the whole workflow<->script seam
-      # end-to-end (script found, invoked, stdin/argv wired, output parsed)
-      # even though a prerelease dry-run only ever computes the exact tag
-      # alone — the moving-tag branch itself is otherwise first-run-live.
+      # end-to-end (script found, invoked, stdin/argv wired, tag list
+      # actually read, output parsed) even though a prerelease dry-run only
+      # ever computes the exact tag alone — the moving-tag branch itself is
+      # otherwise first-run-live.
       - name: Compute image tags
         id: tags
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          tags="$(git tag --list 'v*' | node .github/scripts/compute-image-tags.mjs "$RELEASE_TAG")"
+          set -euo pipefail
+
+          existing_tags="$(git tag --list 'v*')"
+
+          if ! grep -qxF "$RELEASE_TAG" <<<"$existing_tags"; then
+            echo "::error::git tag --list did not include ${RELEASE_TAG} itself -- the tag read failed (RELEASE_TAG is always present once pushed), refusing to compute image tags from a possibly-incomplete list" >&2
+            exit 1
+          fi
+
+          tags="$(node .github/scripts/compute-image-tags.mjs "$RELEASE_TAG" <<<"$existing_tags")"
+
+          if [ -z "$tags" ]; then
+            echo "::error::compute-image-tags.mjs produced an empty tag list for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
           echo "Computed image tags for ${RELEASE_TAG}: ${tags}"
           echo "tags=${tags}" >> "$GITHUB_OUTPUT"
 
