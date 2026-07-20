@@ -2,13 +2,23 @@ import { describe, expect, it } from 'vitest'
 import { ColorFailed, ColorRunning, PodPhaseFailed } from '../generated/scenestate'
 import { makePanel, makeSceneState, makeTower } from '../test-support/sceneFixtures'
 import {
+  PANEL_FACES_PER_TOWER,
   PANELS_PER_ROW,
   PANEL_SIZE,
   panelInstanceIndex,
   panelInstances,
+  panelRowsPerFace,
   resolvePanel,
+  sceneRowsPerFace,
+  sceneTowerHeight,
 } from './panelLayout'
-import { TOWER_FOOTPRINT, towerPlacements } from './towerLayout'
+import { TOWER_FOOTPRINT, TOWER_HEIGHT, towerPlacements } from './towerLayout'
+
+/** The number of Pods that fit across all four faces of a Tower at the
+ * resting {@link TOWER_HEIGHT} — the "fill all four sides first" capacity
+ * {@link sceneTowerHeight} only grows the scene past. */
+const BASE_FACE_CAPACITY = panelRowsPerFace(TOWER_HEIGHT) * PANELS_PER_ROW
+const BASE_TOWER_CAPACITY = BASE_FACE_CAPACITY * PANEL_FACES_PER_TOWER
 
 describe('panelInstances', () => {
   it('maps an empty scene to no instances', () => {
@@ -147,6 +157,263 @@ describe('panelInstances', () => {
     expect(meanX(0)).toBeCloseTo(placements[0].position[0])
     expect(meanX(PANELS_PER_ROW)).toBeCloseTo(placements[1].position[0])
     expect(meanX(PANELS_PER_ROW)).toBeGreaterThan(meanX(0))
+  })
+
+  it('gives every front-face (pre-#59) Panel rotationY 0 — a no-op rotation', () => {
+    const instances = panelInstances([
+      makeTower({ panels: [makePanel(), makePanel(), makePanel()] }),
+    ])
+
+    expect(instances.every((p) => p.rotationY === 0)).toBe(true)
+  })
+})
+
+describe('panelInstances: four-face wrap (#59)', () => {
+  it('fills the front face completely before wrapping to the right face', () => {
+    // One more Pod than the front face holds at the resting height: the first
+    // BASE_FACE_CAPACITY stay on the front (+Z) face, the wrapped Pod starts a
+    // fresh top-down grid on the right (+X) face.
+    const panels = Array.from({ length: BASE_FACE_CAPACITY + 1 }, (_, i) =>
+      makePanel({ pod: `p-${i}` }),
+    )
+    const [placement] = towerPlacements([makeTower({ name: 'solo' })])
+    const instances = panelInstances([makeTower({ name: 'solo', panels })])
+
+    const frontFace = instances.slice(0, BASE_FACE_CAPACITY)
+    expect(frontFace.every((p) => p.rotationY === 0)).toBe(true)
+    expect(frontFace.every((p) => p.position[2] > placement.position[2])).toBe(true)
+
+    const wrapped = instances[BASE_FACE_CAPACITY]
+    // A quarter turn onto the right (+X) face, standing proud of THAT edge.
+    expect(wrapped.rotationY).toBeCloseTo(Math.PI / 2)
+    expect(wrapped.position[0]).toBeGreaterThan(placement.position[0])
+    // The wrapped face restarts its own grid at the top — same row-0 height as
+    // the front face's own first Pod (top-down fill, carried over from #15,
+    // applies per-face).
+    expect(wrapped.position[1]).toBeCloseTo(frontFace[0].position[1])
+
+    // No height growth yet: a single face's overflow is absorbed by the next
+    // face, not by growing the scene.
+    expect(sceneTowerHeight([makeTower({ panels })])).toBe(TOWER_HEIGHT)
+  })
+
+  it('wraps through all four faces (front, right, back, left) in order', () => {
+    const panels = Array.from({ length: BASE_TOWER_CAPACITY }, (_, i) =>
+      makePanel({ pod: `p-${i}` }),
+    )
+    const instances = panelInstances([makeTower({ panels })])
+
+    // One instance from the middle of each face, by construction (indices are
+    // 0-based multiples of BASE_FACE_CAPACITY plus a fixed intra-face offset).
+    const faceStart = (face: number) => instances[face * BASE_FACE_CAPACITY]
+    expect(faceStart(0).rotationY).toBeCloseTo(0)
+    expect(faceStart(1).rotationY).toBeCloseTo(Math.PI / 2)
+    expect(faceStart(2).rotationY).toBeCloseTo(Math.PI)
+    expect(faceStart(3).rotationY).toBeCloseTo(-Math.PI / 2)
+
+    // Every face's own first Pod lands at the same top-down row-0 height.
+    const topRowY = faceStart(0).position[1]
+    expect(faceStart(1).position[1]).toBeCloseTo(topRowY)
+    expect(faceStart(2).position[1]).toBeCloseTo(topRowY)
+    expect(faceStart(3).position[1]).toBeCloseTo(topRowY)
+  })
+
+  it('renders a 100+ Pod Tower across multiple faces without exceeding four or overflowing the prism', () => {
+    // Comfortably past 100, still inside the four-face capacity at the resting
+    // height — the acceptance criterion's "busy tower renders without
+    // overflowing the tower geometry", satisfied purely by wrapping (no height
+    // growth needed).
+    const podCount = 120
+    expect(podCount).toBeLessThanOrEqual(BASE_TOWER_CAPACITY)
+    expect(podCount).toBeGreaterThan(BASE_FACE_CAPACITY) // needs more than one face
+
+    const panels = Array.from({ length: podCount }, (_, i) => makePanel({ pod: `p-${i}` }))
+    const instances = panelInstances([makeTower({ panels })])
+
+    expect(sceneTowerHeight([makeTower({ panels })])).toBe(TOWER_HEIGHT)
+    // Uses every one of the four faces (not stuck on one, not overflowing a fifth).
+    const rotations = new Set(instances.map((p) => Math.round(p.rotationY * 1000)))
+    expect(rotations.size).toBe(PANEL_FACES_PER_TOWER)
+    // Every Panel stays within the resting Tower's vertical extent: never below
+    // the floor, never above the cap.
+    expect(instances.every((p) => p.position[1] >= PANEL_SIZE / 2)).toBe(true)
+    expect(instances.every((p) => p.position[1] <= TOWER_HEIGHT - PANEL_SIZE / 2)).toBe(true)
+  })
+})
+
+/**
+ * Measures the two horizontal geometry constants {@link facePlacement} bakes
+ * in (the standoff distance off a face and half a row's width) empirically,
+ * from a single centred row of Panels on the front face — rather than
+ * importing the private PANEL_STANDOFF/PANEL_PITCH constants — so the real
+ * containment tests below can assert an ACTUAL horizontal bound per Panel,
+ * not just a vertical (Y) one. This is what review finding #4 asked for:
+ * "the containment test doesn't test containment" — the previous 100+-Pod
+ * test only ever checked Y.
+ */
+function measureFaceGeometry(): { standoff: number; halfRowWidth: number } {
+  const panels = Array.from({ length: PANELS_PER_ROW }, (_, i) => makePanel({ pod: `ref-${i}` }))
+  const [placement] = towerPlacements([makeTower({ name: 'ref' })])
+  const instances = panelInstances([makeTower({ name: 'ref', panels })])
+  const standoff = instances[0].position[2] - placement.position[2]
+  const halfRowWidth = Math.max(
+    ...instances.map((p) => Math.abs(p.position[0] - placement.position[0])),
+  )
+  return { standoff, halfRowWidth }
+}
+
+/**
+ * Asserts every one of `instances` is ACTUALLY contained within its Tower's
+ * geometry at `height`: exactly one horizontal axis pinned to the face
+ * standoff (front/back = ±Z, right/left = ±X — {@link facePlacement}'s four
+ * faces), the other horizontal axis within the row's half-width, and Y within
+ * the Tower's vertical span. A real footprint/height containment check, not
+ * just the old test's Y-only bound.
+ */
+function assertContained(
+  instances: ReturnType<typeof panelInstances>,
+  placement: { position: readonly [number, number, number] },
+  height: number,
+  geometry: { standoff: number; halfRowWidth: number },
+): void {
+  const EPS = 1e-6
+  for (const instance of instances) {
+    const dx = instance.position[0] - placement.position[0]
+    const dz = instance.position[2] - placement.position[2]
+    const onZFace = Math.abs(Math.abs(dz) - geometry.standoff) < EPS
+    const onXFace = Math.abs(Math.abs(dx) - geometry.standoff) < EPS
+    expect(onZFace || onXFace).toBe(true)
+    if (onZFace) {
+      expect(Math.abs(dx)).toBeLessThanOrEqual(geometry.halfRowWidth + EPS)
+    } else {
+      expect(Math.abs(dz)).toBeLessThanOrEqual(geometry.halfRowWidth + EPS)
+    }
+    expect(instance.position[1]).toBeGreaterThanOrEqual(PANEL_SIZE / 2 - EPS)
+    expect(instance.position[1]).toBeLessThanOrEqual(height - PANEL_SIZE / 2 + EPS)
+  }
+}
+
+describe('panelInstances: growth-path containment (#59 review findings 3 & 4)', () => {
+  const geometry = measureFaceGeometry()
+
+  it('stays contained (real X/Y/Z bounds, not just Y) for a busy Tower in the non-growing regime', () => {
+    const podCount = 120
+    const towers = [
+      makeTower({
+        panels: Array.from({ length: podCount }, (_, i) => makePanel({ pod: `p-${i}` })),
+      }),
+    ]
+    const height = sceneTowerHeight(towers)
+    const [placement] = towerPlacements(towers, height)
+
+    assertContained(panelInstances(towers), placement, height, geometry)
+  })
+
+  it('stays contained AND collision-free once the scene has grown past the resting height', () => {
+    // Several pod counts spanning multiple row-boundary crossings well past
+    // where sceneTowerHeight must grow — including 373, the exact count the
+    // review's floating-point round-trip finding was reproduced against.
+    for (const podCount of [BASE_TOWER_CAPACITY + 1, 200, 373, 500, 1000]) {
+      const towers = [
+        makeTower({
+          panels: Array.from({ length: podCount }, (_, i) => makePanel({ pod: `p-${i}` })),
+        }),
+      ]
+      const height = sceneTowerHeight(towers)
+      expect(height).toBeGreaterThan(TOWER_HEIGHT)
+      const [placement] = towerPlacements(towers, height)
+      const instances = panelInstances(towers)
+
+      assertContained(instances, placement, height, geometry)
+
+      // The real regression a lost row causes: the last Panel silently
+      // wraps back onto an earlier one (identical rendered position) instead
+      // of visibly overflowing — assert every rendered position is unique.
+      const positions = new Set(instances.map((p) => p.position.join(',')))
+      expect(positions.size).toBe(podCount)
+    }
+  })
+
+  it('panelRowsPerFace(sceneTowerHeight(towers)) matches sceneRowsPerFace(towers) at every row boundary (ROW_EPSILON regression guard)', () => {
+    // The exact composition the review found losing a row to floating-point
+    // rounding: re-deriving row count by flooring the already-rounded height
+    // back down. panelInstances itself no longer does this (it calls
+    // sceneRowsPerFace directly — see its own comment), but this pins the
+    // composition safe anyway, in case anything else ever does it.
+    for (let rows = 12; rows <= 100; rows++) {
+      const podCount = rows * PANELS_PER_ROW * PANEL_FACES_PER_TOWER
+      const towers = [
+        makeTower({
+          panels: Array.from({ length: podCount }, (_, i) => makePanel({ pod: `p-${i}` })),
+        }),
+      ]
+      const height = sceneTowerHeight(towers)
+      expect(panelRowsPerFace(height)).toBe(sceneRowsPerFace(towers))
+    }
+  })
+})
+
+describe('sceneTowerHeight (#59)', () => {
+  it('is the resting TOWER_HEIGHT for an empty scene', () => {
+    expect(sceneTowerHeight([])).toBe(TOWER_HEIGHT)
+  })
+
+  it('stays at TOWER_HEIGHT while the busiest Tower fits across its four faces', () => {
+    const panels = Array.from({ length: BASE_TOWER_CAPACITY }, (_, i) =>
+      makePanel({ pod: `p-${i}` }),
+    )
+    expect(sceneTowerHeight([makeTower({ panels })])).toBe(TOWER_HEIGHT)
+  })
+
+  it('grows past TOWER_HEIGHT once the busiest Tower overflows all four faces', () => {
+    const panels = Array.from({ length: BASE_TOWER_CAPACITY + 1 }, (_, i) =>
+      makePanel({ pod: `p-${i}` }),
+    )
+    expect(sceneTowerHeight([makeTower({ panels })])).toBeGreaterThan(TOWER_HEIGHT)
+  })
+
+  it('is driven by the busiest Tower, not the scene-wide total Pod count', () => {
+    // Three Towers, each comfortably under BASE_TOWER_CAPACITY on its own, whose
+    // SUM exceeds it — the scene must stay at the resting height, because no
+    // single Tower needs more than its own four faces hold.
+    const perTower = Math.floor(BASE_TOWER_CAPACITY * 0.6)
+    const towers = ['a', 'b', 'c'].map((name) =>
+      makeTower({
+        name,
+        panels: Array.from({ length: perTower }, (_, i) => makePanel({ pod: `${name}-${i}` })),
+      }),
+    )
+
+    expect(perTower * 3).toBeGreaterThan(BASE_TOWER_CAPACITY)
+    expect(sceneTowerHeight(towers)).toBe(TOWER_HEIGHT)
+  })
+
+  it('applies the SAME grown height to every Tower — a quiet Tower is not shorter', () => {
+    const busyPanels = Array.from({ length: BASE_TOWER_CAPACITY + PANELS_PER_ROW * 4 }, (_, i) =>
+      makePanel({ pod: `busy-${i}` }),
+    )
+    const busy = makeTower({ name: 'busy', grid: { col: 0, row: 0 }, panels: busyPanels })
+    const quiet = makeTower({
+      name: 'quiet',
+      grid: { col: 1, row: 0 },
+      panels: [makePanel({ pod: 'lonely' })],
+    })
+
+    const height = sceneTowerHeight([busy, quiet])
+    expect(height).toBeGreaterThan(TOWER_HEIGHT)
+
+    const instances = panelInstances([busy, quiet])
+    const busyTopRowY = instances[0].position[1] // busy's first Pod: face 0, row 0
+    const quietInstance = instances.find((p) => p.pod === 'lonely')!
+    // Both are row-0-of-face-0 Panels, so at a genuinely uniform scene height
+    // they land at the exact same Y — the quiet Tower's face just has the rest
+    // of its rows empty, it isn't a shorter prism.
+    expect(quietInstance.position[1]).toBeCloseTo(busyTopRowY)
+
+    // And the placements (the Tower prisms themselves) share that same height.
+    const placements = towerPlacements([busy, quiet], height)
+    expect(placements[0].position[1]).toBe(height / 2)
+    expect(placements[1].position[1]).toBe(height / 2)
   })
 })
 

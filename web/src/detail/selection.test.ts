@@ -23,6 +23,7 @@ describe('panelSelection', () => {
       pod: 'web-1',
       color: '#39ff14',
       position: [1, 2, 3],
+      rotationY: 0,
     }
 
     expect(panelSelection(instance)).toEqual({

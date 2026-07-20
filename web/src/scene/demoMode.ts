@@ -92,13 +92,15 @@ export const DEMO_BANK_MAX = Math.PI / 9
 export const PERIMETER_OFFSET = TOWER_SPACING * 1.1
 
 /**
- * World-space Y of a Tower's roofline (its prism top) — `TOWER_HEIGHT`, since
- * a Tower's centre sits at `TOWER_HEIGHT / 2` (towerLayout.ts) resting on the
- * floor at y = 0. The fixed reference the altitude program, the Tower-box
- * clearance ({@link towerBoxClearance}) and the rendered aim's hard ceiling
- * ({@link sampleDemoTourPose}) are measured against.
+ * World-space Y of a Tower's roofline (its prism top) at the resting
+ * {@link TOWER_HEIGHT} — since a Tower's centre sits at `TOWER_HEIGHT / 2`
+ * (towerLayout.ts) resting on the floor at y = 0. The reference the altitude
+ * program, the Tower-box clearance ({@link towerBoxClearance}) and the
+ * rendered aim's hard ceiling ({@link sampleDemoTourPose}) are measured
+ * against — via {@link AltitudeBands}' `rooflineY`, which scales this to a
+ * grown scene's ACTUAL roofline (#59) rather than staying pinned here.
  */
-const TOWER_ROOFLINE_Y = TOWER_HEIGHT
+export const TOWER_ROOFLINE_Y = TOWER_HEIGHT
 
 /** The canyon-low altitude band (world Y), mostly below the Tower roofline. */
 export const CANYON_ALTITUDE_MIN = TOWER_HEIGHT * 0.15
@@ -818,6 +820,107 @@ const ORBIT_BOB_PERIOD_SECONDS = 14
 const ORBIT_ANGULAR_SPEED = (2 * Math.PI) / 50
 
 // ---------------------------------------------------------------------------
+// Scene-height-aware altitude bands (#59 follow-up)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every altitude-band constant above (`CANYON_ALTITUDE_MIN/MAX`,
+ * `OVERVIEW_ALTITUDE_MIN/MAX`, `OVERVIEW_WIDE_APEX_MAX`,
+ * `CLIMB_LEVELOFF_DISTANCE`, `LOOKAT_AIM_CEILING/FLOOR`,
+ * `ORBIT_ALTITUDE_BASE/BOB_AMPLITUDE`, and the Tower roofline itself) bundled
+ * as one value, scaled to the scene's ACTUAL Tower height rather than baked
+ * in against the resting {@link TOWER_HEIGHT}.
+ *
+ * #59 lets every Tower in a busy scene grow uniformly taller than
+ * `TOWER_HEIGHT` (`panelLayout.ts`'s `sceneTowerHeight`, applied scene-wide so
+ * the skyline stays level); before this type existed every one of Demo Mode's
+ * altitude thresholds stayed pinned to the resting height regardless — the
+ * "over the rooftops" overview band could fly *below* the real roofline of a
+ * grown scene, and the Tower-box clearance ({@link towerBoxClearance}) measured
+ * against a shorter box than the one actually rendered, so the showcase
+ * camera clipped through Towers at exactly the scale #59 exists to support.
+ *
+ * Every field keeps the same *fraction* of the roofline the resting-height
+ * constant above was tuned at (e.g. `OVERVIEW_ALTITUDE_MIN = TOWER_HEIGHT *
+ * 1.1` becomes `rooflineY * 1.1`), so the carefully-tuned *feel* — how far
+ * above the roofline an overview cruises, how gently a climb levels off — is
+ * preserved exactly at any scene height, and every field here is
+ * byte-identical to its bare exported constant above when `rooflineY ===
+ * TOWER_HEIGHT` (the resting-height case every pre-#59 test exercises, via
+ * {@link DEFAULT_ALTITUDE_BANDS}).
+ */
+interface AltitudeBands {
+  /** World-space Y of the scene's actual Tower roofline (every Tower's prism top — uniform, #59). */
+  rooflineY: number
+  canyonMin: number
+  canyonMax: number
+  overviewMin: number
+  overviewMax: number
+  overviewWideApexMax: number
+  climbLeveloffDistance: number
+  aimCeiling: number
+  aimFloor: number
+  orbitAltitudeBase: number
+  orbitBobAmplitude: number
+}
+
+/** Builds the {@link AltitudeBands} for a scene whose Tower roofline sits at `rooflineY` — see that type's doc comment. */
+function altitudeBandsForRoofline(rooflineY: number): AltitudeBands {
+  const scale = rooflineY / TOWER_HEIGHT
+  return {
+    rooflineY,
+    canyonMin: CANYON_ALTITUDE_MIN * scale,
+    canyonMax: CANYON_ALTITUDE_MAX * scale,
+    overviewMin: OVERVIEW_ALTITUDE_MIN * scale,
+    overviewMax: OVERVIEW_ALTITUDE_MAX * scale,
+    overviewWideApexMax: OVERVIEW_WIDE_APEX_MAX * scale,
+    climbLeveloffDistance: CLIMB_LEVELOFF_DISTANCE * scale,
+    aimCeiling: LOOKAT_AIM_CEILING * scale,
+    aimFloor: LOOKAT_AIM_FLOOR * scale,
+    orbitAltitudeBase: ORBIT_ALTITUDE_BASE * scale,
+    orbitBobAmplitude: ORBIT_BOB_AMPLITUDE * scale,
+  }
+}
+
+/**
+ * The altitude bands at the resting {@link TOWER_HEIGHT} — field-for-field
+ * identical to the bare exported constants above. The default every
+ * altitude-consuming function below falls back to, so every caller that
+ * predates #59's scene-height awareness (and every test that never passes a
+ * grown scene) is completely unaffected.
+ */
+const DEFAULT_ALTITUDE_BANDS: AltitudeBands = altitudeBandsForRoofline(TOWER_HEIGHT)
+
+/**
+ * The scene-wide roofline Y for a set of Tower `placements`: #59 renders
+ * every Tower in a scene at the SAME uniform height, so any one placement's
+ * Y-centre doubled (a Tower's centre sits at `height / 2`, resting on the
+ * floor at y = 0 — see `towerLayout.ts`'s `towerPlacements`) already *is* the
+ * whole scene's roofline — no separate "scene height" input needs to be
+ * threaded in alongside `placements`, matching ADR-0010's "derived from the
+ * real Tower placements … no magic numbers" property. Falls back to the
+ * resting {@link TOWER_HEIGHT} for an empty scene (mirroring {@link
+ * fallbackCenter}'s degenerate-scene handling).
+ */
+function rooflineFromPlacements(placements: readonly TowerPlacement[]): number {
+  return placements.length === 0 ? TOWER_HEIGHT : placements[0].position[1] * 2
+}
+
+/**
+ * {@link altitudeBandsForRoofline} for `placements`' scene-wide roofline
+ * ({@link rooflineFromPlacements}), short-circuiting to the already-built
+ * {@link DEFAULT_ALTITUDE_BANDS} at the (overwhelmingly common — most scenes
+ * never grow past it) resting height instead of allocating an equal-valued
+ * object fresh. {@link stepDemoTour} calls this every frame, so skipping the
+ * allocation on the common path is cheap render-loop garbage avoided for
+ * free — a grown scene still recomputes (and re-allocates) exactly as before.
+ */
+function bandsForPlacements(placements: readonly TowerPlacement[]): AltitudeBands {
+  const rooflineY = rooflineFromPlacements(placements)
+  return rooflineY === TOWER_HEIGHT ? DEFAULT_ALTITUDE_BANDS : altitudeBandsForRoofline(rooflineY)
+}
+
+// ---------------------------------------------------------------------------
 // Seeded PRNG
 // ---------------------------------------------------------------------------
 
@@ -1099,6 +1202,7 @@ function initialAltitudeProgram(rngState: number): { program: AltitudeProgram; n
 function drawAltitude(
   rngState: number,
   program: AltitudeProgram,
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
 ): {
   altitude: number
   isOverview: boolean
@@ -1130,8 +1234,8 @@ function drawAltitude(
     // OVERVIEW_WIDE_EPISODE_WAYPOINTS / OVERVIEW_WIDE_APEX_MAX).
     const apexRoll = mulberry32Step(rngState)
     const apexAltitude =
-      OVERVIEW_ALTITUDE_MIN + apexRoll.value * (OVERVIEW_ALTITUDE_MAX - OVERVIEW_ALTITUDE_MIN)
-    const episodeWaypoints = isWideApex(apexAltitude)
+      bands.overviewMin + apexRoll.value * (bands.overviewMax - bands.overviewMin)
+    const episodeWaypoints = isWideApex(apexAltitude, bands)
       ? OVERVIEW_WIDE_EPISODE_WAYPOINTS
       : OVERVIEW_EPISODE_WAYPOINTS
     return {
@@ -1143,7 +1247,7 @@ function drawAltitude(
   }
   const jitterRoll = mulberry32Step(rngState)
   return {
-    altitude: CANYON_ALTITUDE_MIN + jitterRoll.value * (CANYON_ALTITUDE_MAX - CANYON_ALTITUDE_MIN),
+    altitude: bands.canyonMin + jitterRoll.value * (bands.canyonMax - bands.canyonMin),
     isOverview: false,
     program: { mode: 'canyon', waypointsLeft: program.waypointsLeft - 1, apexAltitude: 0 },
     nextState: jitterRoll.nextState,
@@ -1151,8 +1255,8 @@ function drawAltitude(
 }
 
 /** Whether an overview episode with this apex is a *wide* one — see {@link OVERVIEW_WIDE_APEX_MAX}. */
-function isWideApex(apexAltitude: number): boolean {
-  return apexAltitude <= OVERVIEW_WIDE_APEX_MAX
+function isWideApex(apexAltitude: number, bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS): boolean {
+  return apexAltitude <= bands.overviewWideApexMax
 }
 
 /**
@@ -1167,10 +1271,13 @@ function isWideApex(apexAltitude: number): boolean {
  * - the episode's final apex waypoint (`mode` already back to `'canyon'` on
  *   that draw) stays on the ordinary ring so the descent starts close-in.
  */
-function isWideOverviewDraw(program: AltitudeProgram): boolean {
+function isWideOverviewDraw(
+  program: AltitudeProgram,
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
+): boolean {
   return (
     program.mode === 'overview' &&
-    isWideApex(program.apexAltitude) &&
+    isWideApex(program.apexAltitude, bands) &&
     program.waypointsLeft <= OVERVIEW_WIDE_EPISODE_WAYPOINTS - 1 - OVERVIEW_WIDE_START_WAYPOINT
   )
 }
@@ -1190,10 +1297,11 @@ function drawNextWaypoint(
   program: AltitudeProgram,
   rngState: number,
   approach: ApproachDirection | null = null,
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
 ): { waypoint: DrawnWaypoint; move: LatticeMove; program: AltitudeProgram; nextState: number } {
   const picked = pickNextMove(graph, coord, prevMove, rngState, approach)
   const nextCoord: LatticeCoord = { i: coord.i + picked.move.di, j: coord.j + picked.move.dj }
-  const altitude = drawAltitude(picked.nextState, program)
+  const altitude = drawAltitude(picked.nextState, program, bands)
   const position = new Vector3(graph.xs[nextCoord.i], altitude.altitude, graph.zs[nextCoord.j])
   // A wide overview episode's wide phase (#105 iteration 4 — see
   // OVERVIEW_PERIMETER_EXTRA): waypoints on a *straight* stretch of
@@ -1204,7 +1312,7 @@ function drawNextWaypoint(
   // wider offsets the reshaped corners measurably sharpened toward the cusp
   // guard). A pure function of the drawn state (deterministic per ADR-0010),
   // derived from TOWER_SPACING (scale-free).
-  if (isWideOverviewDraw(altitude.program)) {
+  if (isWideOverviewDraw(altitude.program, bands)) {
     const onWest = nextCoord.i === 0
     const onEast = nextCoord.i === graph.xs.length - 1
     const onNorth = nextCoord.j === 0
@@ -1636,11 +1744,12 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 function towerBoxClearance(
   point: Vector3,
   towerPosition: readonly [number, number, number],
+  rooflineY: number = TOWER_ROOFLINE_Y,
 ): number {
   const halfFootprint = TOWER_FOOTPRINT / 2
   const dx = Math.max(0, Math.abs(point.x - towerPosition[0]) - halfFootprint)
   const dz = Math.max(0, Math.abs(point.z - towerPosition[2]) - halfFootprint)
-  const dy = Math.max(0, point.y - TOWER_ROOFLINE_Y, -point.y)
+  const dy = Math.max(0, point.y - rooflineY, -point.y)
   return Math.sqrt(dx * dx + dy * dy + dz * dz)
 }
 
@@ -1673,6 +1782,7 @@ function towerBoxClearance(
 export function nearestTowerPull(
   point: Vector3,
   placements: readonly TowerPlacement[],
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
 ): { point: Vector3; strength: number } {
   if (placements.length === 0) {
     return { point: point.clone(), strength: 0 }
@@ -1680,7 +1790,7 @@ export function nearestTowerPull(
   let nearest = placements[0]
   let nearestClearance = Infinity
   for (const placement of placements) {
-    const clearance = towerBoxClearance(point, placement.position)
+    const clearance = towerBoxClearance(point, placement.position, bands.rooflineY)
     if (clearance < nearestClearance) {
       nearestClearance = clearance
       nearest = placement
@@ -1695,7 +1805,7 @@ export function nearestTowerPull(
   return {
     point: new Vector3(
       nearest.position[0],
-      clamp(point.y, LOOKAT_AIM_FLOOR, LOOKAT_AIM_CEILING),
+      clamp(point.y, bands.aimFloor, bands.aimCeiling),
       nearest.position[2],
     ),
     strength,
@@ -1768,6 +1878,7 @@ function forwardLookAheadPoint(
   position: Vector3,
   tangent: Vector3,
   bounds: AimBounds | null = null,
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
 ): Vector3 {
   const horizontalLength = Math.hypot(tangent.x, tangent.z)
   if (horizontalLength < 1e-9) {
@@ -1775,7 +1886,7 @@ function forwardLookAheadPoint(
     // differ horizontally) — fall back to the raw tangent rather than a
     // zero-length look direction.
     const fallback = position.clone().addScaledVector(tangent, LOOKAT_LOOKAHEAD_DISTANCE)
-    fallback.y = clamp(fallback.y, LOOKAT_AIM_FLOOR, LOOKAT_AIM_CEILING)
+    fallback.y = clamp(fallback.y, bands.aimFloor, bands.aimCeiling)
     return clampToAimBounds(fallback, bounds)
   }
   const flyableGradient = clamp(
@@ -1788,8 +1899,8 @@ function forwardLookAheadPoint(
       position.x + (tangent.x / horizontalLength) * LOOKAT_LOOKAHEAD_DISTANCE,
       clamp(
         position.y + flyableGradient * LOOKAT_GAZE_GRADIENT_FACTOR * LOOKAT_LOOKAHEAD_DISTANCE,
-        LOOKAT_AIM_FLOOR,
-        LOOKAT_AIM_CEILING,
+        bands.aimFloor,
+        bands.aimCeiling,
       ),
       position.z + (tangent.z / horizontalLength) * LOOKAT_LOOKAHEAD_DISTANCE,
     ),
@@ -1859,10 +1970,11 @@ export function demandDrivenLookAt(
   pullPoint: Vector3,
   glance: GlanceState,
   bounds: AimBounds | null = null,
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
 ): Vector3 {
   return composeLookAt(
     position,
-    forwardLookAheadPoint(position, tangent, bounds),
+    forwardLookAheadPoint(position, tangent, bounds, bands),
     lookAtBlend,
     pullPoint,
     glance,
@@ -1912,6 +2024,18 @@ function composeLookAt(
 interface CanyonTourState {
   kind: 'canyon'
   graph: CanyonGraph
+  /**
+   * The altitude bands this tour's waypoints/aim/pull are drawn and clamped
+   * against (#59) — derived once (via {@link rooflineFromPlacements}) from
+   * the Tower placements the tour was built/last advanced against, so a scene
+   * that grows taller (busier Towers, uniform scene-wide height) keeps the
+   * whole altitude program — canyon/overview bands, the aim window, the
+   * Tower-box clearance — in step with the ACTUAL rendered roofline instead
+   * of the resting {@link TOWER_HEIGHT}. Refreshed every {@link stepDemoTour}
+   * call from that call's own `placements` argument, so a scene that grows or
+   * shrinks mid-flight is picked up within the current frame.
+   */
+  bands: AltitudeBands
   rngState: number
   /**
    * The seeded glances' own PRNG stream (#105 iteration 2), advanced only by
@@ -2036,13 +2160,19 @@ interface OrbitTourState {
   elapsed: number
   /** The seed this fallback was created with — kept (not just its derived phase) so a mid-flight promotion to a real Canyon tour (see {@link stepDemoTour}) can hand it straight to {@link createDemoTour}. */
   seed: number
+  /** The altitude bands (#59) — see {@link CanyonTourState}'s `bands` doc comment; {@link sampleOrbitPose} reads its `orbitAltitudeBase`/`orbitBobAmplitude`/`rooflineY`. */
+  bands: AltitudeBands
 }
 
 /** Demo Mode's full tour state: either flying the Canyon graph, or the degenerate orbit fallback. */
 export type DemoTourState = CanyonTourState | OrbitTourState
 
-function orbitTourState(seed: number, center: [number, number, number]): OrbitTourState {
-  return { kind: 'orbit', center, elapsed: 0, seed: seed | 0 }
+function orbitTourState(
+  seed: number,
+  center: [number, number, number],
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
+): OrbitTourState {
+  return { kind: 'orbit', center, elapsed: 0, seed: seed | 0, bands }
 }
 
 /** The orbit's starting angle, derived from its seed so different seeds still produce distinguishable (if simple) orbits. */
@@ -2099,6 +2229,7 @@ function extendWindow(
   graph: CanyonGraph,
   requiredArc: number,
   table: number[] | null = null,
+  bands: AltitudeBands = DEFAULT_ALTITUDE_BANDS,
 ): number[] {
   let current = table
   for (;;) {
@@ -2116,6 +2247,8 @@ function extendWindow(
       frontier.headMove,
       frontier.altitudeProgram,
       frontier.rngState,
+      null,
+      bands,
     )
     frontier.window.push(
       ...expandWaypoint(frontier.rawPrev, frontier.rawTail, picked.waypoint.position),
@@ -2169,9 +2302,14 @@ export function createDemoTour(params: {
   placements: readonly TowerPlacement[]
   entry: Pose
 }): DemoTourState {
+  // #59: the altitude program, aim window, and Tower-box clearance all scale
+  // to the scene's ACTUAL (possibly grown, uniform-across-Towers) roofline —
+  // see AltitudeBands' doc comment — rather than staying pinned to the
+  // resting TOWER_HEIGHT.
+  const bands = bandsForPlacements(params.placements)
   const graph = buildCanyonGraph(params.placements)
   if (!graph) {
-    return orbitTourState(params.seed, fallbackCenter(params.placements))
+    return orbitTourState(params.seed, fallbackCenter(params.placements), bands)
   }
 
   let rngState = params.seed | 0
@@ -2181,7 +2319,7 @@ export function createDemoTour(params: {
   // often" later, never in the activation transition itself.
   const initialProgram = initialAltitudeProgram(rngState)
   rngState = initialProgram.nextState
-  const entryAltitude = drawAltitude(rngState, initialProgram.program)
+  const entryAltitude = drawAltitude(rngState, initialProgram.program, bands)
   rngState = entryAltitude.nextState
   const entryWaypoint = new Vector3(
     graph.xs[entryCoord.i],
@@ -2213,6 +2351,7 @@ export function createDemoTour(params: {
       entryAltitude.program,
       rngState,
       approach,
+      bands,
     )
     // The raw route so far is [camera, entryWaypoint, step1]; the entry
     // waypoint's corner (takeoff approach meeting the walk's first move) can
@@ -2232,13 +2371,23 @@ export function createDemoTour(params: {
   } else {
     // The camera already sits on the entry node — start the walk there
     // directly rather than flying a degenerate zero-length takeoff segment.
-    const step1 = drawNextWaypoint(graph, entryCoord, null, entryAltitude.program, rngState)
+    const step1 = drawNextWaypoint(
+      graph,
+      entryCoord,
+      null,
+      entryAltitude.program,
+      rngState,
+      null,
+      bands,
+    )
     const step2 = drawNextWaypoint(
       graph,
       step1.waypoint.coord,
       step1.move,
       step1.program,
       step1.nextState,
+      null,
+      bands,
     )
     frontier = {
       window: [
@@ -2262,7 +2411,7 @@ export function createDemoTour(params: {
   // Draw until the arc table provably outreaches the look-ahead from the
   // very first frame (traveled = 0) — the measured guarantee SplineWindow
   // documents.
-  extendWindow(frontier, graph, LOOKAT_LOOKAHEAD_DISTANCE)
+  extendWindow(frontier, graph, LOOKAT_LOOKAHEAD_DISTANCE, null, bands)
   const window: SplineWindow = frontier.window
 
   const glanceRoll = rollGlance(glanceSeed(params.seed))
@@ -2280,9 +2429,9 @@ export function createDemoTour(params: {
   )
   // The entry aim is level at the entry altitude (climbGradient starts at 0),
   // matching the flown-gradient aim altitude stepDemoTour maintains.
-  entryForward.y = clamp(window[1].y, CANYON_ALTITUDE_MIN, LOOKAT_AIM_CEILING)
+  entryForward.y = clamp(window[1].y, bands.canyonMin, bands.aimCeiling)
   clampToAimBounds(entryForward, bounds)
-  const entryPull = nearestTowerPull(entryForward, params.placements)
+  const entryPull = nearestTowerPull(entryForward, params.placements, bands)
   // Seed the eased view triplet at its geometric entry target, same reason.
   const entryPose = window[1]
   const entryTarget = composeLookAt(entryPose, entryForward, 0, entryPull.point, NO_GLANCE)
@@ -2291,6 +2440,7 @@ export function createDemoTour(params: {
   return {
     kind: 'canyon',
     graph,
+    bands,
     rngState: frontier.rngState,
     glanceRngState: glanceRoll.nextState,
     headCoord: frontier.headCoord,
@@ -2341,13 +2491,22 @@ export function stepDemoTour(
   delta: number,
   placements: readonly TowerPlacement[],
 ): DemoTourState {
+  // #59: re-derive the altitude bands from THIS call's placements every
+  // frame (not just at createDemoTour time), so a scene that grows/shrinks
+  // uniform height mid-flight (a Tower's Pod count crossing the four-face
+  // capacity while Demo Mode is already running) is reflected within the
+  // current frame — see AltitudeBands' doc comment. bandsForPlacements
+  // reuses the shared DEFAULT_ALTITUDE_BANDS object at the (overwhelmingly
+  // common) resting height rather than allocating an equal-valued one fresh
+  // every frame of the render loop.
+  const bands = bandsForPlacements(placements)
   if (state.kind === 'orbit') {
     const graph = buildCanyonGraph(placements)
     if (graph) {
       const entry = sampleOrbitPose(state)
       return createDemoTour({ seed: state.seed, placements, entry })
     }
-    return { ...state, elapsed: state.elapsed + delta }
+    return { ...state, elapsed: state.elapsed + delta, bands }
   }
 
   // The camera's rendered horizontal position *before* this frame's advance —
@@ -2396,14 +2555,14 @@ export function stepDemoTour(
         // The cluster shrank to degenerate (≤1 Tower) mid-flight — a rare
         // edge kept simple: hand off to the orbit fallback rather than
         // engineering a seamless downgrade for an event this uncommon.
-        return orbitTourState(state.rngState, fallbackCenter(placements))
+        return orbitTourState(state.rngState, fallbackCenter(placements), bands)
       }
       graph = nextGraph
       rolledOver = true
     }
     traveled -= segmentArcLength(cumulative)
     frontier.window.shift()
-    cumulative = extendWindow(frontier, graph, traveled + LOOKAT_LOOKAHEAD_DISTANCE)
+    cumulative = extendWindow(frontier, graph, traveled + LOOKAT_LOOKAHEAD_DISTANCE, null, bands)
     // A new piece may start a fresh glance — but only when no glance is
     // already in flight (see the doc comment on `glance` above). Drawn from
     // the glances' own PRNG stream, never the walk's (see glanceRngState).
@@ -2421,7 +2580,13 @@ export function stepDemoTour(
   // one piece of flight — though the waypoints already drawn ahead (up to a
   // look-ahead's worth of route) were planned on the older graph and are
   // still flown as drawn, the same laziness ADR-0010 already accepts.
-  cumulative = extendWindow(frontier, graph, traveled + LOOKAT_LOOKAHEAD_DISTANCE, cumulative)
+  cumulative = extendWindow(
+    frontier,
+    graph,
+    traveled + LOOKAT_LOOKAHEAD_DISTANCE,
+    cumulative,
+    bands,
+  )
   const window: SplineWindow = frontier.window
 
   const segmentT = arcDistanceToLocalT(cumulative, traveled)
@@ -2454,7 +2619,7 @@ export function stepDemoTour(
   )
   const altitudeRemaining = window[2].y - state.altitude
   const levelOff = clamp(
-    Math.abs(altitudeRemaining) / CLIMB_LEVELOFF_DISTANCE,
+    Math.abs(altitudeRemaining) / bands.climbLeveloffDistance,
     CLIMB_LEVELOFF_MIN_FACTOR,
     1,
   )
@@ -2528,11 +2693,11 @@ export function stepDemoTour(
   // pull).
   forward.y = clamp(
     actualPosition.y + climbGradient * LOOKAT_GAZE_GRADIENT_FACTOR * LOOKAT_LOOKAHEAD_DISTANCE,
-    CANYON_ALTITUDE_MIN,
-    LOOKAT_AIM_CEILING,
+    bands.canyonMin,
+    bands.aimCeiling,
   )
   clampToAimBounds(forward, bounds)
-  const pull = nearestTowerPull(forward, placements)
+  const pull = nearestTowerPull(forward, placements, bands)
   const lookAtBlend = approach(state.lookAtBlend, pull.strength, LOOKAT_BLEND_RATE * delta)
   // The pull's anchor point eases too (never snaps on a nearest-Tower
   // switch) — see LOOKAT_PULL_POINT_EASE_RATE's doc comment.
@@ -2583,6 +2748,7 @@ export function stepDemoTour(
   return {
     kind: 'canyon',
     graph,
+    bands,
     rngState: frontier.rngState,
     glanceRngState,
     headCoord: frontier.headCoord,
@@ -2617,10 +2783,10 @@ function sampleOrbitPose(state: OrbitTourState): DemoPose {
   const [cx, cy, cz] = state.center
   const position: [number, number, number] = [
     cx + ORBIT_RADIUS * Math.sin(angle),
-    cy + ORBIT_ALTITUDE_BASE + ORBIT_BOB_AMPLITUDE * Math.sin(bobPhase),
+    cy + state.bands.orbitAltitudeBase + state.bands.orbitBobAmplitude * Math.sin(bobPhase),
     cz + ORBIT_RADIUS * Math.cos(angle),
   ]
-  const target: [number, number, number] = [cx, cy + TOWER_HEIGHT * 0.5, cz]
+  const target: [number, number, number] = [cx, cy + state.bands.rooflineY * 0.5, cz]
   // A constant-radius, constant-angular-speed orbit has a constant turn rate,
   // so (unlike the Canyon tour) its bank is simplest computed directly rather
   // than finite-differenced — a steady, gentle lean into the circle.
@@ -2659,8 +2825,8 @@ export function sampleDemoTourPose(state: DemoTourState): DemoPose {
     actualPosition.x + Math.sin(state.viewYaw) * horizontalReach,
     clamp(
       actualPosition.y + Math.sin(state.viewPitch) * state.viewDistance,
-      LOOKAT_AIM_FLOOR,
-      TOWER_ROOFLINE_Y,
+      state.bands.aimFloor,
+      state.bands.rooflineY,
     ),
     actualPosition.z + Math.cos(state.viewYaw) * horizontalReach,
   )

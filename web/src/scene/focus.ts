@@ -79,7 +79,17 @@ export const MAX_FOCUS_STEP_SECONDS = 1 / 30
  * (a {@link TowerPlacement} position). The camera stands off the Tower's front
  * (+Z) face — the face its Panels are on — raised to {@link TOWER_VIEW_HEIGHT}
  * and nudged sideways by {@link TOWER_VIEW_SIDE_OFFSET} for an angled view,
- * looking back at the Tower centre so the whole prism is framed.
+ * looking back at the Tower centre.
+ *
+ * `TOWER_VIEW_DISTANCE`/`TOWER_VIEW_HEIGHT` are fixed off the resting {@link
+ * TOWER_HEIGHT}, NOT the scene's actual (possibly #59-grown, uniform-across-
+ * Towers) height — unlike `demoMode.ts`'s `AltitudeBands`, which scales the
+ * equivalent Demo Mode thresholds to the real roofline. So this only frames
+ * "the whole prism" at/near the resting height: at a scene grown well past it
+ * (a 260-Pod Tower's 11.24, say), the roof and base sit outside the camera's
+ * field of view — the Tower's extremities render off-screen, not merely
+ * off-centre. Tracked as issue #165 (scale this to `sceneTowerHeight`, the
+ * way `demoMode.ts`'s `altitudeBandsForRoofline` already does).
  */
 export function towerFocusPose(center: readonly [number, number, number]): Pose {
   const [cx, cy, cz] = center
@@ -91,14 +101,28 @@ export function towerFocusPose(center: readonly [number, number, number]): Pose 
 
 /**
  * The Focus camera Pose for a single Panel, given its world-space centre (a
- * {@link PanelInstance} position). The camera pulls straight in front of the
- * Panel on the Tower's +Z face at {@link PANEL_VIEW_DISTANCE}, looking head-on
- * so the Pod's Panel — and the future Detail Popup — is centred and legible.
+ * {@link PanelInstance} position) and the `rotationY` (#59) that oriented that
+ * Panel's quad — `0` on the Tower's front (+Z) face, non-zero on the right/
+ * back/left faces (see `panelLayout.ts`'s `facePlacement`). The camera pulls
+ * straight in front of the Panel along the SAME outward face normal at
+ * {@link PANEL_VIEW_DISTANCE}, looking head-on so the Pod's Panel — and the
+ * future Detail Popup — is centred and legible, from whichever of the four
+ * faces it's actually on.
+ *
+ * The face normal is derived from `rotationY` with the identical rotation the
+ * renderer applies to the Panel quad itself (`Panels.tsx`'s
+ * `dummy.rotation.set(0, rotationY, 0)`): rotating the unrotated +Z normal
+ * `(0, 0, 1)` about Y by `rotationY` gives `(sin(rotationY), 0, cos(rotationY))`
+ * — `0 → +Z`, `π/2 → +X`, `π → -Z`, `-π/2 → -X`, matching `facePlacement`'s
+ * four faces exactly. `rotationY` defaults to `0` (the pre-#59 front-face-only
+ * behaviour) so every existing front-face caller is unchanged.
  */
-export function panelFocusPose(position: readonly [number, number, number]): Pose {
+export function panelFocusPose(position: readonly [number, number, number], rotationY = 0): Pose {
   const [px, py, pz] = position
+  const normalX = Math.sin(rotationY)
+  const normalZ = Math.cos(rotationY)
   return {
-    position: [px, py, pz + PANEL_VIEW_DISTANCE],
+    position: [px + normalX * PANEL_VIEW_DISTANCE, py, pz + normalZ * PANEL_VIEW_DISTANCE],
     target: [px, py, pz],
   }
 }
