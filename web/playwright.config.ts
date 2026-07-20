@@ -17,19 +17,62 @@ const repoRoot = path.resolve(webDir, '..')
 const port = Number(process.env.HTP_K8S_E2E_PORT ?? 8080)
 const baseURL = `http://localhost:${port}`
 
+// Suite selection (issue #29): this ONE config drives both the PR-blocking
+// suite (web/e2e, the modest ADR-0004 tier) and the nightly full-scale
+// suite (web/e2e-nightly — thousands-of-pods KWOK scenes, never run against
+// the shared PR seed since its specs assert exact Tower/Pod counts that a
+// denser seed would destabilise). A second near-identical config file was
+// deliberately rejected: the two suites share every other concern (build the
+// real binary, point it at a kind cluster, capture screenshot/video/trace) —
+// only testDir/outputDir/report-path and the per-test timeout budget differ,
+// so branching on one env var here keeps them from drifting apart instead of
+// needing to be kept in sync by hand across two files.
+const nightly = process.env.HTP_K8S_E2E_SUITE === 'nightly'
+
 // A single, predictable artifact location a future CI job (issue #8) can upload
 // wholesale: Playwright drops each test's screenshot, video, and trace here.
-const outputDir = path.join(webDir, 'e2e-results')
+// Nightly gets its own directory (never the PR suite's) so a local `task
+// web:e2e` and `task web:e2e:nightly` run back-to-back don't clobber each
+// other's artifacts.
+const outputDir = path.join(webDir, nightly ? 'e2e-nightly-results' : 'e2e-results')
 
 export default defineConfig({
-  testDir: './e2e',
+  testDir: nightly ? './e2e-nightly' : './e2e',
   outputDir,
   // No accidental `test.only` slipping through CI.
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
+  // The nightly suite drives a scene with thousands of Panels (instancing,
+  // the per-Pod name-texture atlas, the wrap/height-growth layout math) —
+  // meaningfully more render/layout work per frame than the PR suite's
+  // modest ~30-Pod seed, so give it a larger per-test budget than
+  // Playwright's 30s default rather than relying on every nightly spec to
+  // remember `test.slow()`. `undefined` here is the PR suite's normal
+  // default budget (unchanged behavior).
+  timeout: nightly ? 120_000 : undefined,
+  // The nightly suite runs serially (never Playwright's default parallel
+  // workers): perf.spec.ts's frame-time sampling needs the CPU to itself to
+  // mean anything — rehearsed locally, running the suite at the default
+  // parallelism let concurrent heavy WebGL scenes from OTHER tests starve
+  // it (observed ~2.7 FPS from contention alone, not the app). Serial
+  // execution also keeps peak memory/CPU load down running several
+  // thousands-of-Panels scenes back to back rather than at once, which
+  // matters more here than the wall-clock cost of losing parallelism (this
+  // job is scheduled, not PR-blocking). `undefined` here is Playwright's
+  // normal default (parallel workers), unchanged for the PR suite.
+  workers: nightly ? 1 : undefined,
   reporter: [
     ['list'],
-    ['html', { outputFolder: path.join(webDir, 'playwright-report'), open: 'never' }],
+    [
+      'html',
+      {
+        outputFolder: path.join(
+          webDir,
+          nightly ? 'playwright-nightly-report' : 'playwright-report',
+        ),
+        open: 'never',
+      },
+    ],
   ],
   use: {
     baseURL,

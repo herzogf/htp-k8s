@@ -55,3 +55,20 @@ tasks:
       # the system libraries on a fresh runner.
       - npx playwright install chromium
       - npm run e2e
+
+  e2e:nightly:
+    desc: >
+      Run the nightly full-scale visual-coverage + performance suite
+      (web/e2e-nightly, issue #29) against an ALREADY-seeded full-scale
+      KWOK cluster (see test/e2e/kwok/seed-scale.sh) — never run in the
+      PR-blocking job (ADR-0004: the shared PR seed is deliberately modest,
+      and these specs assert on a dense scene the modest seed can't
+      produce). Same webServer/build machinery as `e2e` above
+      (playwright.config.ts branches on HTP_K8S_E2E_SUITE, see that file's
+      header comment); screenshots/video land in web/e2e-nightly-results.
+    deps: [install]
+    env:
+      HTP_K8S_E2E_SUITE: nightly
+    cmds:
+      - npx playwright install chromium
+      - npm run e2e

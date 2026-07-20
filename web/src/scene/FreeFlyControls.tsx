@@ -53,6 +53,20 @@ export interface CameraTestHook {
   getFocusGoal: () => Pose | null
   /** Whether Demo Mode's automated flight is currently driving the camera. */
   isDemoActive: () => boolean
+  /**
+   * Requests a Focus fly-to an arbitrary caller-supplied {@link Pose} — the
+   * same tween `selectTower`/`selectPod` (`useDetailTestHook.ts`) drive via
+   * their own fixed-distance `towerFocusPose`/`panelFocusPose` framings, but
+   * without either preset. Added for issue #29's nightly dense-scene visual
+   * coverage: a custom vantage is what lets a test frame a specific,
+   * possibly scene-height-grown Tower (or two Towers at once, for a
+   * busy/sparse side-by-side still) reliably, independent of #165 (Focus's
+   * Tower framing is not yet scene-height-aware and can clip a grown Tower's
+   * roof/base out of frame). Returns `false` (no-op) if there is no
+   * `FocusContext` Provider in the tree, mirroring `isFocusing`/`getFocusGoal`
+   * degrading gracefully in the same case.
+   */
+  requestFocus: (pose: Pose) => boolean
 }
 
 /** Props for {@link FreeFlyControls}. */
@@ -244,13 +258,20 @@ export function FreeFlyControls({
       // the camera (rather than merely observing incidental motion) and that
       // it stops the instant the toggle switches off.
       isDemoActive: () => demoActive,
+      requestFocus: (pose) => {
+        if (!focus) {
+          return false
+        }
+        focus.requestFocus(pose)
+        return true
+      },
     }
     return () => {
       delete window.__htpCameraTest
     }
     // Re-registers the hook whenever demoActive changes so isDemoActive never
     // reads a stale closed-over value.
-  }, [camera, demoActive])
+  }, [camera, demoActive, focus])
 
   useFrame((_, delta) => {
     // Until yaw/pitch are seeded from the initial orientation, do nothing — never

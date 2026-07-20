@@ -1,0 +1,463 @@
+name: Nightly
+
+# Consolidated scheduled CI job (issue #29), doing three things ADR-0004 and
+# #76 both reserve for a nightly/off-PR-critical-path job rather than the
+# PR-blocking `build.yml`:
+#
+#   A. Full-scale KWOK performance run — pushes a KWOK-simulated cluster to
+#      ADR-0004's "full target scale" (50+ nodes, thousands of pods, one
+#      deliberately dense Tower and one deliberately sparse one), drives the
+#      real rendered scene, and captures a load-time/frame-time signal in a
+#      JSON artifact comparable run over run. Never run at PR time: ADR-0004
+#      calls out that rendering that many instanced Panels via headless
+#      Chromium's software WebGL is inherently more timing-variable than the
+#      modest PR-time seed, and a scale/perf check shouldn't risk blocking an
+#      unrelated PR on CI flakiness.
+#   B. Full required-check backstop — every job `build.yml` gates behind its
+#      "did a non-docs path change" check (issue #76: Backend incl.
+#      govulncheck, Frontend incl. npm audit, the kind+KWOK integration
+#      suite, the Playwright e2e suite, and the Trivy container scan) runs
+#      here UNCONDITIONALLY, once a day, regardless of what changed. #76's
+#      whole point was skipping heavy/security work on a docs-only PR; the
+#      trade-off it accepted is that a doc-only stretch on `main` could hide
+#      a CVE newly published against unchanged dependencies (govulncheck and
+#      Trivy both scan against live, moving vulnerability databases) — this
+#      job is what catches that within a day instead of never.
+#   C. Visual coverage for the four-face Panel wrap (#59/PR #162) — the
+#      shared PR-time KWOK seed (test/e2e/kwok/seed.sh, ~30 pods/6 nodes)
+#      cannot engage panelLayout.ts's wrap (~34 pods/Tower) or height-growth
+#      (~132 pods/Tower) thresholds at all, so that feature shipped with
+#      zero rendered visual proof; #162's own unit tests pin the layout math
+#      WebGL-free, but nothing had proven the *rendered* result matches it.
+#      The SAME full-scale seed from (A) is dense enough to also exercise
+#      this — see web/e2e-nightly/panel-wrap.spec.ts and
+#      demo-mode-roofline.spec.ts — so it's captured in the SAME job rather
+#      than paying for a second kind+KWOK cluster.
+#
+# Deliberately ONE workflow (not a second scheduled workflow alongside a
+# separate backstop workflow — maintainer decision, issue #29): (B)'s
+# backstop jobs below are near-duplicates of build.yml's own job bodies
+# (same steps, same pinned action SHAs), because build.yml's heavy jobs are
+# unconditional there only insofar as the workflow itself is triggered — the
+# skip happens at the JOB level via the `changes` gate (issue #76), which
+# this workflow simply never adds. Job `name:` fields are DELIBERATELY
+# prefixed "Nightly:" and distinct from build.yml's own required-check
+# names (docs/agents/findings.md, ruleset 18831212): a schedule-triggered
+# run still posts real check-runs against `main`'s current HEAD SHA, and a
+# same-named check here would compete with (and could retroactively flip)
+# the PR-time result branch protection already recorded for that commit —
+# see release.yml's `verify-green-commit`, which resolves "latest run wins"
+# per check name across a commit's whole history of runs.
+#
+# Keep build.yml's Backend/Frontend/Backend-integration/E2E/Container-scan
+# jobs and this workflow's Nightly equivalents in sync BY HAND when either
+# changes (same convention as GOVULNCHECK_PKGS being duplicated-but-pinned
+# across build.yml/release.yml) — there is no reusable-workflow indirection
+# here specifically to keep required-check names/history untouched (see
+# above).
+
+on:
+  schedule:
+    # Once a day, off the hour (avoids the herd of workflows scheduled
+    # exactly on :00 across GitHub, a documented source of delayed starts).
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      node_count:
+        description: >
+          Fake KWOK node count for the full-scale seed (test/e2e/kwok/seed-scale.sh).
+          Leave blank for that script's own default (50). Lower this for a
+          cheap manual rehearsal run.
+        required: false
+        type: string
+      hot_pod_count:
+        description: >
+          Pod count on the deliberately "hot" node (triggers the four-face
+          wrap + scene height growth). Leave blank for the script's own
+          default (420).
+        required: false
+        type: string
+      sparse_pod_count:
+        description: >
+          Pod count on the deliberately "sparse" node (stays unfilled at the
+          grown scene height). Leave blank for the script's own default (3).
+        required: false
+        type: string
+
+concurrency:
+  # Only one nightly run at a time; a manually-dispatched rehearsal run
+  # cancels/waits behind a same-day scheduled run rather than racing it for
+  # the same kind/Docker resources on whatever runner picks it up.
+  group: ci-${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # (B) Full required-check backstop — unconditional mirrors of build.yml's
+  # heavy jobs. See the header comment above for why these are duplicated
+  # rather than shared via a reusable workflow.
+  # ---------------------------------------------------------------------------
+
+  backend:
+    name: 'Nightly: Backend (Go)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      # Same literal build.yml's Backend job and release.yml's
+      # govulncheck-release job scan — keep in sync so all three describe
+      # the same code.
+      GOVULNCHECK_PKGS: ./...
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Codegen drift check
+        run: task codegen:verify
+
+      - name: Build
+        run: task build
+
+      - name: Vet
+        run: task vet
+
+      - name: Test
+        run: task test
+
+      # Blocking here too (matches build.yml's PR-time posture, not
+      # release.yml's report-only one): a newly-published CVE against
+      # unchanged code should fail this job loudly, which is the entire
+      # point of running it nightly (see the workflow header, item B).
+      - name: govulncheck
+        uses: ./.github/actions/govulncheck
+        with:
+          pkgs: ${{ env.GOVULNCHECK_PKGS }}
+          category: govulncheck-nightly
+
+  frontend:
+    name: 'Nightly: Frontend (Node)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lint
+        run: task lint
+
+      - name: Build
+        run: task build
+
+      - name: Test
+        run: task test
+
+      - name: Capture harness pure-math tests (test/e2e/capture)
+        working-directory: test/e2e/capture
+        run: task test
+
+      - name: npm audit
+        run: npm audit
+
+  integration:
+    name: 'Nightly: Backend integration (kind + KWOK)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Integration tests (kind + KWOK)
+        run: go test -tags=integration ./cmd/... ./internal/...
+
+  e2e:
+    name: 'Nightly: E2E (Playwright)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Install Playwright browser + system deps
+        working-directory: web
+        timeout-minutes: 15
+        run: |
+          for i in 1 2 3; do
+            timeout 240 npx playwright install --with-deps chromium && break
+            echo "playwright install attempt $i failed/timed out; retrying"
+            sleep 5
+            [ "$i" = 3 ] && exit 1
+          done
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: htp-k8s-nightly-e2e
+
+      - name: Verify cluster is reachable and export KUBECONFIG
+        run: |
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+
+      - name: Build local container image (ko)
+        id: build-fallback-test-image
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: |
+          image="$(ko build --local ./cmd/htp-k8s)"
+          echo "Built image: ${image}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Container kubeconfig fallback (docker)
+        env:
+          IMAGE: ${{ steps.build-fallback-test-image.outputs.image }}
+          CLUSTER_NAME: htp-k8s-nightly-e2e
+        run: ./test/e2e/container-kubeconfig/run.sh
+
+      - name: Seed modest KWOK nodes/pods
+        run: ./test/e2e/kwok/seed.sh
+
+      - name: Run Playwright e2e suite
+        env:
+          HTP_K8S_E2E_PORT: '8099'
+        run: task web:e2e
+
+      - name: Upload e2e results (screenshots, video, traces)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-playwright-e2e-results
+          path: web/e2e-results/
+          if-no-files-found: warn
+
+      - name: Upload Playwright HTML report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-playwright-report
+          path: web/playwright-report/
+          if-no-files-found: ignore
+
+  container-scan:
+    name: 'Nightly: Container scan (Trivy)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Set up ko
+        uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
+
+      - name: Build local container image (ko)
+        id: build
+        env:
+          KO_DOCKER_REPO: ko.local
+        run: |
+          image="$(ko build --local ./cmd/htp-k8s)"
+          echo "Built image: ${image}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy scan (findings non-blocking)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        timeout-minutes: 5
+        with:
+          image-ref: ${{ steps.build.outputs.image }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+          ignore-unfixed: false
+
+      - name: Upload Trivy SARIF to Security tab
+        uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-container-nightly
+
+  # ---------------------------------------------------------------------------
+  # (A) + (C) — full-scale KWOK performance run and four-face Panel wrap
+  # visual coverage, sharing ONE kind+KWOK cluster (issue #29): both need a
+  # scene dense enough to matter, and there is no reason to pay for a second
+  # cluster/build to get it.
+  # ---------------------------------------------------------------------------
+
+  full-scale:
+    name: 'Nightly: Full-scale KWOK — visual coverage & performance'
+    runs-on: ubuntu-latest
+    # kind + a 50+ node / thousands-of-pod KWOK seed + the nightly Playwright
+    # suite (which itself budgets up to 120s/test, web/playwright.config.ts)
+    # is meaningfully heavier than the modest e2e job above; generous
+    # headroom since this never blocks a PR.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26'
+          check-latest: true
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Set up Task
+        uses: arduino/setup-task@c0bc642852239c2689f73f4ea6459c29405f3c52 # v3.0.0
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Install Playwright browser + system deps
+        working-directory: web
+        timeout-minutes: 15
+        run: |
+          for i in 1 2 3; do
+            timeout 240 npx playwright install --with-deps chromium && break
+            echo "playwright install attempt $i failed/timed out; retrying"
+            sleep 5
+            [ "$i" = 3 ] && exit 1
+          done
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: htp-k8s-nightly-scale
+
+      - name: Verify cluster is reachable and export KUBECONFIG
+        run: |
+          echo "KUBECONFIG=$HOME/.kube/config" >> "$GITHUB_ENV"
+          kubectl cluster-info
+          kubectl get nodes
+
+      # ADR-0004's "full target scale" tier (50+ nodes, thousands of pods):
+      # never run against the shared PR-blocking e2e cluster (that job uses
+      # test/e2e/kwok/seed.sh's modest tier) — see seed-scale.sh's own header
+      # comment for the deliberately uneven hot/sparse/medium distribution
+      # this relies on. Same hard-correctness-gate discipline as the modest
+      # seed: a robust, populated scene is required, so a seeding failure
+      # fails this job rather than silently degrading.
+      #
+      # workflow_dispatch inputs (blank on the scheduled trigger) let a
+      # manually-triggered run rehearse at a cheaper scale without editing
+      # this file — an empty env var falls through to seed-scale.sh's own
+      # default for that knob.
+      - name: Seed full-scale KWOK nodes/pods
+        env:
+          HTP_K8S_SEED_SCALE_NODE_COUNT: ${{ github.event.inputs.node_count }}
+          HTP_K8S_SEED_SCALE_HOT_POD_COUNT: ${{ github.event.inputs.hot_pod_count }}
+          HTP_K8S_SEED_SCALE_SPARSE_POD_COUNT: ${{ github.event.inputs.sparse_pod_count }}
+        run: ./test/e2e/kwok/seed-scale.sh
+
+      # web/e2e-nightly/ — panel-wrap.spec.ts (four-face wrap, busy/sparse
+      # contrast, 100+ pod Tower with no overflow), demo-mode-roofline.spec.ts
+      # (the permanent #162 regression guard), and perf.spec.ts (the
+      # load-time/frame-time signal). playwright.config.ts's
+      # HTP_K8S_E2E_SUITE=nightly switch (via the `e2e:nightly` Task) points
+      # Playwright at this testDir instead of the PR suite's web/e2e.
+      - name: Run Playwright nightly full-scale suite
+        env:
+          HTP_K8S_E2E_PORT: '8199'
+        run: task web:e2e:nightly
+
+      # Screenshots, video, traces, AND the perf.spec.ts JSON artifact
+      # (attached to that test via testInfo.attach, so it's bundled into
+      # this same upload) — always uploaded, pass or fail, so a failure here
+      # is still visually/numerically inspectable (ADR-0004).
+      - name: Upload nightly full-scale results (screenshots, video, traces, perf JSON)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-full-scale-results
+          path: web/e2e-nightly-results/
+          if-no-files-found: warn
+
+      - name: Upload nightly full-scale Playwright HTML report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-full-scale-report
+          path: web/playwright-nightly-report/
+          if-no-files-found: ignore
