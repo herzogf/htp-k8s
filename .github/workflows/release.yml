@@ -238,7 +238,7 @@ jobs:
       GOVULNCHECK_PKGS: ./...
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -280,7 +280,7 @@ jobs:
       attestations: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history + tags so GoReleaser can build the changelog between
           # the current and previous tag.
@@ -340,7 +340,7 @@ jobs:
       # attests the binaries; the container image is attested by digest in the
       # `image` job, and the per-archive SBOMs in the `attest-sboms` job.
       - name: Attest build provenance (release binaries)
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/checksums.txt
 
@@ -454,7 +454,7 @@ jobs:
       KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/htp-k8s
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history + tags (issue #64): computeTags (below) needs every
           # existing stable release tag to decide whether THIS release is the
@@ -659,7 +659,7 @@ jobs:
       # a specific platform's child digest is a DIFFERENT subject than the
       # index, so it needs its own attestation to be individually verifiable.
       - name: Attest build provenance (container image)
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.KO_DOCKER_REPO }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -737,7 +737,7 @@ jobs:
       # release. The invariant: a real SARIF lands in the Security tab for
       # EVERY scanned platform, or the build fails.
       - name: Upload Trivy SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
         with:
           sarif_file: trivy-results.sarif
           category: ${{ steps.category.outputs.value }}
@@ -784,7 +784,7 @@ jobs:
           REGISTRY_USER: ${{ github.actor }}
         run: echo "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
       - name: Attest build provenance (child image)
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ needs.image.outputs.repo }}
           subject-digest: ${{ matrix.digest }}
