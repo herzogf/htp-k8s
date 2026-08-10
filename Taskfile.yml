@@ -61,6 +61,25 @@ tasks:
       # would otherwise pick up as part of this module's build/test graph.
       - go test ./cmd/... ./internal/...
 
+  test:go:
+    desc: >
+      Run only the Go test suites (issue #195) — what CI's Backend (Go) job
+      calls, instead of this file's `test` (which is the local
+      "run everything before pushing" convenience and pulls in the entire
+      frontend Vitest/capture/script suites too; the Backend job's `Build`
+      step already built and embedded the frontend before this runs, so
+      re-running its tests here bought nothing but ~58s of duplicated CI
+      per run).
+    cmds:
+      # Scoped to our own Go packages rather than "./...": web/node_modules
+      # can itself contain stray vendored .go files (e.g. the "flatted"
+      # package does) that "./..." would otherwise pick up as part of this
+      # module's build/test graph. In CI that directory already exists by
+      # the time this runs — created by the Backend job's own `Build` step
+      # (`task build` -> `release:frontend` -> `web:build`, which depends on
+      # `web:install`) — regardless of whether `web:test` ran.
+      - go test ./cmd/... ./internal/...
+
   vet:
     desc: Vet all Go packages.
     cmds:

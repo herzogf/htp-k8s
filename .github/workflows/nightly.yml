@@ -173,8 +173,10 @@ jobs:
       - name: Vet
         run: task vet
 
+      # task test:go, not `task test` — mirrors build.yml's Backend job
+      # (issue #195); see its comment for why.
       - name: Test
-        run: task test
+        run: task test:go
 
       # Blocking here too (matches build.yml's PR-time posture, not
       # release.yml's report-only one): a newly-published CVE against

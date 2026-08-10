@@ -76,6 +76,7 @@ jobs:
       pull-requests: read
     outputs:
       nondocs: ${{ steps.filter.outputs.nondocs }}
+      scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       # dorny/paths-filter needs the repo checked out ONLY for its push-event
       # path (it diffs via local git commands there); the pull_request path
@@ -108,6 +109,13 @@ jobs:
               - '!**/*.md'
               - '!docs/**'
               - '!LICENSE'
+            # Gates the `scripts` job (issue #195): a script under
+            # .github/scripts/ is effectively a small private GitHub Action,
+            # and an action's own test suite runs when the action's code
+            # changes, not on every invocation of it. So its unit tests only
+            # need to run on a PR that touches this path.
+            scripts:
+              - '.github/scripts/**'
 
   backend:
     name: Backend (Go)
@@ -169,8 +177,16 @@ jobs:
       - name: Vet
         run: task vet
 
+      # task test:go, not `task test` (issue #195): unqualified `task test`
+      # here resolves to the ROOT Taskfile's run-everything convenience —
+      # the entire Vitest/capture/script suites the Frontend job already ran
+      # — costing ~58s of pure duplication per run and making a
+      # frontend-only breakage redden this job (as happened on #182). The
+      # Build step above already builds and embeds the frontend
+      # (`release:frontend` -> `web:build`, `deps: [install]`), so
+      # web/node_modules exists here regardless.
       - name: Test
-        run: task test
+        run: task test:go
 
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. govulncheck's
@@ -244,24 +260,6 @@ jobs:
         working-directory: test/e2e/capture
         run: task test
 
-      # PR-time coverage for release.yml's tag-computation module (issue #64,
-      # rule + rationale: ADR-0005 "Moving image tags") — release.yml itself
-      # is tag-triggered and can never run on this PR (see the module's own
-      # header). Explicit file, not a glob: `node --test` exits 0 with zero
-      # tests run if a glob matches nothing, which would silently stop
-      # covering it the moment the file were ever renamed or moved.
-      - name: Release image-tag computation tests (.github/scripts)
-        working-directory: .
-        run: node --test .github/scripts/compute-image-tags.test.mjs
-
-      # PR-time coverage for the npm-audit-gate script the very next step
-      # runs (issue #189) — same rationale as the tag-computation tests
-      # immediately above: explicit file, not a glob, so a rename/move can't
-      # silently stop covering it.
-      - name: npm-audit-gate tests (.github/scripts)
-        working-directory: .
-        run: node --test .github/scripts/npm-audit-gate.test.mjs
-
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. Gated through
       # `.github/scripts/npm-audit-gate-cli.mjs` (issue #189) rather than
@@ -271,6 +269,56 @@ jobs:
       # see npm-audit-gate.mjs's header for why.
       - name: npm audit (gated by web/audit-allowlist.json)
         run: node ../.github/scripts/npm-audit-gate-cli.mjs
+
+  # ---------------------------------------------------------------------------
+  # A script under .github/scripts/ is effectively a small, private GitHub
+  # Action (issue #195). Nobody runs actions/checkout's own test suite on
+  # every invocation of actions/checkout — its tests run in ITS repo, when
+  # ITS code changes. This job is the in-repo equivalent: path-gated on
+  # .github/scripts/**, same skip semantics as the docs-only gate above (a
+  # job-level-skipped required check counts as passing — issue #76). Do NOT
+  # extend this gating to the npm audit step in the job above: that step
+  # scans a live, moving advisory database and must run on every PR
+  # regardless of what changed (issue #187) — only these two scripts' own
+  # unit tests are change-gated.
+  # ---------------------------------------------------------------------------
+
+  scripts:
+    name: Repo scripts (Node)
+    needs: changes
+    if: ${{ needs.changes.outputs.scripts == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      # PR-time coverage for release.yml's tag-computation module (issue #64,
+      # rule + rationale: ADR-0005 "Moving image tags") — release.yml itself
+      # is tag-triggered and can never run on this PR (see the module's own
+      # header). Explicit file, not a glob: `node --test` exits 0 with zero
+      # tests run if a glob matches nothing, which would silently stop
+      # covering it the moment the file were ever renamed or moved.
+      - name: Release image-tag computation tests (.github/scripts)
+        run: node --test .github/scripts/compute-image-tags.test.mjs
+
+      # PR-time coverage for the npm-audit-gate script the Frontend job's gate
+      # step runs (issue #189). NOT the "same rationale" as the tag-
+      # computation tests above (release.yml being tag-triggered doesn't
+      # apply here — npm-audit-gate-cli.mjs runs on every PR as the gate
+      # itself). The real reason: the live gate step only ever exercises the
+      # PASS path on a clean tree, so every FAILURE path — an expired waiver,
+      # a malformed allowlist, the fail-closed JSON shapes, the entry point
+      # that must never silently exit 0 — is covered only here, by the unit
+      # tests. Three separate silent-green defects in this file were found
+      # via this coverage across #193's review rounds.
+      - name: npm-audit-gate tests (.github/scripts)
+        run: node --test .github/scripts/npm-audit-gate.test.mjs
 
   # ---------------------------------------------------------------------------
   # Heavier, second-tier checks (issue #8). Separate jobs so the fast tier
