@@ -19,16 +19,28 @@ name: Nightly
 #      Chromium's software WebGL is inherently more timing-variable than the
 #      modest PR-time seed, and a scale/perf check shouldn't risk blocking an
 #      unrelated PR on CI flakiness.
-#   B. Full required-check backstop — every job `build.yml` gates behind its
-#      "did a non-docs path change" check (issue #76: Backend incl.
-#      govulncheck, Frontend incl. npm audit, the kind+KWOK integration
-#      suite, the Playwright e2e suite, and the Trivy container scan) runs
-#      here UNCONDITIONALLY, once a day, regardless of what changed. #76's
-#      whole point was skipping heavy/security work on a docs-only PR; the
-#      trade-off it accepted is that a doc-only stretch on `main` could hide
-#      a CVE newly published against unchanged dependencies (govulncheck and
-#      Trivy both scan against live, moving vulnerability databases) — this
-#      job is what catches that within a day instead of never.
+#   B. Full required-check backstop — every `build.yml` check job runs here
+#      UNCONDITIONALLY, once a day, regardless of what changed. It closes
+#      two DIFFERENT gaps, and which job closes which matters: the
+#      Backend/Frontend runs below are NOT redundant with per-PR coverage,
+#      and reasoning that they are is how you delete the thing that caught
+#      issue #187 (see #191):
+#
+#        * PATH gap — `integration` (kind+KWOK), `e2e` (Playwright) and
+#          `container-scan` (Trivy) ARE gated in `build.yml`, behind its
+#          "did a non-docs path change" check (issue #76, whose whole point
+#          was skipping heavy/security work on a docs-only PR). Running them
+#          here defeats that skip once a day.
+#
+#        * TIME gap — `backend` (incl. govulncheck) and `frontend` (incl.
+#          npm audit) are NOT gated; they already run on every PR. What
+#          hides a CVE from them isn't a docs-only PR, it's a stretch with
+#          NO PRs AT ALL — they scan against live, moving vulnerability
+#          databases, so unchanged code silently becomes vulnerable the
+#          moment a new advisory is published. Only a scheduled run
+#          notices: in issue #187 `main` sat untouched after 2026-07-20,
+#          this job went red on 2026-07-25 (2 advisories, 4 by the time
+#          anyone looked), and it stayed the only signal for 17 runs.
 #   C. Visual coverage for the four-face Panel wrap (#59/PR #162) — the
 #      shared PR-time KWOK seed (test/e2e/kwok/seed.sh, ~30 pods/6 nodes)
 #      cannot engage panelLayout.ts's wrap (~34 pods/Tower) or height-growth
@@ -43,10 +55,11 @@ name: Nightly
 # Deliberately ONE workflow (not a second scheduled workflow alongside a
 # separate backstop workflow — maintainer decision, issue #29): (B)'s
 # backstop jobs below are near-duplicates of build.yml's own job bodies
-# (same steps, same pinned action SHAs), because build.yml's heavy jobs are
-# unconditional there only insofar as the workflow itself is triggered — the
-# skip happens at the JOB level via the `changes` gate (issue #76), which
-# this workflow simply never adds. Job `name:` fields are DELIBERATELY
+# (same steps, same pinned action SHAs). For build.yml's THREE heavy jobs
+# that is because the skip happens at the JOB level via the `changes` gate
+# (issue #76), which this workflow simply never adds; its Backend/Frontend
+# jobs carry no such gate to omit and are duplicated here purely for (B)'s
+# time gap. Job `name:` fields are DELIBERATELY
 # prefixed "Nightly:" and distinct from build.yml's own required-check
 # names (docs/agents/findings.md, ruleset 18831212): a schedule-triggered
 # run still posts real check-runs against `main`'s current HEAD SHA, and a
@@ -119,7 +132,7 @@ permissions:
 jobs:
   # ---------------------------------------------------------------------------
   # (B) Full required-check backstop — unconditional mirrors of build.yml's
-  # heavy jobs. See the header comment above for why these are duplicated
+  # check jobs. See the header comment above for why these are duplicated
   # rather than shared via a reusable workflow.
   # ---------------------------------------------------------------------------
 
