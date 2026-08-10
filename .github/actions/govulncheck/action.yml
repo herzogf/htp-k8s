@@ -138,7 +138,7 @@ runs:
     # a real SARIF lands in the Security tab, or the job goes red here,
     # before ever reaching the optional gate below.
     - name: Upload SARIF to Security tab
-      uses: github/codeql-action/upload-sarif@02c5e83432fe5497fd85b873b6c9f16a8578e1d9 # v3.37.0
+      uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
       with:
         sarif_file: ${{ steps.report.outputs.sarif_path }}
         category: ${{ inputs.category }}
