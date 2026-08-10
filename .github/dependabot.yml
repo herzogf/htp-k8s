@@ -46,7 +46,21 @@ updates:
       semver-major-days: 14
 
   - package-ecosystem: "github-actions"
-    directory: "/"
+    # `directory: "/"` only scans `.github/workflows/*.yml` plus a
+    # root-level `action.yml`/`action.yaml` — composite actions under
+    # `.github/actions/*/action.yml` are invisible to it, which is how
+    # this repo's own govulncheck action stranded on a v3 codeql-action
+    # pin for weeks while the workflows calling the same action were
+    # bumped four times (issue #194). `directories:` (plural) supports
+    # globbing, so "/.github/actions/*" covers any current or future
+    # composite action. Caveat: under `directories:`, a per-directory
+    # fetch failure is caught and skipped rather than fatal (only an
+    # all-directories-empty result raises) — so if the "/" scan itself
+    # ever stopped resolving workflows, the job would stay green off the
+    # composite-actions directory alone. See the PR for #194.
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
     # Same reasoning as the gomod entry above. This ecosystem landed in
