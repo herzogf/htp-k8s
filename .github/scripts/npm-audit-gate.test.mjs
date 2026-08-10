@@ -14,13 +14,43 @@
 //
 // The guiding constraint under test throughout: FAIL CLOSED. Every
 // malformed-input case below asserts a thrown error, never a silent pass.
+//
+// Two layers are covered, deliberately (PR #193 review — the original
+// version of this suite covered only the pure functions, and the reported
+// fail-open bug lived in the CLI layer that was untested):
+//   1. The pure core: extractAdvisories, parseAllowlist, evaluateGate,
+//      formatReport — no I/O, no clock dependency (Date injected).
+//   2. The CLI layer: parseArgs, runNpmAudit, readAllowlist, run(), and the
+//      ESM entry-point guard (isMainModule) — exercised either via
+//      dependency injection (fake spawn/readFile functions, no real npm or
+//      filesystem touched) or, for the entry-guard fix specifically, via an
+//      actual child `node` process invoked through a real symlink — that
+//      exact reproduction is what caught the bug, so it stays as a real
+//      regression test rather than being weakened into a pure unit test.
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { describe, it } from 'node:test'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { evaluateGate, extractAdvisories, formatReport, parseAllowlist } from './npm-audit-gate.mjs'
+import {
+  evaluateGate,
+  extractAdvisories,
+  formatReport,
+  isMainModule,
+  MAX_WAIVER_HORIZON_DAYS,
+  parseAllowlist,
+  parseArgs,
+  readAllowlist,
+  run,
+  runNpmAudit,
+} from './npm-audit-gate.mjs'
 
 const TODAY = new Date('2026-08-10T12:00:00Z')
+const SCRIPT_PATH = fileURLToPath(new URL('./npm-audit-gate.mjs', import.meta.url))
 
 // A real `npm audit --json` shape (auditReportVersion 2, npm 11.x),
 // captured against a scratch project seeded with a known-vulnerable
@@ -95,14 +125,14 @@ describe('extractAdvisories', () => {
           via: [{ source: 1, name: 'a', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }],
         },
       },
-      metadata: {},
+      metadata: { vulnerabilities: { total: 2 } },
     }
     const advisories = extractAdvisories(audit)
     assert.equal(advisories.size, 1)
     assert.deepEqual([...advisories.get('GHSA-AAAA-BBBB-CCCC').packages].sort(), ['a', 'b'])
   })
 
-  it('skips string `via` entries (dependency-chain references, not advisories)', () => {
+  it('skips a string `via` entry that resolves to a real vulnerability entry', () => {
     const audit = {
       auditReportVersion: 2,
       vulnerabilities: {
@@ -113,10 +143,41 @@ describe('extractAdvisories', () => {
           via: [{ source: 1, name: 'somepkg', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }],
         },
       },
-      metadata: {},
+      metadata: { vulnerabilities: { total: 2 } },
     }
     const advisories = extractAdvisories(audit)
     assert.deepEqual([...advisories.keys()], ['GHSA-AAAA-BBBB-CCCC'])
+  })
+
+  it('throws on a string `via` entry that references a package NOT in the report (dangling/malformed chain)', () => {
+    // PR #193 review: silently `continue`-ing on every string `via`
+    // without checking the reference resolves would let a report whose
+    // `via` chains are entirely such dangling strings extract ZERO
+    // advisories and gate green despite reporting findings.
+    const audit = {
+      vulnerabilities: {
+        top: { name: 'top', severity: 'high', via: ['nonexistent-package'] },
+      },
+      metadata: { vulnerabilities: { total: 1 } },
+    }
+    assert.throws(() => extractAdvisories(audit), /references "nonexistent-package", which is not itself a reported vulnerability/)
+  })
+
+  it('throws when every "via" is a closed loop of valid-looking string references with no terminal advisory object (metadata cross-check)', () => {
+    // Both string references here DO resolve to real vulnerabilities-map
+    // keys (so the dangling-reference check above does not fire), but
+    // neither entry ever carries a real advisory object — the closed loop
+    // extracts zero advisories despite metadata.total reporting 2. This is
+    // exactly the belt-and-suspenders case the metadata cross-check exists
+    // to catch.
+    const audit = {
+      vulnerabilities: {
+        a: { name: 'a', severity: 'high', via: ['b'] },
+        b: { name: 'b', severity: 'high', via: ['a'] },
+      },
+      metadata: { vulnerabilities: { total: 2 } },
+    }
+    assert.throws(() => extractAdvisories(audit), /metadata reports 2 vulnerabilities but no advisory could be extracted/)
   })
 
   it('throws on npm audit\'s own error shape rather than treating it as clean', () => {
@@ -141,7 +202,14 @@ describe('extractAdvisories', () => {
   it('throws when a vulnerability entry has no "via" array', () => {
     assert.throws(
       () => extractAdvisories({ vulnerabilities: { somepkg: { name: 'somepkg' } } }),
-      /has no "via" array/,
+      /has no non-empty "via" array/,
+    )
+  })
+
+  it('throws when a vulnerability entry has an EMPTY "via" array', () => {
+    assert.throws(
+      () => extractAdvisories({ vulnerabilities: { somepkg: { name: 'somepkg', via: [] } } }),
+      /has no non-empty "via" array/,
     )
   })
 
@@ -156,11 +224,23 @@ describe('extractAdvisories', () => {
     }
     assert.throws(() => extractAdvisories(audit), /no extractable GHSA id/)
   })
+
+  it('throws on a non-GHSA advisory url (documented limitation, not a silent pass)', () => {
+    const audit = {
+      vulnerabilities: {
+        somepkg: {
+          name: 'somepkg',
+          via: [{ source: 1, name: 'somepkg', title: 't', severity: 'high', url: 'https://npmjs.com/advisories/1234' }],
+        },
+      },
+    }
+    assert.throws(() => extractAdvisories(audit), /no extractable GHSA id/)
+  })
 })
 
 describe('parseAllowlist', () => {
   it('an empty waivers array parses to no waivers', () => {
-    assert.deepEqual(parseAllowlist(EMPTY_ALLOWLIST), [])
+    assert.deepEqual(parseAllowlist(EMPTY_ALLOWLIST, TODAY), [])
   })
 
   it('parses a well-formed waiver and normalizes the id to uppercase', () => {
@@ -171,6 +251,7 @@ describe('parseAllowlist', () => {
         reason: 'no upstream fix; dev-only tooling',
         issue: '#999',
       }),
+      TODAY,
     )
     assert.deepEqual(waivers, [
       { id: 'GHSA-AAAA-BBBB-CCCC', expires: '2026-09-01', reason: 'no upstream fix; dev-only tooling', issue: '#999' },
@@ -185,23 +266,34 @@ describe('parseAllowlist', () => {
         reason: 'reason',
         issue: 'https://github.com/herzogf/htp-k8s/issues/999',
       }),
+      TODAY,
     )
     assert.equal(waivers[0].issue, 'https://github.com/herzogf/htp-k8s/issues/999')
   })
 
+  it('defaults "today" to the real clock when not supplied (wiring smoke test)', () => {
+    // Whatever "now" really is, a waiver 1 day out is always within the cap
+    // and never expired-at-parse-time (expiry itself is evaluateGate's job,
+    // not parseAllowlist's) — this only pins that the default parameter
+    // wires to a real Date, not that it throws.
+    const soon = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+    const waivers = parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: soon, reason: 'r', issue: '#1' }))
+    assert.equal(waivers[0].expires, soon)
+  })
+
   it('throws on invalid top-level JSON', () => {
-    assert.throws(() => parseAllowlist('{not json'), /invalid JSON/)
+    assert.throws(() => parseAllowlist('{not json', TODAY), /invalid JSON/)
   })
 
   it('throws when top level is not an object shaped { waivers: [...] }', () => {
-    assert.throws(() => parseAllowlist('[]'), /top level must be an object/)
-    assert.throws(() => parseAllowlist('null'), /top level must be an object/)
-    assert.throws(() => parseAllowlist(JSON.stringify({ waivers: 'nope' })), /"waivers" must be an array/)
+    assert.throws(() => parseAllowlist('[]', TODAY), /top level must be an object/)
+    assert.throws(() => parseAllowlist('null', TODAY), /top level must be an object/)
+    assert.throws(() => parseAllowlist(JSON.stringify({ waivers: 'nope' }), TODAY), /"waivers" must be an array/)
   })
 
   it('throws when a waiver is missing "id"', () => {
     assert.throws(
-      () => parseAllowlist(waiverList({ expires: '2026-09-01', reason: 'r', issue: '#1' })),
+      () => parseAllowlist(waiverList({ expires: '2026-09-01', reason: 'r', issue: '#1' }), TODAY),
       /missing required string field "id"/,
     )
   })
@@ -209,14 +301,14 @@ describe('parseAllowlist', () => {
   it('throws on a malformed GHSA id', () => {
     assert.throws(
       () =>
-        parseAllowlist(waiverList({ id: 'not-a-ghsa-id', expires: '2026-09-01', reason: 'r', issue: '#1' })),
+        parseAllowlist(waiverList({ id: 'not-a-ghsa-id', expires: '2026-09-01', reason: 'r', issue: '#1' }), TODAY),
       /not a well-formed GHSA advisory id/,
     )
   })
 
   it('throws when a waiver is missing "expires"', () => {
     assert.throws(
-      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', reason: 'r', issue: '#1' })),
+      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', reason: 'r', issue: '#1' }), TODAY),
       /missing required string field "expires"/,
     )
   })
@@ -226,6 +318,7 @@ describe('parseAllowlist', () => {
       () =>
         parseAllowlist(
           waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '09/01/2026', reason: 'r', issue: '#1' }),
+          TODAY,
         ),
       /not a valid ISO YYYY-MM-DD/,
     )
@@ -236,14 +329,40 @@ describe('parseAllowlist', () => {
       () =>
         parseAllowlist(
           waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-02-30', reason: 'r', issue: '#1' }),
+          TODAY,
         ),
       /not a valid ISO YYYY-MM-DD/,
     )
   })
 
+  it('accepts a waiver exactly at the MAX_WAIVER_HORIZON_DAYS cap', () => {
+    const atCap = new Date(Date.UTC(2026, 7, 10) + MAX_WAIVER_HORIZON_DAYS * 86_400_000).toISOString().slice(0, 10)
+    const waivers = parseAllowlist(
+      waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: atCap, reason: 'r', issue: '#1' }),
+      TODAY,
+    )
+    assert.equal(waivers[0].expires, atCap)
+  })
+
+  it('rejects a waiver ONE day past the MAX_WAIVER_HORIZON_DAYS cap', () => {
+    // Pins the exact bug the review flagged: `expires: "2099-01-01"` must
+    // NOT validate — "time-boxed" is structural, not honor-system.
+    const pastCap = new Date(Date.UTC(2026, 7, 10) + (MAX_WAIVER_HORIZON_DAYS + 1) * 86_400_000)
+      .toISOString()
+      .slice(0, 10)
+    assert.throws(
+      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: pastCap, reason: 'r', issue: '#1' }), TODAY),
+      new RegExp(`past the ${MAX_WAIVER_HORIZON_DAYS}-day cap`),
+    )
+    assert.throws(
+      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2099-01-01', reason: 'r', issue: '#1' }), TODAY),
+      new RegExp(`past the ${MAX_WAIVER_HORIZON_DAYS}-day cap`),
+    )
+  })
+
   it('throws when a waiver is missing "reason"', () => {
     assert.throws(
-      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', issue: '#1' })),
+      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', issue: '#1' }), TODAY),
       /missing required non-empty string field "reason"/,
     )
   })
@@ -253,6 +372,7 @@ describe('parseAllowlist', () => {
       () =>
         parseAllowlist(
           waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: '   ', issue: '#1' }),
+          TODAY,
         ),
       /missing required non-empty string field "reason"/,
     )
@@ -260,7 +380,7 @@ describe('parseAllowlist', () => {
 
   it('throws when a waiver is missing "issue"', () => {
     assert.throws(
-      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'r' })),
+      () => parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'r' }), TODAY),
       /missing required string field "issue"/,
     )
   })
@@ -270,6 +390,7 @@ describe('parseAllowlist', () => {
       () =>
         parseAllowlist(
           waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'r', issue: 'see slack' }),
+          TODAY,
         ),
       /must be a tracking issue reference/,
     )
@@ -277,17 +398,20 @@ describe('parseAllowlist', () => {
 
   it('throws on duplicate waivers for the same advisory', () => {
     const entry = { id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'r', issue: '#1' }
-    assert.throws(() => parseAllowlist(waiverList(entry, { ...entry, expires: '2026-10-01' })), /duplicate waiver/)
+    assert.throws(
+      () => parseAllowlist(waiverList(entry, { ...entry, expires: '2026-10-01' }), TODAY),
+      /duplicate waiver/,
+    )
   })
 
   it('throws when a waiver entry itself is not an object', () => {
-    assert.throws(() => parseAllowlist(JSON.stringify({ waivers: ['GHSA-aaaa-bbbb-cccc'] })), /must be an object/)
+    assert.throws(() => parseAllowlist(JSON.stringify({ waivers: ['GHSA-aaaa-bbbb-cccc'] }), TODAY), /must be an object/)
   })
 })
 
 describe('evaluateGate (two-state + expiry behaviour)', () => {
   it('clean audit + empty allowlist: passes', () => {
-    const result = evaluateGate(extractAdvisories(CLEAN_AUDIT), parseAllowlist(EMPTY_ALLOWLIST), TODAY)
+    const result = evaluateGate(extractAdvisories(CLEAN_AUDIT), parseAllowlist(EMPTY_ALLOWLIST, TODAY), TODAY)
     assert.equal(result.ok, true)
     assert.deepEqual(result.unwaivedFindings, [])
     assert.deepEqual(result.expiredWaivers, [])
@@ -295,7 +419,7 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
 
   it('unwaived advisory: fails', () => {
     const advisories = extractAdvisories(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc'))
-    const result = evaluateGate(advisories, parseAllowlist(EMPTY_ALLOWLIST), TODAY)
+    const result = evaluateGate(advisories, parseAllowlist(EMPTY_ALLOWLIST, TODAY), TODAY)
     assert.equal(result.ok, false)
     assert.equal(result.unwaivedFindings.length, 1)
     assert.equal(result.unwaivedFindings[0].id, 'GHSA-AAAA-BBBB-CCCC')
@@ -305,6 +429,7 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
     const advisories = extractAdvisories(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc'))
     const waivers = parseAllowlist(
       waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'no fix upstream yet', issue: '#500' }),
+      TODAY,
     )
     const result = evaluateGate(advisories, waivers, TODAY)
     assert.equal(result.ok, true)
@@ -315,6 +440,7 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
     const advisories = extractAdvisories(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc'))
     const waivers = parseAllowlist(
       waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-08-10', reason: 'r', issue: '#500' }),
+      TODAY,
     )
     const result = evaluateGate(advisories, waivers, TODAY)
     assert.equal(result.ok, true)
@@ -324,6 +450,7 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
     const advisories = extractAdvisories(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc'))
     const waivers = parseAllowlist(
       waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-08-09', reason: 'r', issue: '#500' }),
+      TODAY,
     )
     const result = evaluateGate(advisories, waivers, TODAY)
     assert.equal(result.ok, false)
@@ -337,7 +464,7 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
     // rule (issue #189): a stale waiver is itself a finding, not a free pass.
     const result = evaluateGate(
       extractAdvisories(CLEAN_AUDIT),
-      parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-01-01', reason: 'r', issue: '#500' })),
+      parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-01-01', reason: 'r', issue: '#500' }), TODAY),
       TODAY,
     )
     assert.equal(result.ok, false)
@@ -348,7 +475,7 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
   it('a NON-expired waiver whose advisory is gone is harmless (not yet due for cleanup)', () => {
     const result = evaluateGate(
       extractAdvisories(CLEAN_AUDIT),
-      parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-12-31', reason: 'r', issue: '#500' })),
+      parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-12-31', reason: 'r', issue: '#500' }), TODAY),
       TODAY,
     )
     assert.equal(result.ok, true)
@@ -361,6 +488,7 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
     advisories.set('GHSA-DDDD-EEEE-FFFF', { id: 'GHSA-DDDD-EEEE-FFFF', severity: 'high', title: 't', packages: new Set(['other']) })
     const waivers = parseAllowlist(
       waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'r', issue: '#500' }),
+      TODAY,
     )
     const result = evaluateGate(advisories, waivers, TODAY)
     assert.equal(result.ok, false)
@@ -372,14 +500,14 @@ describe('evaluateGate (two-state + expiry behaviour)', () => {
 
 describe('formatReport', () => {
   it('produces a human-readable PASS summary with no findings', () => {
-    const result = evaluateGate(extractAdvisories(CLEAN_AUDIT), parseAllowlist(EMPTY_ALLOWLIST), TODAY)
+    const result = evaluateGate(extractAdvisories(CLEAN_AUDIT), parseAllowlist(EMPTY_ALLOWLIST, TODAY), TODAY)
     const report = formatReport(result, TODAY)
     assert.match(report, /npm-audit-gate: PASS/)
   })
 
   it('produces a human-readable FAIL summary naming the unwaived advisory', () => {
     const advisories = extractAdvisories(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc'))
-    const result = evaluateGate(advisories, parseAllowlist(EMPTY_ALLOWLIST), TODAY)
+    const result = evaluateGate(advisories, parseAllowlist(EMPTY_ALLOWLIST, TODAY), TODAY)
     const report = formatReport(result, TODAY)
     assert.match(report, /npm-audit-gate: FAIL/)
     assert.match(report, /GHSA-AAAA-BBBB-CCCC/)
@@ -388,7 +516,7 @@ describe('formatReport', () => {
   it('produces a human-readable summary naming an expired waiver and its tracking issue', () => {
     const result = evaluateGate(
       extractAdvisories(CLEAN_AUDIT),
-      parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-01-01', reason: 'r', issue: '#500' })),
+      parseAllowlist(waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-01-01', reason: 'r', issue: '#500' }), TODAY),
       TODAY,
     )
     const report = formatReport(result, TODAY)
@@ -401,11 +529,253 @@ describe('formatReport', () => {
     const advisories = extractAdvisories(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc'))
     const waivers = parseAllowlist(
       waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'no fix yet', issue: '#500' }),
+      TODAY,
     )
     const result = evaluateGate(advisories, waivers, TODAY)
     const report = formatReport(result, TODAY)
     assert.match(report, /Waived/)
     assert.match(report, /no fix yet/)
     assert.match(report, /2026-09-01/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// CLI layer (PR #193 review — the fail-open bug lived here, untested)
+// ---------------------------------------------------------------------------
+
+describe('parseArgs', () => {
+  it('defaults cwd to process.cwd() and allowlist to <cwd>/audit-allowlist.json', () => {
+    const args = parseArgs([])
+    assert.equal(args.cwd, process.cwd())
+    assert.equal(args.allowlist, path.join(process.cwd(), 'audit-allowlist.json'))
+  })
+
+  it('accepts --cwd and --allowlist overrides', () => {
+    const args = parseArgs(['--cwd', '/tmp/foo', '--allowlist', '/tmp/bar/list.json'])
+    assert.equal(args.cwd, '/tmp/foo')
+    assert.equal(args.allowlist, '/tmp/bar/list.json')
+  })
+
+  it('rejects an unrecognized argument rather than silently ignoring it', () => {
+    assert.throws(() => parseArgs(['--bogus']), /unrecognized argument: --bogus/)
+  })
+
+  it('a dangling --cwd with no value fails rather than silently defaulting to something wrong', () => {
+    // args.cwd becomes undefined, and computing the default allowlist path
+    // (path.join(undefined, ...)) throws a TypeError — confirmed-good
+    // behaviour per the PR #193 review (fails, does not silently pass).
+    assert.throws(() => parseArgs(['--cwd']))
+  })
+})
+
+describe('runNpmAudit (injectable spawn — no real npm process)', () => {
+  it('returns the parsed JSON on a normal run (findings present, non-zero exit)', () => {
+    const fakeSpawn = () => ({
+      stdout: JSON.stringify(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')),
+      stderr: '',
+      status: 1,
+      error: null,
+    })
+    const parsed = runNpmAudit('/some/cwd', fakeSpawn)
+    assert.equal(parsed.vulnerabilities.somepkg.name, 'somepkg')
+  })
+
+  it('throws when npm cannot be spawned at all (e.g. ENOENT / killed)', () => {
+    const fakeSpawn = () => ({ stdout: '', stderr: '', status: null, error: new Error('spawn npm ENOENT') })
+    assert.throws(() => runNpmAudit('/some/cwd', fakeSpawn), /failed to run "npm audit --json"/)
+  })
+
+  it('throws when npm produces no stdout', () => {
+    const fakeSpawn = () => ({ stdout: '', stderr: 'some fatal npm error', status: 1, error: null })
+    assert.throws(() => runNpmAudit('/some/cwd', fakeSpawn), /produced no stdout/)
+  })
+
+  it('throws when npm produces stdout that is not valid JSON', () => {
+    const fakeSpawn = () => ({ stdout: 'not json at all', stderr: '', status: 0, error: null })
+    assert.throws(() => runNpmAudit('/some/cwd', fakeSpawn), /produced unparseable JSON/)
+  })
+})
+
+describe('readAllowlist (injectable readFile — no real filesystem)', () => {
+  it('reads and parses via an injected readFile', () => {
+    const fakeReadFile = () => EMPTY_ALLOWLIST
+    assert.deepEqual(readAllowlist('/some/path.json', fakeReadFile, TODAY), [])
+  })
+
+  it('throws a clear error when the file cannot be read (e.g. ENOENT)', () => {
+    const fakeReadFile = () => {
+      throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+    }
+    assert.throws(() => readAllowlist('/missing/path.json', fakeReadFile, TODAY), /could not read allowlist file/)
+  })
+
+  it('wires to the real filesystem by default (no injected readFile)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'npm-audit-gate-allowlist-'))
+    const file = path.join(dir, 'audit-allowlist.json')
+    writeFileSync(file, EMPTY_ALLOWLIST)
+    assert.deepEqual(readAllowlist(file, undefined, TODAY), [])
+  })
+})
+
+describe('run (full injectable orchestration)', () => {
+  it('clean audit + empty allowlist: passes end to end', () => {
+    const result = run({
+      argv: [],
+      spawn: () => ({ stdout: JSON.stringify(CLEAN_AUDIT), stderr: '', status: 0, error: null }),
+      readFile: () => EMPTY_ALLOWLIST,
+      now: () => TODAY,
+    })
+    assert.equal(result.ok, true)
+    assert.match(result.report, /npm-audit-gate: PASS/)
+  })
+
+  it('unwaived finding: fails end to end', () => {
+    const result = run({
+      argv: [],
+      spawn: () => ({
+        stdout: JSON.stringify(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')),
+        stderr: '',
+        status: 1,
+        error: null,
+      }),
+      readFile: () => EMPTY_ALLOWLIST,
+      now: () => TODAY,
+    })
+    assert.equal(result.ok, false)
+    assert.match(result.report, /GHSA-AAAA-BBBB-CCCC/)
+  })
+
+  it('waived finding: passes end to end', () => {
+    const result = run({
+      argv: [],
+      spawn: () => ({
+        stdout: JSON.stringify(auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')),
+        stderr: '',
+        status: 1,
+        error: null,
+      }),
+      readFile: () => waiverList({ id: 'GHSA-aaaa-bbbb-cccc', expires: '2026-09-01', reason: 'r', issue: '#1' }),
+      now: () => TODAY,
+    })
+    assert.equal(result.ok, true)
+  })
+
+  it('propagates a malformed-allowlist failure end to end (fail closed)', () => {
+    assert.throws(
+      () =>
+        run({
+          argv: [],
+          spawn: () => ({ stdout: JSON.stringify(CLEAN_AUDIT), stderr: '', status: 0, error: null }),
+          readFile: () => '{not json',
+          now: () => TODAY,
+        }),
+      /invalid JSON/,
+    )
+  })
+})
+
+describe('isMainModule (the entry-guard fail-open fix, PR #193 review)', () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'npm-audit-gate-mainmodule-'))
+  const realFile = path.join(dir, 'script.mjs')
+  writeFileSync(realFile, '// fixture')
+  // A real `import.meta.url` is always a well-formed, percent-encoded file
+  // URL (that's how Node's ESM loader produces it) — build the fixture the
+  // same way, via pathToFileURL, rather than naive string concatenation
+  // (which is exactly the bug this function fixes).
+  const realUrl = pathToFileURL(realpathSync(realFile)).href
+
+  it('true when argv[1] IS the file (direct invocation)', () => {
+    assert.equal(isMainModule(realUrl, realFile), true)
+  })
+
+  it('true when argv[1] is a SYMLINK to the file — this is the bug the naive string comparison missed', () => {
+    const link = path.join(dir, 'link.mjs')
+    symlinkSync(realFile, link)
+    assert.equal(isMainModule(realUrl, link), true)
+    // The naive comparison this replaced would have failed here:
+    assert.notEqual(realUrl, `file://${link}`)
+  })
+
+  it('true when argv[1] is a path containing a space — percent-encoding must not break the match', () => {
+    const spacedDir = mkdtempSync(path.join(tmpdir(), 'npm audit gate space '))
+    const spacedFile = path.join(spacedDir, 'script.mjs')
+    writeFileSync(spacedFile, '// fixture')
+    const spacedUrl = pathToFileURL(realpathSync(spacedFile)).href
+    assert.equal(isMainModule(spacedUrl, spacedFile), true)
+    // The naive comparison this replaced would have failed here: a real
+    // import.meta.url percent-encodes the space, but building a URL by
+    // naive template-string concatenation of the raw path does not — the
+    // two never matched under the old `import.meta.url === \`file://\${argv[1]}\``
+    // check.
+    assert.notEqual(spacedUrl, `file://${spacedFile}`)
+  })
+
+  it('false when argv[1] is missing (e.g. imported, not run as a script)', () => {
+    assert.equal(isMainModule(realUrl, undefined), false)
+    assert.equal(isMainModule(realUrl, null), false)
+  })
+
+  it('false when argv[1] points at a different, unrelated file', () => {
+    const other = path.join(dir, 'other.mjs')
+    writeFileSync(other, '// fixture')
+    assert.equal(isMainModule(realUrl, other), false)
+  })
+
+  it('false (not throwing) when argv[1] does not resolve to a real file on disk', () => {
+    assert.equal(isMainModule(realUrl, path.join(dir, 'does-not-exist.mjs')), false)
+  })
+})
+
+describe('the real CLI process, invoked through a symlink (end-to-end reproduction of the #193 fail-open)', () => {
+  // This is deliberately a REAL child `node` process, not a unit test of
+  // isMainModule alone: the bug this guards against is specifically that
+  // running the actual script file through a symlinked path silently exited
+  // 0 with NO output. A fake `npm` on PATH stands in for the real binary so
+  // this needs no real project/lockfile and stays fast and deterministic.
+  function makeFakeNpm(dir, json, exitCode) {
+    const binDir = path.join(dir, 'bin')
+    mkdirSync(binDir, { recursive: true })
+    const npmPath = path.join(binDir, 'npm')
+    writeFileSync(npmPath, `#!/usr/bin/env bash\ncat <<'AUDIT_JSON'\n${json}\nAUDIT_JSON\nexit ${exitCode}\n`)
+    chmodSync(npmPath, 0o755)
+    return binDir
+  }
+
+  function runViaSymlink(dir, binDir) {
+    const link = path.join(dir, 'npm-audit-gate-link.mjs')
+    symlinkSync(SCRIPT_PATH, link)
+    return spawnSync('node', [link], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
+    })
+  }
+
+  it('clean audit through a symlink: real output, exit 0 (not a silent pass with no output)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'npm-audit-gate-e2e-clean-'))
+    writeFileSync(path.join(dir, 'audit-allowlist.json'), EMPTY_ALLOWLIST)
+    const binDir = makeFakeNpm(dir, JSON.stringify(CLEAN_AUDIT), 0)
+
+    const result = runViaSymlink(dir, binDir)
+
+    assert.equal(result.status, 0)
+    assert.match(result.stdout, /npm-audit-gate: PASS/)
+  })
+
+  it('vulnerable audit through a symlink: real output naming the advisory, exit 1', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'npm-audit-gate-e2e-vuln-'))
+    writeFileSync(path.join(dir, 'audit-allowlist.json'), EMPTY_ALLOWLIST)
+    const findings = auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')
+    const binDir = makeFakeNpm(dir, JSON.stringify(findings), 1)
+
+    const result = runViaSymlink(dir, binDir)
+
+    // The bug this reproduces: BEFORE the fix, this would be status 0 with
+    // EMPTY stdout — main() never ran because the entry-guard comparison
+    // missed through the symlink. Asserting non-zero + real content is the
+    // literal regression guard.
+    assert.notEqual(result.status, 0)
+    assert.match(result.stdout, /GHSA-AAAA-BBBB-CCCC/)
+    assert.match(result.stdout, /npm-audit-gate: FAIL/)
   })
 })

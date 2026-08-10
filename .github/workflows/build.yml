@@ -265,15 +265,8 @@ jobs:
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. Gated through
       # `.github/scripts/npm-audit-gate.mjs` (issue #189) rather than bare
-      # `npm audit`: default stays deny (every reported advisory still fails
-      # the build) UNLESS it is covered by a non-expired, reasoned, tracked
-      # waiver in web/audit-allowlist.json — the escape hatch for the
-      # unfixable-upstream-CVE case ADR-0005 already accepts for the
-      # container layer, extended here to source-level npm findings, which
-      # (unlike govulncheck's reachability analysis) have no other way out.
-      # The allowlist ships EMPTY, so this behaves exactly like bare
-      # `npm audit` today — see the script's own header and
-      # docs/agents/findings.md for how to add a waiver.
+      # `npm audit` — default-deny time-boxed allowlist, decision + rationale
+      # in ADR-0005, day-to-day usage in docs/agents/findings.md.
       - name: npm audit (gated by web/audit-allowlist.json)
         run: node ../.github/scripts/npm-audit-gate.mjs
 

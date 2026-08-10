@@ -1,39 +1,35 @@
 #!/usr/bin/env node
-// Gates `npm audit` behind a time-boxed allowlist (issue #189).
+// Gates `npm audit` behind a time-boxed allowlist (issue #189). Decision
+// record + full rationale: ADR-0005. Day-to-day how-to (adding a waiver):
+// docs/agents/findings.md. This header covers only what a reader of the
+// CODE needs, not a restatement of either.
 //
-// Background: `npm audit` is a deliberately BLOCKING PR/nightly check
-// (build.yml's Frontend (Node) job, nightly.yml's Nightly: Frontend (Node)
-// job — ADR-0005). That's the right default. The gap #187/#189 surfaced:
-// `govulncheck` is reachability-filtered (only symbols this code actually
-// calls), so an unfixable-but-unreachable Go CVE never blocks a PR. `npm
-// audit` has no equivalent — it flags by advisory + semver range with no
-// reachability analysis, and this repo configures no `--audit-level`
-// threshold and no override/ignore mechanism. An npm advisory with NO
-// upstream fix would therefore block every PR indefinitely, with no
-// documented way out, which is exactly the "unable to ship" scenario
-// ADR-0005 already treats as unacceptable for the container-scan layer.
+// This script is deliberately narrow: default stays deny (every reported
+// advisory needs a covering, non-expired `web/audit-allowlist.json` entry
+// or the gate fails), a waiver is capped at MAX_WAIVER_HORIZON_DAYS out so
+// "time-boxed" is structural rather than honor-system, and an EXPIRED
+// waiver fails the build even if its advisory is no longer reported (a
+// stale waiver is a cleanup finding, not a free pass). Every
+// parse/shape/validation failure fails closed — same instinct as
+// `.github/actions/govulncheck/action.yml`'s `blocking` input validation.
 //
-// This script is the escape hatch, and it is deliberately narrow:
-//   - Default stays deny. Every advisory `npm audit` reports must be
-//     covered by an allowlist entry, or the gate fails — this is NOT an
-//     `--audit-level` threshold or a blanket dev-dependency exclusion.
-//   - A waiver requires an expiry date, a reason, and a linked tracking
-//     issue (`web/audit-allowlist.json`). No open-ended ignores.
-//   - An EXPIRED waiver fails the build LOUDLY, even if the advisory it
-//     names is no longer reported. A stale, silently-ignored waiver would
-//     defeat the entire point of time-boxing it.
-//   - Every parse/shape/validation failure fails closed (non-zero exit),
-//     never silently passes — same instinct as
-//     `.github/actions/govulncheck/action.yml`'s `blocking` input
-//     validation, applied throughout: a typo'd date, an unparseable file, a
-//     missing field, or an `npm audit` JSON shape this script doesn't
-//     recognize is a FAILURE, not a pass.
+// Known limitation (PR #193 review): a `via` entry whose advisory URL
+// isn't GHSA-shaped (e.g. npm's old numeric `npmjs.com/advisories/N` form)
+// makes extractAdvisories() throw, and there is then no id to put in the
+// allowlist — fails closed, but with no waiver path. This has not been
+// observed against this repo's npm (11.x reports GHSA URLs universally);
+// treat a real occurrence as a bug against this script, not something to
+// work around by hand-editing a non-GHSA id into the allowlist (parseAllowlist
+// rejects it too).
 //
-// Deliberately a pure, importable set of functions (`extractAdvisories`,
-// `parseAllowlist`, `evaluateGate`) with the CLI as a thin wrapper — same
-// shape as `compute-image-tags.mjs`, for the same reason: the interesting
-// logic gets real unit-test coverage (npm-audit-gate.test.mjs) independent
-// of ever spawning npm.
+// Deliberately a pure, importable core (`extractAdvisories`, `parseAllowlist`,
+// `evaluateGate`, `formatReport`) PLUS an injectable orchestrator (`run`) —
+// same shape as `compute-image-tags.mjs` for the pure core, extended here
+// (PR #193 review) because the CLI layer itself (argv parsing, spawning
+// npm, reading the allowlist file, the ESM entry-point guard) is exactly
+// where a fail-open bug lived and unit tests must reach it too, not just
+// the pure functions underneath it. `npm-audit-gate.test.mjs` covers both
+// layers without ever touching a real npm process or the real filesystem.
 //
 // Usage: node npm-audit-gate.mjs [--cwd <dir>] [--allowlist <path>]
 //   Run from `web/` (matches the CI step's job-default working-directory)
@@ -41,13 +37,29 @@
 //   reads ./audit-allowlist.json. Both are overridable for local use.
 
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const GHSA_RE = /GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}/i
 const GHSA_EXACT_RE = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/i
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
 const ISSUE_REF_RE = /^(#\d+|https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/issues\/\d+)$/
+
+// A waiver more than this many days out isn't "time-boxed", it's a
+// disguised standing ignore — caps how far into the future `expires` may
+// be set at parse time (PR #193 review). The gap between `expires` and
+// "now" only shrinks as time passes, so a waiver valid under this cap when
+// written stays valid under it for the rest of its life; this never turns a
+// previously-accepted waiver into a parse failure later.
+export const MAX_WAIVER_HORIZON_DAYS = 180
+
+function daysBetween(dateIso, today) {
+  const [, y, mo, d] = ISO_DATE_RE.exec(dateIso)
+  const targetUTC = Date.UTC(Number(y), Number(mo) - 1, Number(d))
+  const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+  return Math.round((targetUTC - todayUTC) / 86_400_000)
+}
 
 // ---------------------------------------------------------------------------
 // npm audit JSON -> advisories
@@ -84,20 +96,34 @@ export function extractAdvisories(auditJson) {
     )
   }
 
+  const vulnerabilities = auditJson.vulnerabilities
   const advisories = new Map()
 
-  for (const [pkgName, vuln] of Object.entries(auditJson.vulnerabilities)) {
-    if (!vuln || typeof vuln !== 'object' || !Array.isArray(vuln.via)) {
-      throw new Error(`npm audit JSON: vulnerability entry "${pkgName}" has no "via" array — unexpected shape.`)
+  for (const [pkgName, vuln] of Object.entries(vulnerabilities)) {
+    if (!vuln || typeof vuln !== 'object' || !Array.isArray(vuln.via) || vuln.via.length === 0) {
+      throw new Error(
+        `npm audit JSON: vulnerability entry "${pkgName}" has no non-empty "via" array — unexpected shape.`,
+      )
     }
 
     for (const via of vuln.via) {
       // A bare string `via` entry is a reference to ANOTHER package name in
       // this same report (the dependency chain that pulled the vuln in) —
-      // that package has its own entry with the real advisory detail, so
-      // skip it here rather than double-counting or misreading a package
-      // name as an advisory id.
-      if (typeof via === 'string') continue
+      // that package's OWN entry carries the real advisory detail, so this
+      // one is skipped rather than double-counted. But the reference must
+      // actually resolve: a string naming a package that isn't itself a key
+      // in `vulnerabilities` is a malformed/incomplete report (PR #193
+      // review) — silently skipping it would mean a report whose `via`
+      // chains are ALL such dangling strings extracts zero advisories and
+      // gates GREEN despite reporting vulnerabilities. Fail closed instead.
+      if (typeof via === 'string') {
+        if (!Object.prototype.hasOwnProperty.call(vulnerabilities, via)) {
+          throw new Error(
+            `npm audit JSON: "${pkgName}"'s "via" references "${via}", which is not itself a reported vulnerability — malformed/incomplete report, cannot safely resolve this advisory.`,
+          )
+        }
+        continue
+      }
 
       if (!via || typeof via !== 'object') {
         throw new Error(`npm audit JSON: "${pkgName}" has a malformed "via" entry (${JSON.stringify(via)}).`)
@@ -106,7 +132,7 @@ export function extractAdvisories(auditJson) {
       const match = typeof via.url === 'string' ? via.url.match(GHSA_RE) : null
       if (!match) {
         throw new Error(
-          `npm audit JSON: "${pkgName}" reports an advisory with no extractable GHSA id (url: ${via.url ?? '<missing>'}) — cannot gate on it safely.`,
+          `npm audit JSON: "${pkgName}" reports an advisory with no extractable GHSA id (url: ${via.url ?? '<missing>'}) — cannot gate on it safely. See this script's header ("Known limitation") if it genuinely isn't a GHSA advisory.`,
         )
       }
       const id = match[0].toUpperCase()
@@ -121,6 +147,20 @@ export function extractAdvisories(auditJson) {
       }
       advisories.get(id).packages.add(pkgName)
     }
+  }
+
+  // Belt-and-suspenders cross-check against npm's own summary count (PR
+  // #193 review): if npm itself says at least one vulnerability was found
+  // but nothing could be extracted, some shape this function assumes didn't
+  // hold — fail rather than silently report a clean audit. The dangling-
+  // reference check above should already catch the concrete case that
+  // motivated this, but this guards against any OTHER way the same failure
+  // mode (findings exist, extraction yields none) could occur.
+  const reportedTotal = auditJson.metadata?.vulnerabilities?.total
+  if (typeof reportedTotal === 'number' && reportedTotal > 0 && advisories.size === 0) {
+    throw new Error(
+      `npm audit JSON: metadata reports ${reportedTotal} vulnerabilit${reportedTotal === 1 ? 'y' : 'ies'} but no advisory could be extracted from "vulnerabilities" — unrecognized report shape, refusing to treat this as clean (fail closed).`,
+    )
   }
 
   return advisories
@@ -145,16 +185,20 @@ function isValidIsoDate(s) {
 /**
  * Parse and strictly validate the allowlist file's contents. Throws on ANY
  * malformed input — missing/wrong-shaped top level, a waiver missing a
- * required field, an unparseable or nonexistent-calendar-date `expires`, a
- * GHSA id that doesn't match the expected format, an `issue` field that
- * isn't a recognizable issue reference, or two waivers naming the same
- * advisory (ambiguous — which one governs?). Fail closed: an allowlist this
- * function can't fully validate is treated as broken, not as "no waivers".
+ * required field, an unparseable or nonexistent-calendar-date `expires`, an
+ * `expires` further out than `MAX_WAIVER_HORIZON_DAYS`, a GHSA id that
+ * doesn't match the expected format, an `issue` field that isn't a
+ * recognizable issue reference, or two waivers naming the same advisory
+ * (ambiguous — which one governs?). Fail closed: an allowlist this function
+ * can't fully validate is treated as broken, not as "no waivers".
  *
  * @param {string} raw - the allowlist file's raw text.
+ * @param {Date} [today] - injected so the horizon-cap check is
+ *   unit-testable without depending on the real clock. Defaults to `new
+ *   Date()` for real callers.
  * @returns {{id: string, expires: string, reason: string, issue: string}[]}
  */
-export function parseAllowlist(raw) {
+export function parseAllowlist(raw, today = new Date()) {
   let data
   try {
     data = JSON.parse(raw)
@@ -199,6 +243,12 @@ export function parseAllowlist(raw) {
         `${where} (${normalizedId}): "expires" ("${expires}") is not a valid ISO YYYY-MM-DD calendar date.`,
       )
     }
+    const horizonDays = daysBetween(expires, today)
+    if (horizonDays > MAX_WAIVER_HORIZON_DAYS) {
+      throw new Error(
+        `${where} (${normalizedId}): "expires" ("${expires}") is ${horizonDays} days out, past the ${MAX_WAIVER_HORIZON_DAYS}-day cap — waivers must be genuinely time-boxed. Pick a nearer re-check date; renew later if still needed.`,
+      )
+    }
 
     if (typeof reason !== 'string' || reason.trim().length === 0) {
       throw new Error(`${where} (${normalizedId}): missing required non-empty string field "reason".`)
@@ -233,10 +283,7 @@ export function parseAllowlist(raw) {
 // deliberately ignoring time-of-day so the gate's result doesn't depend on
 // what hour of the expiry date CI happens to run.
 function isExpired(expiresIso, today) {
-  const [, y, mo, d] = ISO_DATE_RE.exec(expiresIso)
-  const expiresUTC = Date.UTC(Number(y), Number(mo) - 1, Number(d))
-  const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
-  return todayUTC > expiresUTC
+  return daysBetween(expiresIso, today) < 0
 }
 
 /**
@@ -292,10 +339,7 @@ export function evaluateGate(advisories, waivers, today) {
 // ---------------------------------------------------------------------------
 
 function formatDay(dateIso, today) {
-  const [, y, mo, d] = ISO_DATE_RE.exec(dateIso)
-  const expiresUTC = Date.UTC(Number(y), Number(mo) - 1, Number(d))
-  const todayUTC = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
-  const days = Math.round((expiresUTC - todayUTC) / 86_400_000)
+  const days = daysBetween(dateIso, today)
   if (days > 0) return `in ${days} day${days === 1 ? '' : 's'}`
   if (days === 0) return 'today (last valid day)'
   return `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} ago`
@@ -349,7 +393,7 @@ export function formatReport({ ok, activeWaivers, unwaivedFindings, expiredWaive
 // CLI
 // ---------------------------------------------------------------------------
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const args = { cwd: process.cwd(), allowlist: null }
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--cwd') args.cwd = argv[++i]
@@ -360,8 +404,18 @@ function parseArgs(argv) {
   return args
 }
 
-function runNpmAudit(cwd) {
-  const result = spawnSync('npm', ['audit', '--json'], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+/**
+ * Run `npm audit --json` and return its parsed output. `spawn` is
+ * injectable (defaults to `child_process.spawnSync`) so this — including
+ * the "npm couldn't be spawned at all", "produced no stdout", and
+ * "produced unparseable JSON" failure branches — is unit-testable without
+ * a real npm process (PR #193 review).
+ *
+ * @param {string} cwd
+ * @param {typeof import('node:child_process').spawnSync} [spawn]
+ */
+export function runNpmAudit(cwd, spawn = spawnSync) {
+  const result = spawn('npm', ['audit', '--json'], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   if (result.error) {
     throw new Error(`failed to run "npm audit --json" in ${cwd}: ${result.error.message}`)
   }
@@ -387,28 +441,84 @@ function runNpmAudit(cwd) {
   return parsed
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2))
-
-  const auditJson = runNpmAudit(args.cwd)
-  const advisories = extractAdvisories(auditJson)
-
-  let allowlistRaw
+/**
+ * Read and parse the allowlist file. `readFile` is injectable (defaults to
+ * `fs.readFileSync`) so a missing/unreadable file is unit-testable without
+ * touching the real filesystem (PR #193 review).
+ *
+ * @param {string} allowlistPath
+ * @param {typeof import('node:fs').readFileSync} [readFile]
+ * @param {Date} [today]
+ */
+export function readAllowlist(allowlistPath, readFile = readFileSync, today = new Date()) {
+  let raw
   try {
-    allowlistRaw = readFileSync(args.allowlist, 'utf8')
+    raw = readFile(allowlistPath, 'utf8')
   } catch (err) {
-    throw new Error(`could not read allowlist file ${args.allowlist}: ${err instanceof Error ? err.message : err}`)
+    throw new Error(`could not read allowlist file ${allowlistPath}: ${err instanceof Error ? err.message : err}`)
   }
-  const waivers = parseAllowlist(allowlistRaw)
-
-  const today = new Date()
-  const result = evaluateGate(advisories, waivers, today)
-  console.log(formatReport(result, today))
-
-  process.exitCode = result.ok ? 0 : 1
+  return parseAllowlist(raw, today)
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/**
+ * The full gate, end to end, with every external effect (argv, spawning
+ * npm, reading the allowlist, the clock) injectable — this is what
+ * `npm-audit-gate.test.mjs` exercises as "the CLI layer" without ever
+ * spawning a real npm process or touching the real filesystem (PR #193
+ * review). `main()` below is the real, non-injected wiring.
+ *
+ * @param {object} [opts]
+ * @param {string[]} [opts.argv]
+ * @param {typeof import('node:child_process').spawnSync} [opts.spawn]
+ * @param {typeof import('node:fs').readFileSync} [opts.readFile]
+ * @param {() => Date} [opts.now]
+ * @returns {{ok: boolean, report: string}}
+ */
+export function run({ argv = process.argv.slice(2), spawn = spawnSync, readFile = readFileSync, now = () => new Date() } = {}) {
+  const args = parseArgs(argv)
+  const auditJson = runNpmAudit(args.cwd, spawn)
+  const advisories = extractAdvisories(auditJson)
+  const today = now()
+  const waivers = readAllowlist(args.allowlist, readFile, today)
+  const result = evaluateGate(advisories, waivers, today)
+  return { ok: result.ok, report: formatReport(result, today) }
+}
+
+async function main() {
+  const { ok, report } = run()
+  console.log(report)
+  process.exitCode = ok ? 0 : 1
+}
+
+// Robust "is this file the one Node actually invoked" check (PR #193
+// review — fail-open finding). The naive `import.meta.url ===
+// \`file://${process.argv[1]}\`` breaks two ways this matters for a
+// security gate: (1) Node resolves the ESM entry point's real path, so
+// invoking this script through a symlink makes `import.meta.url` reflect
+// the symlink TARGET while `process.argv[1]` stays the symlink path — they
+// never match; (2) a path containing characters like a space is
+// percent-encoded in a URL (`%20`) but not in `process.argv[1]`, so the
+// naive template-string comparison never matches either. Either failure
+// means `main()` silently never runs — a deny-by-default gate that exits 0
+// with no output. Fixed the way Node's own docs recommend: realpath
+// `process.argv[1]` (resolving any symlink) and compare its FILE URL form
+// (so encoding matches) against `import.meta.url`. Verified empirically
+// against direct invocation, a symlinked path, and a path with a space —
+// see npm-audit-gate.test.mjs.
+export function isMainModule(metaUrl, argv1) {
+  if (argv1 == null) return false
+  let resolvedUrl
+  try {
+    resolvedUrl = pathToFileURL(realpathSync(argv1)).href
+  } catch {
+    // argv1 doesn't resolve to a real file on disk — this process cannot be
+    // "the" module currently executing from that path, so it is not main.
+    return false
+  }
+  return metaUrl === resolvedUrl
+}
+
+if (isMainModule(import.meta.url, process.argv[1])) {
   main().catch((err) => {
     console.error(`::error::npm-audit-gate: ${err instanceof Error ? err.message : err}`)
     process.exitCode = 1

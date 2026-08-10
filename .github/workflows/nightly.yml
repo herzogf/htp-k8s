@@ -223,12 +223,8 @@ jobs:
         working-directory: test/e2e/capture
         run: task test
 
-      # Blocking here too (matches build.yml's PR-time posture), gated
-      # through the same `.github/scripts/npm-audit-gate.mjs` time-boxed
-      # allowlist (issue #189) — see build.yml's Frontend (Node) job for the
-      # full rationale. A newly-published advisory against unchanged
-      # dependencies should still fail this job loudly unless it's covered
-      # by a non-expired waiver in web/audit-allowlist.json.
+      # Blocking here too (matches build.yml's PR-time posture) — see that
+      # job's own npm-audit step for the pointer to the full rationale.
       - name: npm audit (gated by web/audit-allowlist.json)
         run: node ../.github/scripts/npm-audit-gate.mjs
 

@@ -1,4 +1,4 @@
 {
-  "//": "Time-boxed npm-audit waivers (issue #189). Read .github/scripts/npm-audit-gate.mjs and docs/agents/findings.md before adding an entry. Every waiver needs id, expires (YYYY-MM-DD), reason, and issue — an expired waiver fails the build even if the advisory is no longer reported. Ships empty: no waivers exist as of this writing.",
+  "//": "Time-boxed npm-audit waivers (issue #189). Before adding an entry, read docs/agents/findings.md (how-to) and .github/scripts/npm-audit-gate.mjs (enforcement).",
   "waivers": []
 }
