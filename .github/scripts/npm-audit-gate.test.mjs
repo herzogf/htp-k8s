@@ -58,6 +58,7 @@ import {
 const TODAY = new Date('2026-08-10T12:00:00Z')
 const CLI_SCRIPT_PATH = fileURLToPath(new URL('./npm-audit-gate-cli.mjs', import.meta.url))
 const LIB_SCRIPT_PATH = fileURLToPath(new URL('./npm-audit-gate.mjs', import.meta.url))
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url))
 
 // A real `npm audit --json` shape (auditReportVersion 2, npm 11.x),
 // captured against a scratch project seeded with a known-vulnerable
@@ -209,6 +210,123 @@ describe('extractAdvisories', () => {
       metadata: { vulnerabilities: { total: 3 } },
     }
     assert.throws(() => extractAdvisories(audit), /"a" resolves to no real advisory, directly or transitively/)
+  })
+
+  // PR #193 review round 3: a genuinely resolvable member of a cycle must
+  // pass REGARDLESS of `via` array order. The earlier (round 2) DFS-with-
+  // memoization implementation returned the right answer for one order and
+  // the WRONG answer (an unpassable throw — no allowlist entry can waive
+  // an extractAdvisories throw, since it runs before evaluateGate ever
+  // sees an allowlist) for the other, on this EXACT shape: X and Y form a
+  // cycle, but X *also* has an edge straight to Z, which carries a real
+  // advisory. Reproduced for real against a 171-package `npm audit --json`
+  // report (gulp@3.9.1 + react-scripts@1.1.5) containing a genuine
+  // babel-core <-> babel-register cycle — it passed only because of which
+  // `via` entry happened to be visited first; reordering it flipped PASS
+  // to an unpassable THROW on otherwise-identical input. These two cases
+  // pin both orders explicitly; the property test below generalizes it.
+  it('a cycle member that ALSO has a direct edge to a real advisory resolves — via order ["Y", "Z"]', () => {
+    const audit = {
+      vulnerabilities: {
+        X: { name: 'X', severity: 'high', via: ['Y', 'Z'] },
+        Y: { name: 'Y', severity: 'high', via: ['X'] },
+        Z: {
+          name: 'Z',
+          severity: 'high',
+          via: [{ source: 1, name: 'Z', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }],
+        },
+      },
+      metadata: { vulnerabilities: { total: 3 } },
+    }
+    const advisories = extractAdvisories(audit)
+    assert.deepEqual([...advisories.keys()], ['GHSA-AAAA-BBBB-CCCC'])
+  })
+
+  it('a cycle member that ALSO has a direct edge to a real advisory resolves — via order ["Z", "Y"] (order-flip regression)', () => {
+    const audit = {
+      vulnerabilities: {
+        X: { name: 'X', severity: 'high', via: ['Z', 'Y'] },
+        Y: { name: 'Y', severity: 'high', via: ['X'] },
+        Z: {
+          name: 'Z',
+          severity: 'high',
+          via: [{ source: 1, name: 'Z', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }],
+        },
+      },
+      metadata: { vulnerabilities: { total: 3 } },
+    }
+    const advisories = extractAdvisories(audit)
+    assert.deepEqual([...advisories.keys()], ['GHSA-AAAA-BBBB-CCCC'])
+  })
+
+  it('order-independence property: every permutation of a fixed graph\'s "via" arrays yields the same resolvability', () => {
+    // A property that only holds for one arbitrary ordering isn't the
+    // property this invariant needs — assert it holds for every
+    // permutation of a small fixed graph rather than just the two orders
+    // pinned explicitly above. X and Y cycle; X and W both also point
+    // straight at Z (the one real advisory); the SET of resolvable
+    // packages must always be {X, Y, W, Z} no matter which order any
+    // package's own "via" array lists its edges in.
+    function permutations(arr) {
+      if (arr.length <= 1) return [arr]
+      const result = []
+      for (let i = 0; i < arr.length; i++) {
+        const rest = [...arr.slice(0, i), ...arr.slice(i + 1)]
+        for (const p of permutations(rest)) result.push([arr[i], ...p])
+      }
+      return result
+    }
+
+    const zAdvisory = {
+      source: 1,
+      name: 'Z',
+      url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc',
+      severity: 'high',
+      title: 't',
+    }
+
+    for (const xOrder of permutations(['Y', 'Z'])) {
+      for (const wOrder of permutations(['Z'])) {
+        const audit = {
+          vulnerabilities: {
+            X: { name: 'X', severity: 'high', via: xOrder },
+            Y: { name: 'Y', severity: 'high', via: ['X'] },
+            W: { name: 'W', severity: 'high', via: wOrder },
+            Z: { name: 'Z', severity: 'high', via: [zAdvisory] },
+          },
+          metadata: { vulnerabilities: { total: 4 } },
+        }
+        const advisories = extractAdvisories(audit)
+        assert.deepEqual(
+          [...advisories.keys()],
+          ['GHSA-AAAA-BBBB-CCCC'],
+          `via order X=${JSON.stringify(xOrder)} W=${JSON.stringify(wOrder)} should still resolve every package`,
+        )
+      }
+    }
+  })
+
+  it('resolves a pathologically deep "via" chain without a stack overflow (the reachability check is iterative, not recursive)', () => {
+    // A side benefit of the round-3 BFS-from-resolved-set rewrite: a
+    // recursive DFS on a chain this deep would blow the call stack
+    // (RangeError: Maximum call stack size exceeded) well before this size
+    // — this walks a queue instead, so depth is bounded only by available
+    // memory, not stack frames.
+    const DEPTH = 20_000
+    const vulnerabilities = {}
+    for (let i = 0; i < DEPTH; i++) {
+      vulnerabilities[`pkg${i}`] = {
+        name: `pkg${i}`,
+        severity: 'high',
+        via:
+          i === DEPTH - 1
+            ? [{ source: 1, name: `pkg${i}`, url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }]
+            : [`pkg${i + 1}`],
+      }
+    }
+    const audit = { vulnerabilities, metadata: { vulnerabilities: { total: DEPTH } } }
+    const advisories = extractAdvisories(audit)
+    assert.deepEqual([...advisories.keys()], ['GHSA-AAAA-BBBB-CCCC'])
   })
 
   it('throws when "metadata.vulnerabilities.total" is missing, even on an otherwise well-formed, fully-resolvable report', () => {
@@ -885,4 +1003,31 @@ describe('the real CLI process (npm-audit-gate-cli.mjs), invoked several ways (P
     assert.match(result.stdout, /GHSA-AAAA-BBBB-CCCC/)
     assert.match(result.stdout, /npm-audit-gate: FAIL/)
   })
+})
+
+describe('workflow wiring (the "never import for side effects" contract, PR #193 review round 3)', () => {
+  // The library/CLI split (round 2) is documented, not enforced: nothing
+  // stops a future edit from pointing a workflow step back at
+  // `npm-audit-gate.mjs` directly — which has no guard and no `main()`, so
+  // `node .github/scripts/npm-audit-gate.mjs` exits 0 with NO output,
+  // silently green, for the exact same reason the original bug was a
+  // silent pass. This is the third distinct silent-green shape found in
+  // this file (round 1: the entry guard; round 2: the metadata
+  // cross-check's blind spot; this: a workflow step pointed at the wrong
+  // file) — cheap enough to make structural that there is no excuse not to.
+  const workflowPaths = [
+    path.join(REPO_ROOT, '.github', 'workflows', 'build.yml'),
+    path.join(REPO_ROOT, '.github', 'workflows', 'nightly.yml'),
+  ]
+
+  for (const workflowPath of workflowPaths) {
+    it(`${path.basename(workflowPath)} invokes npm-audit-gate-cli.mjs, not the guard-less library directly`, () => {
+      const contents = readFileSync(workflowPath, 'utf8')
+      assert.match(
+        contents,
+        /npm-audit-gate-cli\.mjs/,
+        `${workflowPath} must invoke npm-audit-gate-cli.mjs — pointing at npm-audit-gate.mjs directly would silently exit 0 with no output (it has no entry guard by design; see that file's header)`,
+      )
+    })
+  }
 })

@@ -6,11 +6,11 @@
 //
 // This script is deliberately narrow: default stays deny (every reported
 // advisory needs a covering, non-expired `web/audit-allowlist.json` entry
-// or the gate fails), a waiver is capped at MAX_WAIVER_HORIZON_DAYS out so
-// "time-boxed" is structural rather than honor-system, and an EXPIRED
-// waiver fails the build even if its advisory is no longer reported (a
-// stale waiver is a cleanup finding, not a free pass). Every
-// parse/shape/validation failure fails closed — same instinct as
+// or the gate fails), and a waiver is capped at MAX_WAIVER_HORIZON_DAYS out
+// so "time-boxed" is structural rather than honor-system. The full waiver
+// lifecycle rule (what "non-expired" means, what happens once one expires)
+// lives in docs/agents/findings.md, not here. Every parse/shape/validation
+// failure fails closed — same instinct as
 // `.github/actions/govulncheck/action.yml`'s `blocking` input validation.
 //
 // Known limitation (PR #193 review): a `via` entry whose advisory URL
@@ -187,32 +187,46 @@ export function extractAdvisories(auditJson) {
   // sibling shapes: a closed loop of string references with NO metadata at
   // all (the "vulnerabilities" cross-check never even ran), and a PARTIAL
   // loss where some packages resolve fine and others don't (the non-empty
-  // `advisories` map masked the unresolved ones). This walks each
-  // package's chain with cycle detection (`visiting`) — a cycle among
-  // packages that never reaches a real advisory resolves to `false`, not a
-  // silent pass.
-  const resolvable = new Map()
-  function isResolvable(pkgName, visiting) {
-    if (resolvable.has(pkgName)) return resolvable.get(pkgName)
-    if (directlyResolved.has(pkgName)) {
-      resolvable.set(pkgName, true)
-      return true
+  // `advisories` map masked the unresolved ones).
+  //
+  // Computed as a reverse-graph BFS flood-fill from the directly-resolved
+  // set — NOT a per-node recursive DFS (PR #193 review round 3: an earlier
+  // version here was a DFS that returned `false` without memoizing when it
+  // cut a cycle, but then memoized the CALLER's result computed with that
+  // provisional `false` baked in — a genuinely resolvable node could be
+  // permanently cached as unresolvable depending purely on which `via`
+  // array entry happened to be visited first. Confirmed on a real 171-
+  // package `npm audit` report containing a genuine `babel-core` <->
+  // `babel-register` cycle: reordering ONE `via` array flipped the result
+  // from PASS to an unpassable THROW — precisely the "no waiver can
+  // rescue you" failure ADR-0005 and issue #189 exist to prevent, on a
+  // real report, from otherwise-correct input). A flood-fill sidesteps the
+  // problem entirely: "every node that can reach set S in a graph" is
+  // computed by reversing the edges and BFS-ing from S, which is a
+  // well-defined SET regardless of traversal order — there is no partial,
+  // order-dependent result to memoize. It is also iterative (a queue, not
+  // the call stack), so it has no recursion-depth limit on a pathologically
+  // deep `via` chain.
+  const referrersOf = new Map() // ref (string) -> [pkgName, ...] whose "via" names it
+  for (const [pkgName, vuln] of Object.entries(vulnerabilities)) {
+    for (const via of vuln.via) {
+      if (typeof via !== 'string') continue
+      if (!referrersOf.has(via)) referrersOf.set(via, [])
+      referrersOf.get(via).push(pkgName)
     }
-    if (visiting.has(pkgName)) return false // cycle on this path; don't memoize yet — a sibling edge may still resolve
-    visiting.add(pkgName)
-    let result = false
-    for (const via of vulnerabilities[pkgName].via) {
-      if (typeof via === 'string' && isResolvable(via, visiting)) {
-        result = true
-        break
+  }
+  const resolvable = new Set(directlyResolved)
+  const queue = [...directlyResolved]
+  for (let head = 0; head < queue.length; head++) {
+    for (const referrer of referrersOf.get(queue[head]) ?? []) {
+      if (!resolvable.has(referrer)) {
+        resolvable.add(referrer)
+        queue.push(referrer)
       }
     }
-    visiting.delete(pkgName)
-    resolvable.set(pkgName, result)
-    return result
   }
   for (const pkgName of Object.keys(vulnerabilities)) {
-    if (!isResolvable(pkgName, new Set())) {
+    if (!resolvable.has(pkgName)) {
       throw new Error(
         `npm audit JSON: "${pkgName}" resolves to no real advisory, directly or transitively through its "via" chain — malformed/incomplete report, refusing to treat this as clean (fail closed).`,
       )
@@ -369,7 +383,7 @@ function isExpired(expiresIso, today) {
  * allowlist. Fails if ANY reported advisory lacks a non-expired waiver, OR
  * if ANY allowlist entry is itself expired — even one naming an advisory
  * that isn't currently reported (a stale waiver is a finding to clean up,
- * not something to silently ignore; see the module header).
+ * not something to silently ignore; see docs/agents/findings.md).
  *
  * @param {Map<string, {id: string, severity: string, title: string, packages: Set<string>}>} advisories
  * @param {{id: string, expires: string, reason: string, issue: string}[]} waivers
@@ -400,7 +414,7 @@ export function evaluateGate(advisories, waivers, today) {
 
   // Waivers whose advisory ISN'T currently reported still must not be
   // expired — an expired-and-now-unreported waiver is exactly the "clean up
-  // your stale waiver" case the module header calls out.
+  // your stale waiver" case (docs/agents/findings.md).
   for (const waiver of waivers) {
     if (coveredIds.has(waiver.id)) continue
     if (isExpired(waiver.expires, today)) {
