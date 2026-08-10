@@ -1,0 +1,4 @@
+{
+  "//": "Time-boxed npm-audit waivers (issue #189). Before adding an entry, read docs/agents/findings.md (how-to) and .github/scripts/npm-audit-gate.mjs (enforcement).",
+  "waivers": []
+}
