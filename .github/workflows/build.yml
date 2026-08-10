@@ -109,13 +109,37 @@ jobs:
               - '!**/*.md'
               - '!docs/**'
               - '!LICENSE'
-            # Gates the `scripts` job (issue #195): a script under
-            # .github/scripts/ is effectively a small private GitHub Action,
-            # and an action's own test suite runs when the action's code
-            # changes, not on every invocation of it. So its unit tests only
-            # need to run on a PR that touches this path.
+            # Gates the `scripts` job (issue #195; rationale on that job). A
+            # SINGLE pattern, deliberately — `.github/**`, not
+            # `.github/scripts/**`. Two reasons it must be this wide, not
+            # narrower:
+            #   1. This filter must obey the SAME rule stated above for
+            #      `nondocs`: "ANYTHING else runs the full suite: code,
+            #      web/, config, and ESPECIALLY .github/** (a workflow
+            #      change must never skip its own validation)". A workflow
+            #      edit under .github/workflows/ is exactly the case that
+            #      rule exists for, and it lives outside .github/scripts/.
+            #   2. Concretely: npm-audit-gate.test.mjs has a "workflow
+            #      wiring" suite that reads build.yml/nightly.yml and
+            #      asserts they invoke npm-audit-gate-cli.mjs rather than
+            #      the guard-less library directly. A PR that rewires those
+            #      workflow steps — this repo's own #198 did exactly that —
+            #      is precisely what that suite exists to catch, and a
+            #      .github/scripts/**-only filter would make it invisible to
+            #      exactly that PR (confirmed: #198 showed `Repo scripts
+            #      (Node)` skipping on itself before this fix).
+            # Do NOT add a second pattern to this list instead of widening
+            # this one: predicate-quantifier is 'every' for the WHOLE
+            # `with:` block above, and 'every' requires a changed file to
+            # match ALL patterns in a filter's list simultaneously (that's
+            # how `nondocs` combines its negations) — so two independent
+            # positive globs here (e.g. '.github/scripts/**' AND
+            # '.github/workflows/**') would each demand the other also
+            # match, which no real file satisfies, silently making this
+            # filter never true. One glob that already covers both
+            # directories avoids the trap entirely.
             scripts:
-              - '.github/scripts/**'
+              - '.github/**'
 
   backend:
     name: Backend (Go)
@@ -274,13 +298,21 @@ jobs:
   # A script under .github/scripts/ is effectively a small, private GitHub
   # Action (issue #195). Nobody runs actions/checkout's own test suite on
   # every invocation of actions/checkout — its tests run in ITS repo, when
-  # ITS code changes. This job is the in-repo equivalent: path-gated on
-  # .github/scripts/**, same skip semantics as the docs-only gate above (a
-  # job-level-skipped required check counts as passing — issue #76). Do NOT
-  # extend this gating to the npm audit step in the job above: that step
-  # scans a live, moving advisory database and must run on every PR
-  # regardless of what changed (issue #187) — only these two scripts' own
-  # unit tests are change-gated.
+  # ITS code changes. This job is the in-repo equivalent: path-gated (see the
+  # `scripts` filter above for exactly what path and why it's `.github/**`,
+  # not the narrower `.github/scripts/**`). Do NOT extend this gating to the
+  # npm audit step in the job above: that step scans a live, moving advisory
+  # database and must run on every PR regardless of what changed (issue
+  # #187) — only these two scripts' own unit tests are change-gated.
+  #
+  # Enforcement (issue #195 review): this job is one of release.yml's
+  # `verify-green-commit` required-check names, which treats a legitimate
+  # job-level skip as passing (issue #76) — same as it already does for
+  # `Backend integration (kind + KWOK)` / `E2E (Playwright)` / `Container
+  # scan (Trivy)`, all of which can also skip. It is NOT (yet) one of
+  # branch-protection ruleset 18831212's own required-status-check contexts
+  # (docs/agents/findings.md) — adding a job there is a repository setting
+  # only a maintainer can change; see this PR's description.
   # ---------------------------------------------------------------------------
 
   scripts:

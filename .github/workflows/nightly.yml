@@ -26,11 +26,21 @@ name: Nightly
 #      and reasoning that they are is how you delete the thing that caught
 #      issue #187 (see #191):
 #
-#        * PATH gap — `integration` (kind+KWOK), `e2e` (Playwright) and
-#          `container-scan` (Trivy) ARE gated in `build.yml`, behind its
-#          "did a non-docs path change" check (issue #76, whose whole point
-#          was skipping heavy/security work on a docs-only PR). Running them
-#          here defeats that skip once a day.
+#        * PATH gap — `integration` (kind+KWOK), `e2e` (Playwright),
+#          `container-scan` (Trivy), and `scripts` (`Repo scripts (Node)`,
+#          issue #195) ARE gated in `build.yml`, each behind its own
+#          `changes` output (`nondocs` for the first three — issue #76,
+#          whose whole point was skipping heavy/security work on a
+#          docs-only PR; `scripts` — `.github/**` — for the fourth, issue
+#          #195). Running them here unconditionally defeats each of those
+#          skips once a day. `scripts`' own unit tests also exercise real
+#          `node --test`/`spawnSync`/PATH-shim/symlink behavior against
+#          whatever Node the runner image currently ships (build.yml pins
+#          `node-version: "24"`, a floating major) rather than pure,
+#          environment-independent math — another reason a PR-time-only,
+#          change-gated run isn't sufficient on its own, same spirit as the
+#          TIME gap below even though its trigger is "the runner image
+#          moved," not "a vulnerability database moved."
 #
 #        * TIME gap — `backend` (incl. govulncheck) and `frontend` (incl.
 #          npm audit) are NOT gated; they already run on every PR. What
@@ -55,25 +65,26 @@ name: Nightly
 # Deliberately ONE workflow (not a second scheduled workflow alongside a
 # separate backstop workflow — maintainer decision, issue #29): (B)'s
 # backstop jobs below are near-duplicates of build.yml's own job bodies
-# (same steps, same pinned action SHAs). For build.yml's THREE heavy jobs
-# that is because the skip happens at the JOB level via the `changes` gate
-# (issue #76), which this workflow simply never adds; its Backend/Frontend
-# jobs carry no such gate to omit and are duplicated here purely for (B)'s
-# time gap. Job `name:` fields are DELIBERATELY
-# prefixed "Nightly:" and distinct from build.yml's own required-check
-# names (docs/agents/findings.md, ruleset 18831212): a schedule-triggered
-# run still posts real check-runs against `main`'s current HEAD SHA, and a
-# same-named check here would compete with (and could retroactively flip)
-# the PR-time result branch protection already recorded for that commit —
-# see release.yml's `verify-green-commit`, which resolves "latest run wins"
-# per check name across a commit's whole history of runs.
+# (same steps, same pinned action SHAs). For build.yml's FOUR path-gated
+# jobs (`integration`, `e2e`, `container-scan`, `scripts`) that is because
+# the skip happens at the JOB level via a `changes` output, which this
+# workflow simply never adds; its Backend/Frontend jobs carry no such gate
+# to omit and are duplicated here purely for (B)'s time gap. Job `name:`
+# fields are DELIBERATELY prefixed "Nightly:" and distinct from build.yml's
+# own required-check names (docs/agents/findings.md, ruleset 18831212): a
+# schedule-triggered run still posts real check-runs against `main`'s
+# current HEAD SHA, and a same-named check here would compete with (and
+# could retroactively flip) the PR-time result branch protection already
+# recorded for that commit — see release.yml's `verify-green-commit`, which
+# resolves "latest run wins" per check name across a commit's whole history
+# of runs.
 #
-# Keep build.yml's Backend/Frontend/Backend-integration/E2E/Container-scan
-# jobs and this workflow's Nightly equivalents in sync BY HAND when either
-# changes (same convention as GOVULNCHECK_PKGS being duplicated-but-pinned
-# across build.yml/release.yml) — there is no reusable-workflow indirection
-# here specifically to keep required-check names/history untouched (see
-# above).
+# Keep build.yml's Backend/Frontend/Backend-integration/E2E/Container-scan/
+# Repo-scripts jobs and this workflow's Nightly equivalents in sync BY HAND
+# when either changes (same convention as GOVULNCHECK_PKGS being
+# duplicated-but-pinned across build.yml/release.yml) — there is no
+# reusable-workflow indirection here specifically to keep required-check
+# names/history untouched (see above).
 
 on:
   schedule:
@@ -229,6 +240,31 @@ jobs:
       # job's own npm-audit step for the pointer to the full rationale.
       - name: npm audit (gated by web/audit-allowlist.json)
         run: node ../.github/scripts/npm-audit-gate-cli.mjs
+
+  # Unconditional PATH-gap backstop for build.yml's `scripts` job (issue
+  # #195; see the workflow header, item B). No `changes`/`if:` gate here —
+  # unlike build.yml, this workflow always runs every job, so there is
+  # nothing to defeat a skip of.
+  scripts:
+    name: 'Nightly: Repo scripts (Node)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      # See build.yml's matching steps for the full rationale (issue #64,
+      # #189, #195).
+      - name: Release image-tag computation tests (.github/scripts)
+        run: node --test .github/scripts/compute-image-tags.test.mjs
+
+      - name: npm-audit-gate tests (.github/scripts)
+        run: node --test .github/scripts/npm-audit-gate.test.mjs
 
   integration:
     name: 'Nightly: Backend integration (kind + KWOK)'
