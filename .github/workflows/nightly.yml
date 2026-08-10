@@ -226,7 +226,7 @@ jobs:
       # Blocking here too (matches build.yml's PR-time posture) — see that
       # job's own npm-audit step for the pointer to the full rationale.
       - name: npm audit (gated by web/audit-allowlist.json)
-        run: node ../.github/scripts/npm-audit-gate.mjs
+        run: node ../.github/scripts/npm-audit-gate-cli.mjs
 
   integration:
     name: 'Nightly: Backend integration (kind + KWOK)'

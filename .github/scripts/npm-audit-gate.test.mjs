@@ -15,32 +15,38 @@
 // The guiding constraint under test throughout: FAIL CLOSED. Every
 // malformed-input case below asserts a thrown error, never a silent pass.
 //
-// Two layers are covered, deliberately (PR #193 review — the original
-// version of this suite covered only the pure functions, and the reported
-// fail-open bug lived in the CLI layer that was untested):
+// Two layers are covered, deliberately (PR #193 review round 1 — the
+// original version of this suite covered only the pure functions, and the
+// reported fail-open bug lived in the CLI layer that was untested):
 //   1. The pure core: extractAdvisories, parseAllowlist, evaluateGate,
 //      formatReport — no I/O, no clock dependency (Date injected).
-//   2. The CLI layer: parseArgs, runNpmAudit, readAllowlist, run(), and the
-//      ESM entry-point guard (isMainModule) — exercised either via
-//      dependency injection (fake spawn/readFile functions, no real npm or
-//      filesystem touched) or, for the entry-guard fix specifically, via an
-//      actual child `node` process invoked through a real symlink — that
-//      exact reproduction is what caught the bug, so it stays as a real
-//      regression test rather than being weakened into a pure unit test.
+//   2. The CLI layer: parseArgs, runNpmAudit, readAllowlist, run() —
+//      exercised via dependency injection (fake spawn/readFile functions,
+//      no real npm or filesystem touched).
+//
+// Round 2 removed the ESM entry-point guard entirely rather than hardening
+// it further (see npm-audit-gate.mjs's header) — npm-audit-gate.mjs is now
+// import-only with no side effect, and npm-audit-gate-cli.mjs is the real,
+// unguarded entry point. The "does invoking it through a symlink / a spaced
+// path actually run and produce real output" question that round 1's guard
+// tests answered now applies to THAT file instead — see "the real CLI
+// process" describe block near the end of this suite, which spawns the
+// actual `npm-audit-gate-cli.mjs` (not a guard-only fixture) as a real
+// child `node` process through several invocation forms, exactly the
+// reproduction that caught the original bug.
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { fileURLToPath } from 'node:url'
 
 import {
   evaluateGate,
   extractAdvisories,
   formatReport,
-  isMainModule,
   MAX_WAIVER_HORIZON_DAYS,
   parseAllowlist,
   parseArgs,
@@ -50,7 +56,8 @@ import {
 } from './npm-audit-gate.mjs'
 
 const TODAY = new Date('2026-08-10T12:00:00Z')
-const SCRIPT_PATH = fileURLToPath(new URL('./npm-audit-gate.mjs', import.meta.url))
+const CLI_SCRIPT_PATH = fileURLToPath(new URL('./npm-audit-gate-cli.mjs', import.meta.url))
+const LIB_SCRIPT_PATH = fileURLToPath(new URL('./npm-audit-gate.mjs', import.meta.url))
 
 // A real `npm audit --json` shape (auditReportVersion 2, npm 11.x),
 // captured against a scratch project seeded with a known-vulnerable
@@ -163,21 +170,85 @@ describe('extractAdvisories', () => {
     assert.throws(() => extractAdvisories(audit), /references "nonexistent-package", which is not itself a reported vulnerability/)
   })
 
-  it('throws when every "via" is a closed loop of valid-looking string references with no terminal advisory object (metadata cross-check)', () => {
+  it('throws when every "via" is a closed loop of valid-looking string references with no terminal advisory object (reachability invariant)', () => {
     // Both string references here DO resolve to real vulnerabilities-map
     // keys (so the dangling-reference check above does not fire), but
-    // neither entry ever carries a real advisory object — the closed loop
-    // extracts zero advisories despite metadata.total reporting 2. This is
-    // exactly the belt-and-suspenders case the metadata cross-check exists
-    // to catch.
+    // neither entry ever carries a real advisory object, directly or
+    // transitively — a and b resolve only to each other, forever. Exactly
+    // the round-1 "belt-and-suspenders" cross-check's blind spot (PR #193
+    // review round 2): this audit has NO metadata at all, so the old
+    // `reportedTotal > 0` check never even ran, yet extraction still
+    // yields zero advisories. The reachability invariant catches it
+    // independent of metadata.
     const audit = {
       vulnerabilities: {
         a: { name: 'a', severity: 'high', via: ['b'] },
         b: { name: 'b', severity: 'high', via: ['a'] },
       },
-      metadata: { vulnerabilities: { total: 2 } },
     }
-    assert.throws(() => extractAdvisories(audit), /metadata reports 2 vulnerabilities but no advisory could be extracted/)
+    assert.throws(() => extractAdvisories(audit), /"a" resolves to no real advisory, directly or transitively/)
+  })
+
+  it('throws when SOME packages resolve fine and others are a closed loop (partial-extraction blind spot, PR #193 review round 2)', () => {
+    // The reviewer's second crafted proof: round 1's check only fired when
+    // `advisories.size === 0` OVERALL, so a report where "c" resolves fine
+    // while "a"/"b" loop forever slipped through — `metadata.total: 3`
+    // even nominally "matches" the package count, so neither round-1 check
+    // would have caught this. The reachability invariant checks EVERY
+    // package individually, so it still throws for "a" (and "b").
+    const audit = {
+      vulnerabilities: {
+        a: { name: 'a', severity: 'high', via: ['b'] },
+        b: { name: 'b', severity: 'high', via: ['a'] },
+        c: {
+          name: 'c',
+          severity: 'high',
+          via: [{ source: 1, name: 'c', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }],
+        },
+      },
+      metadata: { vulnerabilities: { total: 3 } },
+    }
+    assert.throws(() => extractAdvisories(audit), /"a" resolves to no real advisory, directly or transitively/)
+  })
+
+  it('throws when "metadata.vulnerabilities.total" is missing, even on an otherwise well-formed, fully-resolvable report', () => {
+    const audit = {
+      vulnerabilities: {
+        somepkg: {
+          name: 'somepkg',
+          via: [{ source: 1, name: 'somepkg', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }],
+        },
+      },
+      // no `metadata` at all
+    }
+    assert.throws(() => extractAdvisories(audit), /"metadata.vulnerabilities.total" is missing or not a number/)
+  })
+
+  it('throws when "metadata.vulnerabilities.total" is a STRING rather than a number (PR #193 review round 2)', () => {
+    // The reviewer's third crafted variant: `total: "2"` (matching the
+    // package count as a STRING) must still fail — mandatory means
+    // type-checked, not just "present and falsy-or-not".
+    const audit = {
+      vulnerabilities: {
+        a: { name: 'a', severity: 'high', via: [{ source: 1, name: 'a', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }] },
+        b: { name: 'b', severity: 'high', via: [{ source: 2, name: 'b', url: 'https://github.com/advisories/GHSA-dddd-eeee-ffff', severity: 'high', title: 't' }] },
+      },
+      metadata: { vulnerabilities: { total: '2' } },
+    }
+    assert.throws(() => extractAdvisories(audit), /"metadata.vulnerabilities.total" is missing or not a number/)
+  })
+
+  it('throws when "metadata.vulnerabilities.total" is numeric but does not match the package count', () => {
+    const audit = {
+      vulnerabilities: {
+        somepkg: {
+          name: 'somepkg',
+          via: [{ source: 1, name: 'somepkg', url: 'https://github.com/advisories/GHSA-aaaa-bbbb-cccc', severity: 'high', title: 't' }],
+        },
+      },
+      metadata: { vulnerabilities: { total: 5 } },
+    }
+    assert.throws(() => extractAdvisories(audit), /metadata reports 5 vulnerable package\(s\) but "vulnerabilities" lists 1/)
   })
 
   it('throws on npm audit\'s own error shape rather than treating it as clean', () => {
@@ -674,64 +745,20 @@ describe('run (full injectable orchestration)', () => {
   })
 })
 
-describe('isMainModule (the entry-guard fail-open fix, PR #193 review)', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'npm-audit-gate-mainmodule-'))
-  const realFile = path.join(dir, 'script.mjs')
-  writeFileSync(realFile, '// fixture')
-  // A real `import.meta.url` is always a well-formed, percent-encoded file
-  // URL (that's how Node's ESM loader produces it) — build the fixture the
-  // same way, via pathToFileURL, rather than naive string concatenation
-  // (which is exactly the bug this function fixes).
-  const realUrl = pathToFileURL(realpathSync(realFile)).href
-
-  it('true when argv[1] IS the file (direct invocation)', () => {
-    assert.equal(isMainModule(realUrl, realFile), true)
-  })
-
-  it('true when argv[1] is a SYMLINK to the file — this is the bug the naive string comparison missed', () => {
-    const link = path.join(dir, 'link.mjs')
-    symlinkSync(realFile, link)
-    assert.equal(isMainModule(realUrl, link), true)
-    // The naive comparison this replaced would have failed here:
-    assert.notEqual(realUrl, `file://${link}`)
-  })
-
-  it('true when argv[1] is a path containing a space — percent-encoding must not break the match', () => {
-    const spacedDir = mkdtempSync(path.join(tmpdir(), 'npm audit gate space '))
-    const spacedFile = path.join(spacedDir, 'script.mjs')
-    writeFileSync(spacedFile, '// fixture')
-    const spacedUrl = pathToFileURL(realpathSync(spacedFile)).href
-    assert.equal(isMainModule(spacedUrl, spacedFile), true)
-    // The naive comparison this replaced would have failed here: a real
-    // import.meta.url percent-encodes the space, but building a URL by
-    // naive template-string concatenation of the raw path does not — the
-    // two never matched under the old `import.meta.url === \`file://\${argv[1]}\``
-    // check.
-    assert.notEqual(spacedUrl, `file://${spacedFile}`)
-  })
-
-  it('false when argv[1] is missing (e.g. imported, not run as a script)', () => {
-    assert.equal(isMainModule(realUrl, undefined), false)
-    assert.equal(isMainModule(realUrl, null), false)
-  })
-
-  it('false when argv[1] points at a different, unrelated file', () => {
-    const other = path.join(dir, 'other.mjs')
-    writeFileSync(other, '// fixture')
-    assert.equal(isMainModule(realUrl, other), false)
-  })
-
-  it('false (not throwing) when argv[1] does not resolve to a real file on disk', () => {
-    assert.equal(isMainModule(realUrl, path.join(dir, 'does-not-exist.mjs')), false)
-  })
-})
-
-describe('the real CLI process, invoked through a symlink (end-to-end reproduction of the #193 fail-open)', () => {
-  // This is deliberately a REAL child `node` process, not a unit test of
-  // isMainModule alone: the bug this guards against is specifically that
-  // running the actual script file through a symlinked path silently exited
-  // 0 with NO output. A fake `npm` on PATH stands in for the real binary so
-  // this needs no real project/lockfile and stays fast and deterministic.
+describe('the real CLI process (npm-audit-gate-cli.mjs), invoked several ways (PR #193 review round 2)', () => {
+  // Round 1 fixed a guard in npm-audit-gate.mjs that silently failed open
+  // (exit 0, NO output) when invoked through a symlink or a spaced path.
+  // Round 2's reviewer found one further miss (`--preserve-symlinks-main`)
+  // and made the structural point that ANY guard's failure mode is
+  // "silently never runs" — the wrong default for a deny-by-default
+  // security gate. So npm-audit-gate.mjs now has NO guard and NO `main()`
+  // at all; npm-audit-gate-cli.mjs is a tiny, unconditional, unguarded
+  // entry point. These tests spawn THAT file as a REAL child `node`
+  // process (not a unit test of guard logic, because there is none left to
+  // unit-test) through the two forms that previously broke the guard
+  // (symlink, spaced path) plus a direct invocation for a baseline — a
+  // fake `npm` on PATH stands in for the real binary so this needs no real
+  // project/lockfile and stays fast and deterministic.
   function makeFakeNpm(dir, json, exitCode) {
     const binDir = path.join(dir, 'bin')
     mkdirSync(binDir, { recursive: true })
@@ -741,39 +768,119 @@ describe('the real CLI process, invoked through a symlink (end-to-end reproducti
     return binDir
   }
 
-  function runViaSymlink(dir, binDir) {
-    const link = path.join(dir, 'npm-audit-gate-link.mjs')
-    symlinkSync(SCRIPT_PATH, link)
-    return spawnSync('node', [link], {
-      cwd: dir,
+  function runCli(scriptPath, cwd, binDir) {
+    return spawnSync('node', [scriptPath], {
+      cwd,
       encoding: 'utf8',
       env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
     })
   }
 
-  it('clean audit through a symlink: real output, exit 0 (not a silent pass with no output)', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'npm-audit-gate-e2e-clean-'))
+  function makeFixtureDir(prefix) {
+    const dir = mkdtempSync(path.join(tmpdir(), prefix))
     writeFileSync(path.join(dir, 'audit-allowlist.json'), EMPTY_ALLOWLIST)
+    return dir
+  }
+
+  it('direct invocation, clean audit: real output, exit 0', () => {
+    const dir = makeFixtureDir('npm-audit-gate-cli-direct-clean-')
     const binDir = makeFakeNpm(dir, JSON.stringify(CLEAN_AUDIT), 0)
 
-    const result = runViaSymlink(dir, binDir)
+    const result = runCli(CLI_SCRIPT_PATH, dir, binDir)
 
     assert.equal(result.status, 0)
     assert.match(result.stdout, /npm-audit-gate: PASS/)
   })
 
-  it('vulnerable audit through a symlink: real output naming the advisory, exit 1', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'npm-audit-gate-e2e-vuln-'))
+  it('direct invocation, vulnerable audit: real output naming the advisory, exit 1', () => {
+    const dir = makeFixtureDir('npm-audit-gate-cli-direct-vuln-')
+    const findings = auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')
+    const binDir = makeFakeNpm(dir, JSON.stringify(findings), 1)
+
+    const result = runCli(CLI_SCRIPT_PATH, dir, binDir)
+
+    assert.notEqual(result.status, 0)
+    assert.match(result.stdout, /GHSA-AAAA-BBBB-CCCC/)
+    assert.match(result.stdout, /npm-audit-gate: FAIL/)
+  })
+
+  it('invoked through a SYMLINK, clean audit: real output, exit 0 (not a silent pass with no output)', () => {
+    const dir = makeFixtureDir('npm-audit-gate-cli-symlink-clean-')
+    const binDir = makeFakeNpm(dir, JSON.stringify(CLEAN_AUDIT), 0)
+    const link = path.join(dir, 'npm-audit-gate-link.mjs')
+    symlinkSync(CLI_SCRIPT_PATH, link)
+
+    const result = runCli(link, dir, binDir)
+
+    assert.equal(result.status, 0)
+    assert.match(result.stdout, /npm-audit-gate: PASS/)
+  })
+
+  it('invoked through a SYMLINK, vulnerable audit: real output naming the advisory, exit 1', () => {
+    const dir = makeFixtureDir('npm-audit-gate-cli-symlink-vuln-')
+    const findings = auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')
+    const binDir = makeFakeNpm(dir, JSON.stringify(findings), 1)
+    const link = path.join(dir, 'npm-audit-gate-link.mjs')
+    symlinkSync(CLI_SCRIPT_PATH, link)
+
+    const result = runCli(link, dir, binDir)
+
+    // The bug this reproduces (round 1): BEFORE the fix, this would be
+    // status 0 with EMPTY stdout — main() never ran because the entry-guard
+    // comparison missed through the symlink. Now there is no guard to miss.
+    assert.notEqual(result.status, 0)
+    assert.match(result.stdout, /GHSA-AAAA-BBBB-CCCC/)
+    assert.match(result.stdout, /npm-audit-gate: FAIL/)
+  })
+
+  it('invoked from a working directory containing a SPACE, clean audit: real output, exit 0', () => {
+    // Round 1 fixed this case for the (now-removed) guard via unit tests
+    // only; round 2 explicitly asks for the same real-child-process
+    // treatment the symlink case got, not just unit coverage.
+    const parent = mkdtempSync(path.join(tmpdir(), 'npm audit gate cli space '))
+    const dir = path.join(parent, 'work dir')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'audit-allowlist.json'), EMPTY_ALLOWLIST)
+    const binDir = makeFakeNpm(dir, JSON.stringify(CLEAN_AUDIT), 0)
+
+    const result = runCli(CLI_SCRIPT_PATH, dir, binDir)
+
+    assert.equal(result.status, 0)
+    assert.match(result.stdout, /npm-audit-gate: PASS/)
+  })
+
+  it('invoked from a working directory containing a SPACE, vulnerable audit: real output naming the advisory, exit 1', () => {
+    const parent = mkdtempSync(path.join(tmpdir(), 'npm audit gate cli space '))
+    const dir = path.join(parent, 'work dir')
+    mkdirSync(dir, { recursive: true })
     writeFileSync(path.join(dir, 'audit-allowlist.json'), EMPTY_ALLOWLIST)
     const findings = auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')
     const binDir = makeFakeNpm(dir, JSON.stringify(findings), 1)
 
-    const result = runViaSymlink(dir, binDir)
+    const result = runCli(CLI_SCRIPT_PATH, dir, binDir)
 
-    // The bug this reproduces: BEFORE the fix, this would be status 0 with
-    // EMPTY stdout — main() never ran because the entry-guard comparison
-    // missed through the symlink. Asserting non-zero + real content is the
-    // literal regression guard.
+    assert.notEqual(result.status, 0)
+    assert.match(result.stdout, /GHSA-AAAA-BBBB-CCCC/)
+    assert.match(result.stdout, /npm-audit-gate: FAIL/)
+  })
+
+  it('the CLI script ITSELF invoked via a path containing a space (not just its cwd): real output, exit 1', () => {
+    // Belt-and-suspenders on top of the cwd-has-a-space cases above: this
+    // copies the CLI file (and, via a relative import, the library) into a
+    // spaced directory and invokes THAT path directly, closing the gap
+    // between "spaced cwd" and "spaced script path" the way the symlink
+    // cases already cover "symlinked script path" specifically.
+    const spacedDir = mkdtempSync(path.join(tmpdir(), 'npm audit gate script space '))
+    const cliCopy = path.join(spacedDir, 'npm-audit-gate-cli.mjs')
+    const libCopy = path.join(spacedDir, 'npm-audit-gate.mjs')
+    writeFileSync(cliCopy, readFileSync(CLI_SCRIPT_PATH, 'utf8'))
+    writeFileSync(libCopy, readFileSync(LIB_SCRIPT_PATH, 'utf8'))
+    writeFileSync(path.join(spacedDir, 'audit-allowlist.json'), EMPTY_ALLOWLIST)
+    const findings = auditWithFindings('https://github.com/advisories/GHSA-aaaa-bbbb-cccc')
+    const binDir = makeFakeNpm(spacedDir, JSON.stringify(findings), 1)
+
+    const result = runCli(cliCopy, spacedDir, binDir)
+
     assert.notEqual(result.status, 0)
     assert.match(result.stdout, /GHSA-AAAA-BBBB-CCCC/)
     assert.match(result.stdout, /npm-audit-gate: FAIL/)

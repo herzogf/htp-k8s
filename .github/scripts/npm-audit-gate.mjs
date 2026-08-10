@@ -25,21 +25,34 @@
 // Deliberately a pure, importable core (`extractAdvisories`, `parseAllowlist`,
 // `evaluateGate`, `formatReport`) PLUS an injectable orchestrator (`run`) —
 // same shape as `compute-image-tags.mjs` for the pure core, extended here
-// (PR #193 review) because the CLI layer itself (argv parsing, spawning
-// npm, reading the allowlist file, the ESM entry-point guard) is exactly
-// where a fail-open bug lived and unit tests must reach it too, not just
-// the pure functions underneath it. `npm-audit-gate.test.mjs` covers both
-// layers without ever touching a real npm process or the real filesystem.
+// (PR #193 review round 1) because the CLI layer itself (argv parsing,
+// spawning npm, reading the allowlist file) is exactly where a fail-open bug
+// lived and unit tests must reach it too, not just the pure functions
+// underneath it. `npm-audit-gate.test.mjs` covers both layers without ever
+// touching a real npm process or the real filesystem.
 //
-// Usage: node npm-audit-gate.mjs [--cwd <dir>] [--allowlist <path>]
+// THIS FILE HAS NO ENTRY-POINT GUARD AND NO `main()` (PR #193 review round
+// 2). Round 1 fixed a naive `import.meta.url === \`file://${process.argv[1]}\``
+// guard that silently failed open — exited 0 with NO output — when invoked
+// through a symlink or a path containing a space; the fix (comparing a
+// realpath'd, properly-encoded URL) closed both, but the reviewer found one
+// residual miss (`node --preserve-symlinks-main`) and made the sharper
+// point: the failure mode of ANY such guard is "silently never runs" in a
+// deny-by-default security gate, however narrow the remaining aperture. A
+// guard that doesn't exist cannot miss. So this file is a pure library with
+// no side effect on import, and `npm-audit-gate-cli.mjs` — a few lines,
+// unconditional, unguarded — is the only thing CI actually invokes. Import
+// `run()` (or the individual functions) directly for tests; run the CLI
+// file directly to execute the gate for real.
+//
+// Usage (via the CLI file): node npm-audit-gate-cli.mjs [--cwd <dir>] [--allowlist <path>]
 //   Run from `web/` (matches the CI step's job-default working-directory)
 //   with no flags: spawns `npm audit --json` in the current directory and
 //   reads ./audit-allowlist.json. Both are overridable for local use.
 
 import { spawnSync } from 'node:child_process'
-import { readFileSync, realpathSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 const GHSA_RE = /GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}/i
 const GHSA_EXACT_RE = /^GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}$/i
@@ -71,7 +84,14 @@ function daysBetween(dateIso, today) {
  * 2) always nests advisory detail — including the GHSA id, only ever present
  * as a URL — under each vulnerable package's `via` array. Anything that
  * doesn't match that shape is a finding this script cannot safely gate on,
- * so it throws rather than silently treating the report as clean.
+ * so it throws rather than silently treating the report as clean. Two
+ * structural invariants are enforced unconditionally (PR #193 review round
+ * 2): every key in `vulnerabilities` must resolve to a real advisory,
+ * directly or transitively through its `via` chain (a closed loop or a
+ * dead end fails, even if OTHER packages in the same report resolve fine);
+ * and `metadata.vulnerabilities.total` must be present, numeric, and equal
+ * to the package count — not merely "greater than zero when nothing was
+ * extracted", which missed both of the above.
  *
  * @param {unknown} auditJson - parsed `npm audit --json` output.
  * @returns {Map<string, {id: string, severity: string, title: string, packages: Set<string>}>}
@@ -98,6 +118,13 @@ export function extractAdvisories(auditJson) {
 
   const vulnerabilities = auditJson.vulnerabilities
   const advisories = new Map()
+  // Packages with at least one real advisory OBJECT in their own "via"
+  // array (as opposed to only string references to other packages) — the
+  // "terminal" nodes the reachability check below walks string chains
+  // toward. Tracked separately from `advisories` because more than one
+  // package can resolve to the same GHSA id (dedup), but every package
+  // still needs its OWN resolvability checked.
+  const directlyResolved = new Set()
 
   for (const [pkgName, vuln] of Object.entries(vulnerabilities)) {
     if (!vuln || typeof vuln !== 'object' || !Array.isArray(vuln.via) || vuln.via.length === 0) {
@@ -113,9 +140,12 @@ export function extractAdvisories(auditJson) {
       // one is skipped rather than double-counted. But the reference must
       // actually resolve: a string naming a package that isn't itself a key
       // in `vulnerabilities` is a malformed/incomplete report (PR #193
-      // review) — silently skipping it would mean a report whose `via`
-      // chains are ALL such dangling strings extracts zero advisories and
-      // gates GREEN despite reporting vulnerabilities. Fail closed instead.
+      // review round 1) — silently skipping it would mean a report whose
+      // `via` chains are ALL such dangling strings extracts zero advisories
+      // and gates GREEN despite reporting vulnerabilities. Fail closed
+      // instead. (Whether the reference resolves to a REAL advisory,
+      // transitively, is checked separately below — this only checks that
+      // the name exists at all.)
       if (typeof via === 'string') {
         if (!Object.prototype.hasOwnProperty.call(vulnerabilities, via)) {
           throw new Error(
@@ -136,6 +166,7 @@ export function extractAdvisories(auditJson) {
         )
       }
       const id = match[0].toUpperCase()
+      directlyResolved.add(pkgName)
 
       if (!advisories.has(id)) {
         advisories.set(id, {
@@ -149,17 +180,64 @@ export function extractAdvisories(auditJson) {
     }
   }
 
-  // Belt-and-suspenders cross-check against npm's own summary count (PR
-  // #193 review): if npm itself says at least one vulnerability was found
-  // but nothing could be extracted, some shape this function assumes didn't
-  // hold — fail rather than silently report a clean audit. The dangling-
-  // reference check above should already catch the concrete case that
-  // motivated this, but this guards against any OTHER way the same failure
-  // mode (findings exist, extraction yields none) could occur.
+  // Structural invariant (PR #193 review round 2): every key in
+  // `vulnerabilities` must resolve to at least one real advisory, either
+  // directly or transitively through its "via" string chain. Round 1's
+  // check (fail only when `advisories.size === 0` overall) missed two
+  // sibling shapes: a closed loop of string references with NO metadata at
+  // all (the "vulnerabilities" cross-check never even ran), and a PARTIAL
+  // loss where some packages resolve fine and others don't (the non-empty
+  // `advisories` map masked the unresolved ones). This walks each
+  // package's chain with cycle detection (`visiting`) — a cycle among
+  // packages that never reaches a real advisory resolves to `false`, not a
+  // silent pass.
+  const resolvable = new Map()
+  function isResolvable(pkgName, visiting) {
+    if (resolvable.has(pkgName)) return resolvable.get(pkgName)
+    if (directlyResolved.has(pkgName)) {
+      resolvable.set(pkgName, true)
+      return true
+    }
+    if (visiting.has(pkgName)) return false // cycle on this path; don't memoize yet — a sibling edge may still resolve
+    visiting.add(pkgName)
+    let result = false
+    for (const via of vulnerabilities[pkgName].via) {
+      if (typeof via === 'string' && isResolvable(via, visiting)) {
+        result = true
+        break
+      }
+    }
+    visiting.delete(pkgName)
+    resolvable.set(pkgName, result)
+    return result
+  }
+  for (const pkgName of Object.keys(vulnerabilities)) {
+    if (!isResolvable(pkgName, new Set())) {
+      throw new Error(
+        `npm audit JSON: "${pkgName}" resolves to no real advisory, directly or transitively through its "via" chain — malformed/incomplete report, refusing to treat this as clean (fail closed).`,
+      )
+    }
+  }
+
+  // Mandatory cross-check against npm's own summary count (PR #193 review
+  // round 2). Real npm audit (auditReportVersion 2, npm 11.x) always sets
+  // `metadata.vulnerabilities.total` to the number of top-level vulnerable
+  // PACKAGES — i.e. `Object.keys(vulnerabilities).length` — not the number
+  // of distinct advisories. Required unconditionally (missing or
+  // non-numeric fails closed, regardless of whether the reachability
+  // invariant above already passed) and compared for an EXACT match, so a
+  // tampered or truncated `vulnerabilities` object can't slip past just
+  // because every key it DOES list happens to resolve.
   const reportedTotal = auditJson.metadata?.vulnerabilities?.total
-  if (typeof reportedTotal === 'number' && reportedTotal > 0 && advisories.size === 0) {
+  if (typeof reportedTotal !== 'number') {
     throw new Error(
-      `npm audit JSON: metadata reports ${reportedTotal} vulnerabilit${reportedTotal === 1 ? 'y' : 'ies'} but no advisory could be extracted from "vulnerabilities" — unrecognized report shape, refusing to treat this as clean (fail closed).`,
+      'npm audit JSON: "metadata.vulnerabilities.total" is missing or not a number — cannot cross-check the report, refusing to treat this as clean (fail closed).',
+    )
+  }
+  const packageCount = Object.keys(vulnerabilities).length
+  if (reportedTotal !== packageCount) {
+    throw new Error(
+      `npm audit JSON: metadata reports ${reportedTotal} vulnerable package(s) but "vulnerabilities" lists ${packageCount} — mismatched report, refusing to treat this as clean (fail closed).`,
     )
   }
 
@@ -465,7 +543,9 @@ export function readAllowlist(allowlistPath, readFile = readFileSync, today = ne
  * npm, reading the allowlist, the clock) injectable — this is what
  * `npm-audit-gate.test.mjs` exercises as "the CLI layer" without ever
  * spawning a real npm process or touching the real filesystem (PR #193
- * review). `main()` below is the real, non-injected wiring.
+ * review round 1). `npm-audit-gate-cli.mjs` is the real, non-injected
+ * wiring — see this file's header for why THIS file has no entry-point
+ * guard, and no `main()`, at all (PR #193 review round 2).
  *
  * @param {object} [opts]
  * @param {string[]} [opts.argv]
@@ -482,45 +562,4 @@ export function run({ argv = process.argv.slice(2), spawn = spawnSync, readFile 
   const waivers = readAllowlist(args.allowlist, readFile, today)
   const result = evaluateGate(advisories, waivers, today)
   return { ok: result.ok, report: formatReport(result, today) }
-}
-
-async function main() {
-  const { ok, report } = run()
-  console.log(report)
-  process.exitCode = ok ? 0 : 1
-}
-
-// Robust "is this file the one Node actually invoked" check (PR #193
-// review — fail-open finding). The naive `import.meta.url ===
-// \`file://${process.argv[1]}\`` breaks two ways this matters for a
-// security gate: (1) Node resolves the ESM entry point's real path, so
-// invoking this script through a symlink makes `import.meta.url` reflect
-// the symlink TARGET while `process.argv[1]` stays the symlink path — they
-// never match; (2) a path containing characters like a space is
-// percent-encoded in a URL (`%20`) but not in `process.argv[1]`, so the
-// naive template-string comparison never matches either. Either failure
-// means `main()` silently never runs — a deny-by-default gate that exits 0
-// with no output. Fixed the way Node's own docs recommend: realpath
-// `process.argv[1]` (resolving any symlink) and compare its FILE URL form
-// (so encoding matches) against `import.meta.url`. Verified empirically
-// against direct invocation, a symlinked path, and a path with a space —
-// see npm-audit-gate.test.mjs.
-export function isMainModule(metaUrl, argv1) {
-  if (argv1 == null) return false
-  let resolvedUrl
-  try {
-    resolvedUrl = pathToFileURL(realpathSync(argv1)).href
-  } catch {
-    // argv1 doesn't resolve to a real file on disk — this process cannot be
-    // "the" module currently executing from that path, so it is not main.
-    return false
-  }
-  return metaUrl === resolvedUrl
-}
-
-if (isMainModule(import.meta.url, process.argv[1])) {
-  main().catch((err) => {
-    console.error(`::error::npm-audit-gate: ${err instanceof Error ? err.message : err}`)
-    process.exitCode = 1
-  })
 }
