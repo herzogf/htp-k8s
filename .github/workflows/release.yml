@@ -150,8 +150,18 @@ jobs:
           #     enforcement point this workflow can change on its own. It is
           #     NOT (yet) one of ruleset 18831212's own required-status-check
           #     contexts — that's a repository setting, not something a
-          #     workflow file controls, and is a maintainer action still
-          #     outstanding (see issue #195's PR).
+          #     workflow file controls, and is a maintainer action tracked
+          #     separately in issue #199.
+          #
+          #   Consequence of adding a NEW name here: a commit whose build.yml
+          #   run predates this list's merge never posted a "Repo scripts
+          #   (Node)" check-run at all, so it hits the `missing` branch below,
+          #   not `failed` — the poll below runs out its full 20-minute
+          #   timeout and then fails loudly (see the timeout branch further
+          #   down) rather than silently passing. That's the correct
+          #   fail-safe behavior, just a slow one; it only bites a tag pushed
+          #   at an old `main` commit, never a tag pushed at current `main`
+          #   HEAD after this merge (which always has the check).
           required=(
             "Detect changed paths"
             "Backend (Go)"
@@ -518,7 +528,8 @@ jobs:
       # unit-tested JS module rather than inline shell specifically because
       # this workflow is tag-triggered and can NEVER be exercised by PR CI
       # (issue #156's lesson) — the module is what gets real PR-time
-      # coverage instead (build.yml's Frontend (Node) job).
+      # coverage instead (build.yml's path-gated `Repo scripts (Node)` job,
+      # issue #195).
       #
       # Reads tags from THIS checkout (fetch-depth: 0 above) rather than
       # querying the registry: cheaper, and avoids an extra authenticated

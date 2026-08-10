@@ -31,16 +31,8 @@ name: Nightly
 #          issue #195) ARE gated in `build.yml`, each behind its own
 #          `changes` output (`nondocs` for the first three — issue #76,
 #          whose whole point was skipping heavy/security work on a
-#          docs-only PR; `scripts` — `.github/**` — for the fourth, issue
-#          #195). Running them here unconditionally defeats each of those
-#          skips once a day. `scripts`' own unit tests also exercise real
-#          `node --test`/`spawnSync`/PATH-shim/symlink behavior against
-#          whatever Node the runner image currently ships (build.yml pins
-#          `node-version: "24"`, a floating major) rather than pure,
-#          environment-independent math — another reason a PR-time-only,
-#          change-gated run isn't sufficient on its own, same spirit as the
-#          TIME gap below even though its trigger is "the runner image
-#          moved," not "a vulnerability database moved."
+#          docs-only PR; `.github/**` for the fourth, issue #195). Running
+#          them here unconditionally defeats each of those skips once a day.
 #
 #        * TIME gap — `backend` (incl. govulncheck) and `frontend` (incl.
 #          npm audit) are NOT gated; they already run on every PR. What
@@ -51,6 +43,10 @@ name: Nightly
 #          notices: in issue #187 `main` sat untouched after 2026-07-20,
 #          this job went red on 2026-07-25 (2 advisories, 4 by the time
 #          anyone looked), and it stayed the only signal for 17 runs.
+#          `scripts` has a smaller version of this same time drift too: its
+#          `actions/setup-node` pin (`node-version: "24"`) resolves a fresh
+#          Node 24 minor/patch each run, which its PATH-gated PR-time-only
+#          coverage wouldn't otherwise re-exercise absent a script change.
 #   C. Visual coverage for the four-face Panel wrap (#59/PR #162) — the
 #      shared PR-time KWOK seed (test/e2e/kwok/seed.sh, ~30 pods/6 nodes)
 #      cannot engage panelLayout.ts's wrap (~34 pods/Tower) or height-growth

@@ -72,8 +72,8 @@ tasks:
       # now call this target instead).
       #
       # Scoped to our own Go packages rather than "./..." for the same
-      # reason as `test`, above: web/node_modules can contain stray vendored
-      # .go files (e.g. the "flatted" package). In CI that directory already
+      # reason as `test`, above (the stray-vendored-.go-files risk from
+      # web/node_modules). The new fact here: in CI that directory already
       # exists by the time this runs regardless of whether `web:test` ran —
       # created by the Backend job's own `Build` step (`task build` ->
       # `release:frontend` -> `web:build`, which depends on `web:install`).

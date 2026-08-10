@@ -14,10 +14,14 @@ name: CI
 #     *operational* failure fails the check — see #69/#70) — run as their own
 #     separate jobs so the fast tier stays fast.
 #
-# IMPORTANT: the job `name:` fields below are the branch-protection
+# IMPORTANT: most of the job `name:` fields below are the branch-protection
 # required-status-check CONTEXTS (ruleset 18831212 on `main`, see
-# docs/agents/findings.md). Never rename a job — a renamed job makes its
-# required check permanently pending, which makes every PR unmergeable.
+# docs/agents/findings.md). Never rename any of them — a renamed job makes
+# its required check permanently pending, which makes every PR unmergeable.
+# Exception: `scripts` (`Repo scripts (Node)`, issue #195) is NOT yet one of
+# the ruleset's contexts — adding it there is a repository setting change
+# tracked separately in issue #199 — even though it is already required by
+# `release.yml`'s own `verify-green-commit` guard.
 
 on:
   pull_request:
@@ -38,10 +42,12 @@ permissions:
 jobs:
   # ---------------------------------------------------------------------------
   # Docs-only fast path (issue #76, extended to push-to-main by issue #95). A
-  # cheap gate job that reports whether any NON-docs path changed. The three
-  # heavy jobs below (integration / e2e / container-scan) are gated on its
-  # output so a docs-only PR *or* a docs-only push to `main` skips ~10-15 min
-  # of cluster-spinning.
+  # cheap gate job with TWO outputs: `nondocs` (any NON-docs path changed)
+  # and `scripts` (anything under `.github/**` changed — issue #195). Four
+  # jobs below are gated on these: the three heavy ones (integration / e2e /
+  # container-scan) on `nondocs`, so a docs-only PR *or* push to `main`
+  # skips ~10-15 min of cluster-spinning; `scripts` (`Repo scripts (Node)`)
+  # on its own output, so a PR that doesn't touch `.github/**` skips it too.
   #
   # DO NOT "simplify" this into `on.pull_request.paths-ignore` / `on.push.paths`.
   # `main` has STRICT required status checks (ruleset 18831212): Backend (Go),
