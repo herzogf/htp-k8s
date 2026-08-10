@@ -223,8 +223,14 @@ jobs:
         working-directory: test/e2e/capture
         run: task test
 
-      - name: npm audit
-        run: npm audit
+      # Blocking here too (matches build.yml's PR-time posture), gated
+      # through the same `.github/scripts/npm-audit-gate.mjs` time-boxed
+      # allowlist (issue #189) — see build.yml's Frontend (Node) job for the
+      # full rationale. A newly-published advisory against unchanged
+      # dependencies should still fail this job loudly unless it's covered
+      # by a non-expired waiver in web/audit-allowlist.json.
+      - name: npm audit (gated by web/audit-allowlist.json)
+        run: node ../.github/scripts/npm-audit-gate.mjs
 
   integration:
     name: 'Nightly: Backend integration (kind + KWOK)'

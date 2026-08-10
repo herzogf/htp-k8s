@@ -254,11 +254,28 @@ jobs:
         working-directory: .
         run: node --test .github/scripts/compute-image-tags.test.mjs
 
+      # PR-time coverage for the npm-audit-gate script the very next step
+      # runs (issue #189) — same rationale as the tag-computation tests
+      # immediately above: explicit file, not a glob, so a rename/move can't
+      # silently stop covering it.
+      - name: npm-audit-gate tests (.github/scripts)
+        working-directory: .
+        run: node --test .github/scripts/npm-audit-gate.test.mjs
+
       # Source-level CVE scanning is blocking here (unlike the report-only
-      # Trivy container scan) per issue #1 and ADR-0005. npm audit's default
-      # exit code already fails on any reported vulnerability.
-      - name: npm audit
-        run: npm audit
+      # Trivy container scan) per issue #1 and ADR-0005. Gated through
+      # `.github/scripts/npm-audit-gate.mjs` (issue #189) rather than bare
+      # `npm audit`: default stays deny (every reported advisory still fails
+      # the build) UNLESS it is covered by a non-expired, reasoned, tracked
+      # waiver in web/audit-allowlist.json — the escape hatch for the
+      # unfixable-upstream-CVE case ADR-0005 already accepts for the
+      # container layer, extended here to source-level npm findings, which
+      # (unlike govulncheck's reachability analysis) have no other way out.
+      # The allowlist ships EMPTY, so this behaves exactly like bare
+      # `npm audit` today — see the script's own header and
+      # docs/agents/findings.md for how to add a waiver.
+      - name: npm audit (gated by web/audit-allowlist.json)
+        run: node ../.github/scripts/npm-audit-gate.mjs
 
   # ---------------------------------------------------------------------------
   # Heavier, second-tier checks (issue #8). Separate jobs so the fast tier
