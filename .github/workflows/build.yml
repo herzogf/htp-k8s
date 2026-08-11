@@ -14,10 +14,14 @@ name: CI
 #     *operational* failure fails the check — see #69/#70) — run as their own
 #     separate jobs so the fast tier stays fast.
 #
-# IMPORTANT: the job `name:` fields below are the branch-protection
+# IMPORTANT: most of the job `name:` fields below are the branch-protection
 # required-status-check CONTEXTS (ruleset 18831212 on `main`, see
-# docs/agents/findings.md). Never rename a job — a renamed job makes its
-# required check permanently pending, which makes every PR unmergeable.
+# docs/agents/findings.md). Never rename any of them — a renamed job makes
+# its required check permanently pending, which makes every PR unmergeable.
+# Exception: `scripts` (`Repo scripts (Node)`, issue #195) is NOT yet one of
+# the ruleset's contexts — adding it there is a repository setting change
+# tracked separately in issue #199 — even though it is already required by
+# `release.yml`'s own `verify-green-commit` guard.
 
 on:
   pull_request:
@@ -38,10 +42,12 @@ permissions:
 jobs:
   # ---------------------------------------------------------------------------
   # Docs-only fast path (issue #76, extended to push-to-main by issue #95). A
-  # cheap gate job that reports whether any NON-docs path changed. The three
-  # heavy jobs below (integration / e2e / container-scan) are gated on its
-  # output so a docs-only PR *or* a docs-only push to `main` skips ~10-15 min
-  # of cluster-spinning.
+  # cheap gate job with TWO outputs: `nondocs` (any NON-docs path changed)
+  # and `scripts` (anything under `.github/**` changed — issue #195). Four
+  # jobs below are gated on these: the three heavy ones (integration / e2e /
+  # container-scan) on `nondocs`, so a docs-only PR *or* push to `main`
+  # skips ~10-15 min of cluster-spinning; `scripts` (`Repo scripts (Node)`)
+  # on its own output, so a PR that doesn't touch `.github/**` skips it too.
   #
   # DO NOT "simplify" this into `on.pull_request.paths-ignore` / `on.push.paths`.
   # `main` has STRICT required status checks (ruleset 18831212): Backend (Go),
@@ -76,6 +82,7 @@ jobs:
       pull-requests: read
     outputs:
       nondocs: ${{ steps.filter.outputs.nondocs }}
+      scripts: ${{ steps.filter.outputs.scripts }}
     steps:
       # dorny/paths-filter needs the repo checked out ONLY for its push-event
       # path (it diffs via local git commands there); the pull_request path
@@ -108,6 +115,37 @@ jobs:
               - '!**/*.md'
               - '!docs/**'
               - '!LICENSE'
+            # Gates the `scripts` job (issue #195; rationale on that job). A
+            # SINGLE pattern, deliberately — `.github/**`, not
+            # `.github/scripts/**`. Two reasons it must be this wide, not
+            # narrower:
+            #   1. This filter must obey the SAME rule stated above for
+            #      `nondocs`: "ANYTHING else runs the full suite: code,
+            #      web/, config, and ESPECIALLY .github/** (a workflow
+            #      change must never skip its own validation)". A workflow
+            #      edit under .github/workflows/ is exactly the case that
+            #      rule exists for, and it lives outside .github/scripts/.
+            #   2. Concretely: npm-audit-gate.test.mjs has a "workflow
+            #      wiring" suite that reads build.yml/nightly.yml and
+            #      asserts they invoke npm-audit-gate-cli.mjs rather than
+            #      the guard-less library directly. A PR that rewires those
+            #      workflow steps — this repo's own #198 did exactly that —
+            #      is precisely what that suite exists to catch, and a
+            #      .github/scripts/**-only filter would make it invisible to
+            #      exactly that PR (confirmed: #198 showed `Repo scripts
+            #      (Node)` skipping on itself before this fix).
+            # Do NOT add a second pattern to this list instead of widening
+            # this one: predicate-quantifier is 'every' for the WHOLE
+            # `with:` block above, and 'every' requires a changed file to
+            # match ALL patterns in a filter's list simultaneously (that's
+            # how `nondocs` combines its negations) — so two independent
+            # positive globs here (e.g. '.github/scripts/**' AND
+            # '.github/workflows/**') would each demand the other also
+            # match, which no real file satisfies, silently making this
+            # filter never true. One glob that already covers both
+            # directories avoids the trap entirely.
+            scripts:
+              - '.github/**'
 
   backend:
     name: Backend (Go)
@@ -169,8 +207,16 @@ jobs:
       - name: Vet
         run: task vet
 
+      # task test:go, not `task test` (issue #195): unqualified `task test`
+      # here resolves to the ROOT Taskfile's run-everything convenience —
+      # the entire Vitest/capture/script suites the Frontend job already ran
+      # — costing ~58s of pure duplication per run and making a
+      # frontend-only breakage redden this job (as happened on #182). The
+      # Build step above already builds and embeds the frontend
+      # (`release:frontend` -> `web:build`, `deps: [install]`), so
+      # web/node_modules exists here regardless.
       - name: Test
-        run: task test
+        run: task test:go
 
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. govulncheck's
@@ -244,24 +290,6 @@ jobs:
         working-directory: test/e2e/capture
         run: task test
 
-      # PR-time coverage for release.yml's tag-computation module (issue #64,
-      # rule + rationale: ADR-0005 "Moving image tags") — release.yml itself
-      # is tag-triggered and can never run on this PR (see the module's own
-      # header). Explicit file, not a glob: `node --test` exits 0 with zero
-      # tests run if a glob matches nothing, which would silently stop
-      # covering it the moment the file were ever renamed or moved.
-      - name: Release image-tag computation tests (.github/scripts)
-        working-directory: .
-        run: node --test .github/scripts/compute-image-tags.test.mjs
-
-      # PR-time coverage for the npm-audit-gate script the very next step
-      # runs (issue #189) — same rationale as the tag-computation tests
-      # immediately above: explicit file, not a glob, so a rename/move can't
-      # silently stop covering it.
-      - name: npm-audit-gate tests (.github/scripts)
-        working-directory: .
-        run: node --test .github/scripts/npm-audit-gate.test.mjs
-
       # Source-level CVE scanning is blocking here (unlike the report-only
       # Trivy container scan) per issue #1 and ADR-0005. Gated through
       # `.github/scripts/npm-audit-gate-cli.mjs` (issue #189) rather than
@@ -271,6 +299,64 @@ jobs:
       # see npm-audit-gate.mjs's header for why.
       - name: npm audit (gated by web/audit-allowlist.json)
         run: node ../.github/scripts/npm-audit-gate-cli.mjs
+
+  # ---------------------------------------------------------------------------
+  # A script under .github/scripts/ is effectively a small, private GitHub
+  # Action (issue #195). Nobody runs actions/checkout's own test suite on
+  # every invocation of actions/checkout — its tests run in ITS repo, when
+  # ITS code changes. This job is the in-repo equivalent: path-gated (see the
+  # `scripts` filter above for exactly what path and why it's `.github/**`,
+  # not the narrower `.github/scripts/**`). Do NOT extend this gating to the
+  # npm audit step in the job above: that step scans a live, moving advisory
+  # database and must run on every PR regardless of what changed (issue
+  # #187) — only these two scripts' own unit tests are change-gated.
+  #
+  # Enforcement (issue #195 review): this job is one of release.yml's
+  # `verify-green-commit` required-check names, which treats a legitimate
+  # job-level skip as passing (issue #76) — same as it already does for
+  # `Backend integration (kind + KWOK)` / `E2E (Playwright)` / `Container
+  # scan (Trivy)`, all of which can also skip. It is NOT (yet) one of
+  # branch-protection ruleset 18831212's own required-status-check contexts
+  # (docs/agents/findings.md) — adding a job there is a repository setting
+  # only a maintainer can change; see this PR's description.
+  # ---------------------------------------------------------------------------
+
+  scripts:
+    name: Repo scripts (Node)
+    needs: changes
+    if: ${{ needs.changes.outputs.scripts == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      # PR-time coverage for release.yml's tag-computation module (issue #64,
+      # rule + rationale: ADR-0005 "Moving image tags") — release.yml itself
+      # is tag-triggered and can never run on this PR (see the module's own
+      # header). Explicit file, not a glob: `node --test` exits 0 with zero
+      # tests run if a glob matches nothing, which would silently stop
+      # covering it the moment the file were ever renamed or moved.
+      - name: Release image-tag computation tests (.github/scripts)
+        run: node --test .github/scripts/compute-image-tags.test.mjs
+
+      # PR-time coverage for the npm-audit-gate script the Frontend job's gate
+      # step runs (issue #189). NOT the "same rationale" as the tag-
+      # computation tests above (release.yml being tag-triggered doesn't
+      # apply here — npm-audit-gate-cli.mjs runs on every PR as the gate
+      # itself). The real reason: the live gate step only ever exercises the
+      # PASS path on a clean tree, so every FAILURE path — an expired waiver,
+      # a malformed allowlist, the fail-closed JSON shapes, the entry point
+      # that must never silently exit 0 — is covered only here, by the unit
+      # tests. Three separate silent-green defects in this file were found
+      # via this coverage across #193's review rounds.
+      - name: npm-audit-gate tests (.github/scripts)
+        run: node --test .github/scripts/npm-audit-gate.test.mjs
 
   # ---------------------------------------------------------------------------
   # Heavier, second-tier checks (issue #8). Separate jobs so the fast tier

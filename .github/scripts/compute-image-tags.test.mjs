@@ -11,9 +11,11 @@
 // (the explicit file, not a glob or the bare directory — see the CI/Taskfile
 // call sites' own comments for why: a glob that stops matching exits 0 with
 // zero tests run instead of failing).
-// Wired into CI via: build.yml's Frontend (Node) job (its own named step)
-// AND the root Taskfile's aggregate `test:` task (so `task test` locally,
-// and the Backend (Go) job's `task test` step in CI, exercise it too).
+// Wired into CI via: build.yml's path-gated `Repo scripts (Node)` job (its
+// own named step, issue #195) AND the root Taskfile's aggregate `test:`
+// task (so plain `task test` locally exercises it too — but NOT the
+// Backend (Go) job in CI, which since issue #195 calls the Go-only
+// `test:go` sibling instead).
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'

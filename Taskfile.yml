@@ -61,6 +61,24 @@ tasks:
       # would otherwise pick up as part of this module's build/test graph.
       - go test ./cmd/... ./internal/...
 
+  test:go:
+    desc: Run only the Go test suites (issue #195) — what CI's Backend (Go) job calls; see `test` for everything.
+    cmds:
+      # Go-only counterpart of `test`, above (issue #195): CI's Backend job
+      # called plain `task test` (this file's run-everything convenience),
+      # which meant its own `Test` step re-ran the entire frontend
+      # Vitest/capture/script suites the Frontend job had already run —
+      # measured at ~58s of pure duplication per run (build.yml/nightly.yml
+      # now call this target instead).
+      #
+      # Scoped to our own Go packages rather than "./..." for the same
+      # reason as `test`, above (the stray-vendored-.go-files risk from
+      # web/node_modules). The new fact here: in CI that directory already
+      # exists by the time this runs regardless of whether `web:test` ran —
+      # created by the Backend job's own `Build` step (`task build` ->
+      # `release:frontend` -> `web:build`, which depends on `web:install`).
+      - go test ./cmd/... ./internal/...
+
   vet:
     desc: Vet all Go packages.
     cmds:

@@ -131,17 +131,42 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Must match the job `name:` fields in build.yml exactly (they are
-          # the same required-status-check contexts branch protection
-          # enforces on `main` — see docs/agents/findings.md). Including
-          # "Detect changed paths" is a harmless superset even though it isn't
-          # itself a required check: unlike the three heavy jobs it never
-          # skips, so it always resolves to a real success/failure and can
-          # never cause a false failure here.
+          # Must match the job `name:` fields in build.yml exactly. Most of
+          # these are the same required-status-check contexts branch
+          # protection enforces on `main` (ruleset 18831212 — see
+          # docs/agents/findings.md), but this list is intentionally a
+          # SUPERSET of that ruleset, not identical to it:
+          #   * "Detect changed paths" is a harmless superset even though it
+          #     isn't itself a required check: unlike the jobs it gates, it
+          #     never skips, so it always resolves to a real success/failure
+          #     and can never cause a false failure here.
+          #   * "Repo scripts (Node)" (issue #195) is path-gated on
+          #     .github/** and, like the three heavy jobs below it, CAN
+          #     legitimately skip — the case statement below already treats
+          #     "success" and "skipped" the same way, so including it here
+          #     is safe. It is included on the same principle as the rest of
+          #     this list: release.yml must not let a red/never-run check
+          #     through, and adding a new build.yml job here is the only
+          #     enforcement point this workflow can change on its own. It is
+          #     NOT (yet) one of ruleset 18831212's own required-status-check
+          #     contexts — that's a repository setting, not something a
+          #     workflow file controls, and is a maintainer action tracked
+          #     separately in issue #199.
+          #
+          #   Consequence of adding a NEW name here: a commit whose build.yml
+          #   run predates this list's merge never posted a "Repo scripts
+          #   (Node)" check-run at all, so it hits the `missing` branch below,
+          #   not `failed` — the poll below runs out its full 20-minute
+          #   timeout and then fails loudly (see the timeout branch further
+          #   down) rather than silently passing. That's the correct
+          #   fail-safe behavior, just a slow one; it only bites a tag pushed
+          #   at an old `main` commit, never a tag pushed at current `main`
+          #   HEAD after this merge (which always has the check).
           required=(
             "Detect changed paths"
             "Backend (Go)"
             "Frontend (Node)"
+            "Repo scripts (Node)"
             "Backend integration (kind + KWOK)"
             "E2E (Playwright)"
             "Container scan (Trivy)"
@@ -503,7 +528,8 @@ jobs:
       # unit-tested JS module rather than inline shell specifically because
       # this workflow is tag-triggered and can NEVER be exercised by PR CI
       # (issue #156's lesson) — the module is what gets real PR-time
-      # coverage instead (build.yml's Frontend (Node) job).
+      # coverage instead (build.yml's path-gated `Repo scripts (Node)` job,
+      # issue #195).
       #
       # Reads tags from THIS checkout (fetch-depth: 0 above) rather than
       # querying the registry: cheaper, and avoids an extra authenticated

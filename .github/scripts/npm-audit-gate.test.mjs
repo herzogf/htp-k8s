@@ -9,8 +9,8 @@
 // Run directly: `node --test .github/scripts/npm-audit-gate.test.mjs`
 // (the explicit file, not a glob — see compute-image-tags.test.mjs's own
 // comment for why a glob is the wrong call here).
-// Wired into CI via build.yml's Frontend (Node) job, mirroring the existing
-// "Release image-tag computation tests" step.
+// Wired into CI via build.yml's path-gated `Repo scripts (Node)` job (issue
+// #195), alongside the "Release image-tag computation tests" step.
 //
 // The guiding constraint under test throughout: FAIL CLOSED. Every
 // malformed-input case below asserts a thrown error, never a silent pass.
