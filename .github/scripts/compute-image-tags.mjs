@@ -10,8 +10,8 @@
 // thin wrapper, rather than the inline shell this replaced — release.yml
 // only ever runs on a real `v*` tag push, so PR CI can NEVER exercise it
 // directly (issue #156). A pure module gets real PR-time coverage instead,
-// via compute-image-tags.test.mjs (wired into build.yml's Frontend (Node)
-// job and the root `task test`).
+// via compute-image-tags.test.mjs (wired into build.yml's path-gated `Repo
+// scripts (Node)` job, issue #195, and the root `task test`).
 //
 // THE RULE, precisely — pinned here (not just in the ADR's prose) because
 // this exact wording is what the code must match, and prose can drift from
