@@ -339,7 +339,7 @@ jobs:
 
       # GoReleaser's `sboms` block shells out to `syft`; put it on PATH.
       - name: Install Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
 
       # GoReleaser's `before` hook runs `task release:frontend` (codegen + vite
       # build + embed), so the archived binaries carry the real UI (ADR-0001).
@@ -763,7 +763,7 @@ jobs:
       # release. The invariant: a real SARIF lands in the Security tab for
       # EVERY scanned platform, or the build fails.
       - name: Upload Trivy SARIF to Security tab
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: trivy-results.sarif
           category: ${{ steps.category.outputs.value }}
